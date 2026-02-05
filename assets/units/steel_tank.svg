@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="steelArmor" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#C0C0C0"/>
+      <stop offset="30%" stop-color="#808080"/>
+      <stop offset="70%" stop-color="#555555"/>
+      <stop offset="100%" stop-color="#2F2F2F"/>
+    </linearGradient>
+    <pattern id="camouflage" x="0" y="0" width="8" height="8" patternUnits="userSpaceOnUse">
+      <rect width="8" height="8" fill="#4F4F2F"/>
+      <circle cx="2" cy="2" r="2" fill="#5F5F3F"/>
+      <circle cx="6" cy="6" r="1.5" fill="#3F3F1F"/>
+    </pattern>
+  </defs>
+  
+  <!-- Tank hull -->
+  <rect x="8" y="36" width="44" height="20" fill="url(#steelArmor)" rx="3"/>
+  <rect x="10" y="38" width="40" height="16" fill="url(#camouflage)" rx="2"/>
+  
+  <!-- Track system -->
+  <rect x="6" y="54" width="48" height="8" fill="#2F2F2F" rx="4"/>
+  
+  <!-- Road wheels -->
+  <circle cx="12" cy="58" r="3" fill="#1A1A1A"/>
+  <circle cx="20" cy="58" r="3" fill="#1A1A1A"/>
+  <circle cx="28" cy="58" r="3" fill="#1A1A1A"/>
+  <circle cx="36" cy="58" r="3" fill="#1A1A1A"/>
+  <circle cx="44" cy="58" r="3" fill="#1A1A1A"/>
+  <circle cx="52" cy="58" r="3" fill="#1A1A1A"/>
+  
+  <!-- Drive sprockets -->
+  <circle cx="12" cy="58" r="1.5" fill="#808080"/>
+  <circle cx="52" cy="58" r="1.5" fill="#808080"/>
+  
+  <!-- Turret -->
+  <ellipse cx="30" cy="32" rx="12" ry="8" fill="url(#steelArmor)"/>
+  <ellipse cx="30" cy="30" rx="10" ry="6" fill="url(#camouflage)"/>
+  
+  <!-- Main gun (75mm) -->
+  <rect x="42" y="28" width="20" height="4" fill="url(#steelArmor)"/>
+  <rect x="58" y="29" width="4" height="2" fill="#2F2F2F"/>
+  <circle cx="62" cy="30" r="1" fill="#1A1A1A"/>
+  
+  <!-- Turret details -->
+  <rect x="26" y="26" width="8" height="3" fill="#808080"/>
+  <circle cx="30" cy="27" r="1" fill="#1A1A1A"/>
+  
+  <!-- Hull machine gun -->
+  <rect x="18" y="44" width="6" height="2" fill="#2F2F2F"/>
+  <circle cx="24" cy="45" r="0.5" fill="#1A1A1A"/>
+  
+  <!-- Vision ports -->
+  <rect x="14" y="40" width="3" height="1.5" fill="#000080"/>
+  <rect x="46" y="40" width="3" height="1.5" fill="#000080"/>
+  
+  <!-- Armor panels -->
+  <rect x="10" y="48" width="40" height="1" fill="#555555"/>
+  <rect x="12" y="42" width="36" height="1" fill="#555555"/>
+  
+  <!-- Spare fuel tanks -->
+  <ellipse cx="48" cy="38" rx="3" ry="2" fill="#2F2F2F"/>
+  <ellipse cx="48" cy="46" rx="3" ry="2" fill="#2F2F2F"/>
+</svg>

@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <pattern id="furTexture" x="0" y="0" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="4" fill="#8B4513"/>
+      <circle cx="1" cy="1" r="0.7" fill="#654321"/>
+      <circle cx="3" cy="3" r="0.5" fill="#A0522D"/>
+    </pattern>
+  </defs>
+  
+  <!-- Muscular primitive body -->
+  <ellipse cx="32" cy="50" rx="14" ry="10" fill="#D2B48C"/>
+  
+  <!-- Animal hide loincloth -->
+  <path d="M18 36 L46 36 Q50 38 46 52 L18 52 Q14 38 18 36 Z" fill="url(#furTexture)"/>
+  <path d="M26 52 L38 52 L36 60 L28 60 Z" fill="url(#furTexture)"/>
+  
+  <!-- Powerful arms -->
+  <ellipse cx="16" cy="32" rx="6" ry="4" fill="#C19A6B" transform="rotate(-25 16 32)"/>
+  <ellipse cx="48" cy="32" rx="6" ry="4" fill="#C19A6B" transform="rotate(25 48 32)"/>
+  
+  <!-- Large caveman head -->
+  <circle cx="32" cy="20" r="10" fill="#D2B48C"/>
+  
+  <!-- Wild unkempt hair -->
+  <path d="M22 16 Q26 8 32 10 Q38 8 42 16" stroke="#4A3C1A" stroke-width="4" fill="none"/>
+  <path d="M20 20 Q24 12 28 18" stroke="#4A3C1A" stroke-width="3" fill="none"/>
+  <path d="M36 18 Q40 12 44 20" stroke="#4A3C1A" stroke-width="3" fill="none"/>
+  
+  <!-- Massive wooden club -->
+  <rect x="8" y="20" width="6" height="20" fill="#8B4513" transform="rotate(30 11 30)"/>
+  <ellipse cx="6" cy="14" rx="8" ry="6" fill="#696969"/>
+  <ellipse cx="4" cy="12" rx="3" ry="2" fill="#555"/>
+  
+  <!-- Fierce caveman face -->
+  <circle cx="28" cy="18" r="1.5" fill="#000"/>
+  <circle cx="36" cy="18" r="1.5" fill="#000"/>
+  <path d="M26 26 Q32 30 38 26" stroke="#A0522D" stroke-width="2" fill="none"/>
+  
+  <!-- Battle scars -->
+  <line x1="40" y1="14" x2="42" y2="18" stroke="#A0522D" stroke-width="1"/>
+  <line x1="22" y1="24" x2="24" y2="26" stroke="#A0522D" stroke-width="1"/>
+  
+  <!-- Strong legs -->
+  <ellipse cx="26" cy="58" rx="4" ry="4" fill="#D2B48C"/>
+  <ellipse cx="38" cy="58" rx="4" ry="4" fill="#D2B48C"/>
+</svg>

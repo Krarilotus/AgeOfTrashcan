@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Horse body -->
+  <ellipse cx="32" cy="38" rx="18" ry="12" fill="#8B4513" stroke="#5C2E0A" stroke-width="1.5"/>
+  <!-- Horse head -->
+  <ellipse cx="48" cy="30" rx="6" ry="8" fill="#8B4513" stroke="#5C2E0A" stroke-width="1.5"/>
+  <!-- Horse legs -->
+  <rect x="22" y="44" width="3" height="12" fill="#5C2E0A" rx="1"/>
+  <rect x="28" y="44" width="3" height="12" fill="#5C2E0A" rx="1"/>
+  <rect x="35" y="44" width="3" height="12" fill="#5C2E0A" rx="1"/>
+  <rect x="41" y="44" width="3" height="12" fill="#5C2E0A" rx="1"/>
+  <!-- Rider body -->
+  <rect x="26" y="22" width="12" height="16" fill="#4A4A4A" stroke="#2C2C2C" stroke-width="1.5" rx="2"/>
+  <!-- Rider helmet -->
+  <circle cx="32" cy="18" r="6" fill="#C0C0C0" stroke="#808080" stroke-width="1.5"/>
+  <rect x="29" y="16" width="6" height="3" fill="#606060"/>
+  <!-- Shield -->
+  <ellipse cx="22" cy="28" rx="5" ry="7" fill="#DC143C" stroke="#8B0000" stroke-width="1.5"/>
+  <path d="M22 23 L22 33" stroke="#FFD700" stroke-width="1.5"/>
+  <!-- Lance -->
+  <line x1="42" y1="20" x2="56" y2="12" stroke="#8B4513" stroke-width="2.5"/>
+  <polygon points="56,12 60,10 58,14" fill="#C0C0C0" stroke="#808080" stroke-width="1"/>
+  <!-- Horse armor -->
+  <path d="M24 32 L40 32 L38 38 L26 38 Z" fill="#A9A9A9" opacity="0.7"/>
+</svg>

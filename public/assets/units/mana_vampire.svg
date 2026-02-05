@@ -1,0 +1,13 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Mana Vampire - Purple robed figure with glowing energy -->
+  <circle cx="32" cy="28" r="8" fill="#1a0033"/>
+  <path d="M32 36 L26 50 L22 60 L32 58 L42 60 L38 50 Z" fill="#4B0082"/>
+  <rect x="26" y="34" width="12" height="8" rx="2" fill="#6A0DAD"/>
+  <circle cx="28" cy="26" r="2" fill="#FF00FF"/>
+  <circle cx="36" cy="26" r="2" fill="#FF00FF"/>
+  <path d="M24 32 Q22 40 20 44" stroke="#9D00FF" stroke-width="2" fill="none"/>
+  <path d="M40 32 Q42 40 44 44" stroke="#9D00FF" stroke-width="2" fill="none"/>
+  <!-- Mana energy aura -->
+  <circle cx="32" cy="32" r="18" fill="none" stroke="#9D00FF" stroke-width="1" opacity="0.3"/>
+  <circle cx="32" cy="32" r="22" fill="none" stroke="#FF00FF" stroke-width="1" opacity="0.2"/>
+</svg>

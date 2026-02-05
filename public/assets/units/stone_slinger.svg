@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <pattern id="leatherPattern" x="0" y="0" width="3" height="3" patternUnits="userSpaceOnUse">
+      <rect width="3" height="3" fill="#8B4513"/>
+      <circle cx="1.5" cy="1.5" r="0.4" fill="#654321"/>
+    </pattern>
+  </defs>
+  
+  <!-- Lean hunter's body -->
+  <ellipse cx="32" cy="50" rx="10" ry="8" fill="#D2B48C"/>
+  
+  <!-- Leather hunting vest -->
+  <path d="M22 30 L42 30 Q44 32 42 50 L22 50 Q20 32 22 30 Z" fill="url(#leatherPattern)"/>
+  <path d="M26 30 L38 30 L36 36 L28 36 Z" fill="#8B4513"/>
+  
+  <!-- Dynamic throwing pose arms -->
+  <ellipse cx="14" cy="28" rx="5" ry="3" fill="#D2B48C" transform="rotate(-60 14 28)"/>
+  <ellipse cx="50" cy="32" rx="5" ry="3" fill="#D2B48C" transform="rotate(30 50 32)"/>
+  
+  <!-- Alert hunter's head -->
+  <circle cx="32" cy="20" r="8" fill="#D2B48C"/>
+  
+  <!-- Feathered headband -->
+  <rect x="24" y="16" width="16" height="2" fill="#654321"/>
+  <path d="M40 16 Q44 12 42 8 Q43 10 46 8" fill="#8B4513" stroke="#654321" stroke-width="0.5"/>
+  <path d="M40 16 Q44 14 42 10 Q43 12 44 10" fill="#A0522D" stroke="#654321" stroke-width="0.5"/>
+  
+  <!-- Sling in motion -->
+  <path d="M8 22 Q14 12 32 18 Q50 12 56 22" stroke="#D2691E" stroke-width="3" fill="none"/>
+  <circle cx="56" cy="22" r="3" fill="#696969"/>
+  <circle cx="54" cy="20" r="1" fill="#555"/>
+  
+  <!-- Sharp hunter's eyes -->
+  <circle cx="28" cy="18" r="1.5" fill="#000"/>
+  <circle cx="36" cy="18" r="1.5" fill="#000"/>
+  <circle cx="28.5" cy="17.5" r="0.4" fill="#FFF"/>
+  <circle cx="36.5" cy="17.5" r="0.4" fill="#FFF"/>
+  
+  <!-- Focused expression -->
+  <path d="M26 24 Q32 26 38 24" stroke="#A0522D" stroke-width="1.5" fill="none"/>
+  
+  <!-- Stone pouch -->
+  <ellipse cx="46" cy="44" rx="6" ry="4" fill="#654321"/>
+  <circle cx="44" cy="42" r="1" fill="#696969"/>
+  <circle cx="48" cy="44" r="0.8" fill="#808080"/>
+  <circle cx="46" cy="46" r="1.2" fill="#555"/>
+  
+  <!-- Strong hunter's legs -->
+  <ellipse cx="26" cy="58" rx="5" ry="4" fill="#D2B48C"/>
+  <ellipse cx="38" cy="58" rx="5" ry="4" fill="#D2B48C"/>
+</svg>

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Head -->
+  <circle cx="28" cy="18" r="6" fill="#F5DEB3" />
+  <!-- Military helmet -->
+  <path d="M22 15 Q28 8 34 15 Q31 10 28 10 Q25 10 22 15" fill="#556B2F" />
+  <!-- Helmet strap -->
+  <path d="M22 19 Q28 22 34 19" stroke="#2F2F2F" stroke-width="1" fill="none" />
+  <!-- Body uniform -->
+  <rect x="24" y="28" width="10" height="18" fill="#6B8E23" rx="2" />
+  <!-- Uniform details -->
+  <rect x="27" y="30" width="4" height="8" fill="#556B2F" />
+  <circle cx="26" cy="32" r="1" fill="#FFD700" />
+  <circle cx="26" cy="35" r="1" fill="#FFD700" />
+  <!-- Arms -->
+  <ellipse cx="18" cy="34" rx="3" ry="7" fill="#F5DEB3" />
+  <ellipse cx="38" cy="34" rx="3" ry="7" fill="#F5DEB3" transform="rotate(-10 38 34)" />
+  <!-- Rifle -->
+  <rect x="40" y="28" width="16" height="2" fill="#8B4513" />
+  <rect x="54" y="27" width="4" height="4" fill="#2F2F2F" />
+  <!-- Rifle details -->
+  <rect x="45" y="29" width="6" height="1" fill="#2F2F2F" />
+  <!-- Bayonet -->
+  <polygon points="58,28 62,26 62,32 58,30" fill="#C0C0C0" />
+  <!-- Ammunition belt -->
+  <rect x="20" y="38" width="12" height="2" fill="#8B4513" />
+  <rect x="21" y="37" width="2" height="4" fill="#DAA520" />
+  <rect x="24" y="37" width="2" height="4" fill="#DAA520" />
+  <rect x="27" y="37" width="2" height="4" fill="#DAA520" />
+  <rect x="30" y="37" width="2" height="4" fill="#DAA520" />
+  <!-- Boots -->
+  <rect x="26" y="46" width="4" height="12" fill="#2F2F2F" />
+  <rect x="30" y="46" width="4" height="12" fill="#2F2F2F" />
+</svg>

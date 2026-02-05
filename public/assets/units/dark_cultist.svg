@@ -1,0 +1,19 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Dark Cultist - Futuristic dark mage with energy tendrils -->
+  <circle cx="32" cy="26" r="9" fill="#0a0a1a"/>
+  <path d="M32 35 L24 52 L20 62 L32 60 L44 62 L40 52 Z" fill="#1a0033"/>
+  <rect x="25" y="32" width="14" height="10" rx="3" fill="#2D004E"/>
+  <circle cx="28" cy="24" r="2.5" fill="#00FFFF"/>
+  <circle cx="36" cy="24" r="2.5" fill="#00FFFF"/>
+  <!-- Dark energy tendrils -->
+  <path d="M20 40 Q16 36 14 32" stroke="#4B0082" stroke-width="2.5" fill="none" opacity="0.8"/>
+  <path d="M44 40 Q48 36 50 32" stroke="#4B0082" stroke-width="2.5" fill="none" opacity="0.8"/>
+  <path d="M22 46 Q18 44 16 40" stroke="#6A0DAD" stroke-width="2" fill="none" opacity="0.6"/>
+  <path d="M42 46 Q46 44 48 40" stroke="#6A0DAD" stroke-width="2" fill="none" opacity="0.6"/>
+  <!-- Power core -->
+  <circle cx="32" cy="40" r="4" fill="#9D00FF" opacity="0.6"/>
+  <circle cx="32" cy="40" r="6" fill="none" stroke="#00FFFF" stroke-width="1.5" opacity="0.4"/>
+  <!-- Floating runes -->
+  <text x="24" y="20" font-size="8" fill="#9D00FF" opacity="0.5">✧</text>
+  <text x="38" y="18" font-size="8" fill="#9D00FF" opacity="0.5">✧</text>
+</svg>

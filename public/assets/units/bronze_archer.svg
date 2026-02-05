@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bronzeLeather" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D2B48C"/>
+      <stop offset="50%" stop-color="#CD7F32"/>
+      <stop offset="100%" stop-color="#8B4513"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Archer's lean body -->
+  <ellipse cx="32" cy="50" rx="8" ry="6" fill="#D2B48C"/>
+  
+  <!-- Leather archer's tunic -->
+  <path d="M24 32 L40 32 Q42 34 40 50 L24 50 Q22 34 24 32 Z" fill="url(#bronzeLeather)"/>
+  <rect x="26" y="34" width="12" height="1" fill="#8B4513"/>
+  <rect x="28" y="38" width="8" height="1" fill="#8B4513"/>
+  
+  <!-- Drawing arm (right) -->
+  <ellipse cx="48" cy="28" rx="4" ry="2.5" fill="#D2B48C" transform="rotate(30 48 28)"/>
+  <!-- Bow arm (left) -->
+  <ellipse cx="16" cy="32" rx="4" ry="2.5" fill="#D2B48C" transform="rotate(-30 16 32)"/>
+  
+  <!-- Archer's head -->
+  <circle cx="32" cy="20" r="7" fill="#D2B48C"/>
+  
+  <!-- Focused archer's eyes -->
+  <circle cx="28" cy="18" r="1.2" fill="#000"/>
+  <circle cx="36" cy="18" r="1.2" fill="#000"/>
+  <circle cx="28.3" cy="17.7" r="0.3" fill="#FFF"/>
+  <circle cx="36.3" cy="17.7" r="0.3" fill="#FFF"/>
+  
+  <!-- Determined mouth -->
+  <path d="M28 24 Q32 25 36 24" stroke="#8B4513" stroke-width="1" fill="none"/>
+  
+  <!-- Bronze-tipped composite bow -->
+  <path d="M12 20 Q20 16 28 20 Q36 24 44 20 Q52 16 60 20" stroke="#8B4513" stroke-width="3" fill="none"/>
+  <circle cx="12" cy="20" r="1" fill="#CD7F32"/>
+  <circle cx="60" cy="20" r="1" fill="#CD7F32"/>
+  
+  <!-- Bowstring -->
+  <line x1="12" y1="20" x2="60" y2="20" stroke="#D2691E" stroke-width="1"/>
+  
+  <!-- Arrow being drawn -->
+  <rect x="44" y="19" width="16" height="1" fill="#8B4513"/>
+  <path d="M44 19 L48 17 L48 21 Z" fill="#CD7F32"/>
+  <path d="M60 18 L64 20 L60 22 Z" fill="#8B4513"/>
+  
+  <!-- Quiver on back -->
+  <ellipse cx="38" cy="35" rx="3" ry="8" fill="#8B4513"/>
+  <rect x="37" y="27" width="2" height="8" fill="#CD7F32"/>
+  <rect x="38" y="27" width="1" height="8" fill="#8B4513"/>
+  <rect x="39" y="29" width="1" height="6" fill="#8B4513"/>
+  
+  <!-- Leather bracers -->
+  <rect x="14" y="30" width="4" height="2" fill="#8B4513"/>
+  <rect x="46" y="26" width="4" height="2" fill="#8B4513"/>
+  
+  <!-- Strong archer's legs -->
+  <ellipse cx="28" cy="58" rx="4" ry="4" fill="#D2B48C"/>
+  <ellipse cx="36" cy="58" rx="4" ry="4" fill="#D2B48C"/>
+</svg>

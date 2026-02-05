@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Trebuchet base -->
+  <rect x="20" y="45" width="24" height="6" fill="#654321" stroke="#3E2A14" stroke-width="1.5" rx="1"/>
+  <!-- Support beams -->
+  <polygon points="24,45 28,28 32,28 28,45" fill="#8B6914" stroke="#654321" stroke-width="1.5"/>
+  <polygon points="40,45 36,28 32,28 36,45" fill="#8B6914" stroke="#654321" stroke-width="1.5"/>
+  <!-- Horizontal beam -->
+  <rect x="28" y="26" width="8" height="3" fill="#654321" stroke="#3E2A14" stroke-width="1"/>
+  <!-- Throwing arm -->
+  <line x1="32" y1="27" x2="42" y2="15" stroke="#8B6914" stroke-width="3"/>
+  <!-- Counterweight -->
+  <circle cx="26" cy="32" r="5" fill="#696969" stroke="#404040" stroke-width="1.5"/>
+  <!-- Projectile basket -->
+  <rect x="40" y="12" width="6" height="6" fill="#8B4513" stroke="#654321" stroke-width="1" rx="1"/>
+  <circle cx="43" cy="14" r="2" fill="#808080"/>
+  <!-- Rope -->
+  <path d="M32 27 Q36 22 40 15" stroke="#8B7355" stroke-width="1.5" fill="none"/>
+  <!-- Engineer figure -->
+  <circle cx="14" cy="38" r="4" fill="#F5DEB3" stroke="#D2B48C" stroke-width="1"/>
+  <rect x="11" y="42" width="6" height="8" fill="#4169E1" stroke="#1E3A8A" stroke-width="1" rx="1"/>
+  <!-- Engineer arms working -->
+  <line x1="14" y1="44" x2="20" y2="44" stroke="#F5DEB3" stroke-width="2"/>
+  <!-- Tools -->
+  <line x1="12" y1="52" x2="16" y2="52" stroke="#696969" stroke-width="1.5"/>
+</svg>

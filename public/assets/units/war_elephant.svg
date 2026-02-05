@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="elephantGray" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#9E9E9E"/>
+      <stop offset="50%" stop-color="#757575"/>
+      <stop offset="100%" stop-color="#616161"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Massive elephant body -->
+  <ellipse cx="32" cy="46" rx="22" ry="14" fill="url(#elephantGray)"/>
+  
+  <!-- Elephant head -->
+  <ellipse cx="32" cy="30" rx="14" ry="12" fill="url(#elephantGray)"/>
+  
+  <!-- Long trunk -->
+  <path d="M32 36 Q28 42 26 50" stroke="url(#elephantGray)" stroke-width="6" fill="none" stroke-linecap="round"/>
+  
+  <!-- Tusks -->
+  <path d="M24 32 Q20 34 18 38" stroke="#FFFAF0" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M40 32 Q44 34 46 38" stroke="#FFFAF0" stroke-width="3" fill="none" stroke-linecap="round"/>
+  
+  <!-- Eyes -->
+  <circle cx="26" cy="28" r="2" fill="#000000"/>
+  <circle cx="38" cy="28" r="2" fill="#000000"/>
+  
+  <!-- Ears -->
+  <ellipse cx="18" cy="26" rx="6" ry="10" fill="#757575"/>
+  <ellipse cx="46" cy="26" rx="6" ry="10" fill="#757575"/>
+  
+  <!-- Battle armor/howdah on back -->
+  <rect x="22" y="36" width="20" height="8" fill="#8B4513" rx="2"/>
+  <rect x="24" y="34" width="16" height="3" fill="#CD7F32"/>
+  
+  <!-- Armored rider -->
+  <circle cx="32" cy="30" r="4" fill="#D2A679"/>
+  <rect x="30" y="26" width="4" height="4" fill="#708090"/>
+  
+  <!-- Spear -->
+  <line x1="38" y1="28" x2="44" y2="22" stroke="#8B4513" stroke-width="2"/>
+  <polygon points="44,22 46,20 47,23" fill="#C0C0C0"/>
+  
+  <!-- Legs (thick) -->
+  <rect x="18" y="56" width="6" height="8" fill="#757575" rx="2"/>
+  <rect x="28" y="56" width="6" height="8" fill="#757575" rx="2"/>
+  <rect x="40" y="56" width="6" height="8" fill="#757575" rx="2"/>
+</svg>
