@@ -30,6 +30,7 @@ import { BalancedAI } from './ai/behaviors';
 import type { GameStateSnapshot, AIDecision, RecruitUnitParams } from './ai/AIBehavior';
 
 const FIXED_TIMESTEP = 1000 / 60; // ~16.67ms for 60 FPS
+const baseHalfSize = 30; // Original half size
 
 // Re-export UNIT_DEFS for backward compatibility
 export { UNIT_DEFS };
@@ -85,6 +86,9 @@ export interface Projectile {
   damage: number;
   lifeMs: number;
   manaLeech?: number; // Amount of mana to restore to owner on hit
+  delayMs?: number; // Time before projectile becomes active/visible
+  isFalling?: boolean; // If true, collisions only happen near ground (y approx 0)
+  targetY?: number; // Y position to target for falling projectiles
 }
 
 export interface GameState {
@@ -173,6 +177,10 @@ export class GameEngine {
   private skillSystem: SkillSystem;
   private combatUtils: CombatUtils = new CombatUtils();
   private aiController: AIController; // NEW: Modular AI system
+  
+  // Track one-time bonuses for Cyber Assassin
+  private enemyCyberAssassin6kBonusUsed = false;
+  private enemyCyberAssassin12kBonusUsed = false;
 
   public getAIController(): AIController {
     return this.aiController;
@@ -293,9 +301,9 @@ export class GameEngine {
         },
       },
       battlefield: {
-        width: 50, // Total battlefield width (calculated as playerHalfWidth + enemyHalfWidth)
-        playerHalfWidth: 25, // Player's territory (left half)
-        enemyHalfWidth: 25, // Enemy's territory (right half)
+        width: 2 * baseHalfSize, // Total battlefield width (calculated as playerHalfWidth + enemyHalfWidth)
+        playerHalfWidth: baseHalfSize, // Player's territory (left half)
+        enemyHalfWidth: baseHalfSize, // Enemy's territory (right half)
       },
       playerQueue: [],
       enemyQueue: [],
@@ -512,10 +520,41 @@ export class GameEngine {
       transform: { x: baseX, laneY: 0, facing: isPlayer ? 'RIGHT' : 'LEFT' },
       kinematics: { vx: isPlayer ? unitDef.speed : -unitDef.speed, vy: 0 },
       health: { current: unitDef.health, max: unitDef.health },
-      attack: { damage: unitDef.damage, range: unitDef.range ?? 1, speed: 1, cooldownRemaining: 0 },
+      attack: { 
+          damage: unitDef.damage, 
+          range: unitDef.range ?? 1, 
+          speed: unitDef.attackSpeed ?? 1.0, 
+          cooldownRemaining: 0 
+      },
       skillCooldownRemaining: 0,
       animationState: 'IDLE',
     };
+
+    // SPECIAL RULE: Cyber Assassin 10x HP Bonus at 6k and 12k mana (once each)
+    if (!isPlayer && actualUnitId === 'cyber_assassin') {
+        const currentMana = this.state.economy.enemy.mana;
+        let appliedBonus = false;
+
+        // Check 12k threshold first (higher priority)
+        if (currentMana >= 12000 && !this.enemyCyberAssassin12kBonusUsed) {
+            this.enemyCyberAssassin12kBonusUsed = true;
+            appliedBonus = true;
+            console.log("Cyber Assassin triggered 12k Mana Bonus (10x HP)!");
+        } 
+        // Check 6k threshold
+        else if (currentMana >= 6000 && !this.enemyCyberAssassin6kBonusUsed) {
+            this.enemyCyberAssassin6kBonusUsed = true;
+            appliedBonus = true;
+            console.log("Cyber Assassin triggered 6k Mana Bonus (10x HP)!");
+        }
+
+        if (appliedBonus) {
+            entity.health.max *= 10;
+            entity.health.current = entity.health.max;
+            // Visual flair for super unit? Maybe scale it up slightly
+             // Accessing scaling would require RenderSystem changes, but we can assume normal size
+        }
+    }
 
     // Initialize burst fire state if unit has burst fire capability
     if (unitDef.burstFire) {
@@ -678,6 +717,26 @@ export class GameEngine {
       case 'WAIT':
         // Do nothing - AI is waiting for resources or opportunity
         break;
+
+      case 'REPAIR_BASE':
+        if (this.state.economy.enemy.mana >= 500) {
+            this.state.economy.enemy.mana -= 500;
+            this.state.enemyBase.health = Math.min(
+                this.state.enemyBase.maxHealth,
+                this.state.enemyBase.health + 200
+            );
+            // Visual effect for repair
+            this.state.vfx.push({
+                id: this.state.nextVfxId++,
+                type: 'ability_cast', // Reusing cast effect
+                x: this.state.enemyBase.x,
+                y: 0,
+                age: 0,
+                lifeMs: 1000
+            });
+            console.log("AI Repaired Base: -500 Mana, +200 HP");
+        }
+        break;
     }
   }
 
@@ -781,7 +840,6 @@ export class GameEngine {
     prog.ageProgress.costGold = getAgeUpgradeCost(prog.age);
     
     // Expand battlefield from the middle - both halves grow to maintain symmetry
-    const baseHalfSize = 25; // Original half size
     const expansionFactor = 1 + prog.age * 0.2;
     
     // Both halves expand equally when any player ages up to maintain center point

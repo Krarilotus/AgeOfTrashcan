@@ -26,11 +26,15 @@ export interface TeleporterAbility {
   canAttackBase: boolean; // Whether it can attack the enemy base
 }
 
+export type UnitRole = 'TANK' | 'BRUISER' | 'MELEE_DPS' | 'RANGED_DPS' | 'SUPPORT' | 'FRONTLINE' | 'SIEGE';
+
 export interface UnitDef {
   cost: number;
+  role?: UnitRole[]; // Classification tags: e.g. ['TANK', 'FRONTLINE']
   health: number;
   damage: number;
   speed: number;
+  attackSpeed?: number; // Attacks per second (default 1.0)
   range?: number;
   trainingMs?: number;
   age?: number;
@@ -52,6 +56,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   // ===== AGE 1: Stone Age =====
   stone_clubman: {
     cost: 15,
+    role: ['MELEE_DPS', 'FRONTLINE'],
     health: 45,
     damage: 6,
     speed: 4.5,
@@ -61,6 +66,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   stone_slinger: {
     cost: 25,
+    role: ['RANGED_DPS'],
     health: 18,
     damage: 8,
     speed: 5.0,
@@ -70,6 +76,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   stone_dino: {
     cost: 100,
+    role: ['TANK', 'FRONTLINE'],
     health: 120,
     damage: 12,
     speed: 2.5,
@@ -81,6 +88,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   // ===== AGE 2: Bronze Age =====
   bronze_spearman: {
     cost: 20,
+    role: ['TANK', 'FRONTLINE'],
     health: 65,
     damage: 10,
     speed: 5.5,
@@ -90,6 +98,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   bronze_archer: {
     cost: 30,
+    role: ['RANGED_DPS'],
     health: 22,
     damage: 10,
     speed: 5.8,
@@ -100,6 +109,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   bronze_catapult: {
     cost: 150,
+    role: ['RANGED_DPS', 'SIEGE', 'TANK'],
     health: 120,
     damage: 30,
     speed: 2.8,
@@ -114,6 +124,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   // ===== AGE 3: Iron Age =====
   iron_knight: {
     cost: 70,
+    role: ['TANK', 'FRONTLINE'],
     health: 230,
     damage: 24,
     speed: 4.8,
@@ -124,6 +135,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   iron_mage: {
     cost: 45,
+    role: ['SUPPORT', 'RANGED_DPS', 'SIEGE'],
     manaCost: 30,
     health: 50,
     damage: 5,
@@ -135,6 +147,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   iron_crossbow: {
     cost: 55,
+    role: ['RANGED_DPS'],
     health: 50,
     damage: 18,
     speed: 6.5,
@@ -145,6 +158,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   war_elephant: {
     cost: 200,
+    role: ['TANK', 'FRONTLINE'],
     health: 450,
     damage: 40,
     speed: 3.2,
@@ -156,6 +170,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   battle_monk: {
     cost: 65,
+    role: ['BRUISER', 'FRONTLINE'],
     manaCost: 16,
     health: 120,
     damage: 12,
@@ -163,12 +178,14 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
     range: 1,
     trainingMs: 2250,
     age: 3,
-    skill: { type: 'direct', manaCost: 5, cooldownMs: 8000, power: 100, range: 3 },
+    width: 0.8,
+    skill: { type: 'direct', manaCost: 5, cooldownMs: 8000, power: 250, range: 4 },
   },
 
   // ===== AGE 4: Steel Age =====
   steel_tank: {
     cost: 200,
+    role: ['TANK', 'FRONTLINE'],
     health: 550,
     damage: 48,
     speed: 4.5,
@@ -176,10 +193,11 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
     trainingMs: 5000,
     age: 4,
     visualScale: 1.5, // Large unit
-    width: 10,
+    width: 1,
   },
   artillery: {
     cost: 160,
+    role: ['RANGED_DPS', 'SIEGE'],
     health: 180,
     damage: 40,
     speed: 5.0,
@@ -192,6 +210,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   medic: {
     cost: 100,
+    role: ['SUPPORT'],
     manaCost: 40,
     health: 80,
     damage: 2,
@@ -203,6 +222,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   heavy_cavalry: {
     cost: 160,
+    role: ['BRUISER', 'FRONTLINE'],
     health: 450,
     damage: 55,
     speed: 7.5,
@@ -213,6 +233,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   siege_engineer: {
     cost: 120,
+    role: ['RANGED_DPS', 'SIEGE'],
     manaCost: 50,
     health: 150,
     damage: 35,
@@ -226,6 +247,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   // ===== AGE 5: Industrial Age =====
   gunner: {
     cost: 160,
+    role: ['RANGED_DPS'],
     health: 300,
     damage: 9,
     speed: 6.8,
@@ -236,6 +258,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   pyro_maniac: {
     cost: 80,
+    role: ['MELEE_DPS', 'FRONTLINE', 'SIEGE'],
     manaCost: 30,
     health: 140,
     damage: 18,
@@ -247,6 +270,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   energy_shield: {
     cost: 180,
+    role: ['TANK', 'FRONTLINE', 'SUPPORT'],
     manaCost: 60,
     health: 1200,
     damage: 8,
@@ -260,9 +284,10 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   flamethrower: {
     cost: 140,
+    role: ['RANGED_DPS', 'SUPPORT', 'SIEGE'],
     manaCost: 40,
     health: 260, 
-    damage: 10,
+    damage: 15,
     speed: 6.5,
     range: 8,
     trainingMs: 3500,
@@ -271,6 +296,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   steam_mech: {
     cost: 280,
+    role: ['TANK', 'FRONTLINE', 'MELEE_DPS'],
     manaCost: 70,
     health: 800,
     damage: 70,
@@ -282,6 +308,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   sniper: {
     cost: 130,
+    role: ['RANGED_DPS'],
     health: 170,
     damage: 45,
     speed: 6.8,
@@ -292,6 +319,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   mana_vampire: {
     cost: 200,
+    role: ['SUPPORT', 'RANGED_DPS'],
     manaCost: 45,
     health: 320,
     damage: 42,
@@ -308,6 +336,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   // ===== AGE 6: Future Age =====
   robot_soldier: {
     cost: 180,
+    role: ['BRUISER', 'FRONTLINE'],
     health: 850,
     damage: 50,
     speed: 7.5,
@@ -318,6 +347,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   laser_trooper: {
     cost: 120,
+    role: ['RANGED_DPS'],
     health: 360,
     damage: 70,
     speed: 8.0,
@@ -327,20 +357,22 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
     skill: { type: 'direct', manaCost: 4, cooldownMs: 5000, power: 150, range: 15 },
   },
   mech_walker: {
-    cost: 350,
-    manaCost: 50,
+    cost: 360,
+    role: ['TANK', 'FRONTLINE', 'MELEE_DPS'],
+    manaCost: 36,
     health: 2400,
-    damage: 170,
+    damage: 180,
     speed: 4.8,
     range: 1,
     trainingMs: 8000,
     age: 6,
     visualScale: 1.4,
     width: 1.4,
-    skill: { type: 'direct', manaCost: 15, cooldownMs: 10000, power: 300, range: 3 },
+    skill: { type: 'direct', manaCost: 15, cooldownMs: 10000, power: 400, range: 3 },
   },
   plasma_striker: {
     cost: 240,
+    role: ['RANGED_DPS'],
     manaCost: 60,
     health: 600,
     damage: 100,
@@ -352,31 +384,35 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   nanoswarm: {
     cost: 400,
-    manaCost: 80,
+    role: ['RANGED_DPS', 'SUPPORT'],
+    manaCost: 100,
     health: 1300,
-    damage: 10,
+    damage: 16,
     speed: 8.8,
     range: 20,
     trainingMs: 5500,
     age: 6,
-    manaLeech: 0.05,
-    skill: { type: 'aoe', manaCost: 5, cooldownMs: 2000, power: 40, damage: 20, range: 20 },
+    manaLeech: 0.1,
+    width: 0.6,
+    skill: { type: 'aoe', manaCost: 8, cooldownMs: 2000, power: 40, damage: 32, range: 20 },
   },
   titan_mech: {
     cost: 650,
+    role: ['TANK', 'FRONTLINE', 'SIEGE', 'MELEE_DPS'],
     manaCost: 80,
     health: 4000,
-    damage: 200,
+    damage: 250,
     speed: 4.2,
     range: 1,
     trainingMs: 11000,
     age: 6,
     visualScale: 1.8,
     width: 1.8,
-    skill: { type: 'aoe', manaCost: 70, cooldownMs: 13000, power: 50, damage: 150, range: 14 },
+    skill: { type: 'aoe', manaCost: 70, cooldownMs: 13000, power: 25, damage: 120, range: 5 },
   },
   cyber_assassin: {
     cost: 320,
+    role: ['MELEE_DPS'], // Removed TANK and FRONTLINE
     manaCost: 40,
     health: 560,
     damage: 60,
@@ -389,6 +425,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   burst_gunner: {
     cost: 220,
+    role: ['RANGED_DPS'],
     health: 560,
     damage: 5,
     speed: 6.2,
@@ -398,9 +435,10 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
     burstFire: { shots: 30, burstCooldown: 1500 },
   },
   dark_cultist: {
-    cost: 240,
+    cost: 500,
+    role: ['RANGED_DPS', 'SUPPORT'],
     manaCost: 60,
-    health: 640,
+    health: 800,
     damage: 15,
     speed: 7.0,
     range: 15,
@@ -408,10 +446,11 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
     age: 6,
     visualScale: 0.6,
     width: 1.5,
-    skill: { type: 'flamethrower', manaCost: 1, cooldownMs: 60, power: 8, range: 15 }, 
+    skill: { type: 'flamethrower', manaCost: 1, cooldownMs: 60, power: 12, range: 20 }, 
   },
   void_reaper: {
     cost: 10000,
+    role: ['TANK', 'SIEGE'],
     manaCost: 1000,
     health: 999,
     damage: 999,
@@ -429,6 +468,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
     // Added skill definition for AOE radius control
     skill: { type: 'aoe', manaCost: 50, cooldownMs: 3000, power: 4, damage: 999, range: 1 },
     manaShield: true, 
+    width: 0.0, // Non-blocking
   },
 };
 

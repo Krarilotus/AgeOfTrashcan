@@ -99,6 +99,7 @@ export type AIAction =
   | 'AGE_UP' // Advance to next age
   | 'UPGRADE_MANA' // Upgrade mana generation
   | 'BUILD_TURRET' // Build a turret
+  | 'REPAIR_BASE' // Repair base health using mana (Age 6+)
   | 'ACTIVATE_SKILL' // Use a unit skill
   | 'EXECUTE_ATTACK_GROUP'; // Execute a coordinated attack group
 
@@ -476,10 +477,17 @@ export class AIBehaviorUtils {
   ): number {
     let score = 0;
     
-    const isRanged = (unitDef.range ?? 1) > 1.5;
+    // Explicit Role Classification (multi-tag support)
+    const roles = unitDef.role || [];
+    
+    // Heuristic Fallbacks if no roles defined
+    const hasRole = (r: string) => roles.includes(r as any);
+    
+    const isRanged = roles.length > 0 ? (hasRole('RANGED_DPS') || hasRole('SUPPORT')) : (unitDef.range ?? 1) > 1.5;
     const isFast = unitDef.speed > 6.0;
-    // Lower tank threshold to 100 to catch Age 1 'Tanks' (Dino: 120hp)
-    const isTank = unitDef.health > 100;
+    
+    // Tank logic: Check 'TANK' or 'BRUISER' or fallback to HP
+    const isTank = roles.length > 0 ? (hasRole('TANK') || hasRole('BRUISER')) : unitDef.health > 100;
     const requiresMana = (unitDef.manaCost ?? 0) > 0;
     
     // BASE SCORE: Combat value (damage is more important than health)
@@ -498,14 +506,27 @@ export class AIBehaviorUtils {
     // we want that effectively to be a CONSTRAINT, not just a suggestion.
     if (!isRanged) score += personality.meleePreference * (personality.meleePreference > 1.5 ? 200 : 40);
     if (isRanged) score += personality.rangedPreference * (personality.rangedPreference > 1.5 ? 200 : 40);
-    if (isFast) score += personality.fastPreference * (personality.fastPreference > 1.5 ? 100 : 25);
+    
+    // Speed scoring
+    // Supports NEGATIVE fastPreference to specifically prefer SLOW units.
+    if (personality.fastPreference < 0) {
+        // Prefer SLOW: Score inversely proportional to speed
+        const speed = unitDef.speed || 3;
+        score += Math.max(0, 10 - speed) * Math.abs(personality.fastPreference) * 10;
+        
+        // HARSH Penalty for actual "Fast" units (>6.0)
+        if (isFast) score -= 300;
+        
+    } else {
+        // Original: Bonus for Fast units
+        if (isFast) score += personality.fastPreference * (personality.fastPreference > 1.5 ? 100 : 25);
+    }
+    
     if (isTank) score += personality.tankPreference * (personality.tankPreference > 1.5 ? 200 : 30);
     
     // MANA PREFERENCE FIX:
     // Only apply 'manaUnitPreference' boost/penalty if the unit is acting in a SUPPORT/CASTER role.
-    // If it's a "Frontline Caster" (e.g. Robot Soldier, Paladin) with Range=1, it shouldn't be penalized 
-    // when we are looking for Frontline, nor boosted when we are looking for Ranged Support.
-    const isSupportRole = requiresMana && (isRanged || unitDef.skill?.type === 'heal');
+    const isSupportRole = hasRole('SUPPORT') || (requiresMana && (isRanged || unitDef.skill?.type === 'heal'));
     
     if (isSupportRole) {
         score += personality.manaUnitPreference * 35;
@@ -540,7 +561,43 @@ export class AIBehaviorUtils {
     // We'll remove the penalty here so high-value Mana units score well naturally.
     // (The loop in findBestUnit handles the hard "can I afford it" check)
     
-    // Cost efficiency: Penalize units that are TOO cheap (unless fodder needed)
+    // VARIETY PENALTY (Diminishing Returns)
+    // Reduce score if we already have many of this unit type on the field
+    const countOnField = state.enemyUnits.filter(u => u.unitId === unitType).length;
+    if (countOnField > 3) {
+        score *= 0.85; // Slight penalty for spamming the same unit
+        if (countOnField > 6) score *= 0.85; // Cumulative
+    }
+
+    // SIEGE/AOE BIAS
+    // If unit is SIEGE type, apply situational bonus
+    if (hasRole('SIEGE')) {
+        const playerComp = this.analyzePlayerComposition(state);
+        // Bonus if enemy is swarming or has strong turret
+        if (playerComp.isSwarm) score *= 1.3; // +30% vs Swarm
+        if (state.playerTurretLevel >= 3) score *= 1.1; // +10% vs Strong Turret
+    }
+
+    // COST EFFICIENCY FACTOR
+    // Previous logic purely favored stats (Score) regardless of cost, leading to "Expensive = Better".
+    // We blend Raw Power (50%) with Cost Efficiency (50%).
+    // Use sqrt(cost) to avoid excessive bias toward cheap swarm units.
+    if (unitDef.cost > 0) {
+        const efficiency = combatValue / Math.sqrt(unitDef.cost);
+        // Normalize efficiency to be roughly comparable to raw score
+        // Raw score is approx combatValue. Efficiency is combatValue/10 roughly.
+        // Multiply efficiency by 12 to bring it to same magnitude.
+        const weightedEfficiency = efficiency * 12;
+        
+        // Blend: 60% Raw Power, 40% Efficiency
+        // If we allow efficiency to dominate, we get Knight spam. 
+        // If we allow Raw Power to dominate, we get Elephant spam.
+        // Balanced approach:
+        score = (score * 0.6) + (weightedEfficiency * 0.4);
+    }
+
+    // Cost efficiency check (Budget Ratio)
+    // Penalize units that are TOO cheap (unless fodder needed)
     // But do NOT penalize expensive units if we are rich.
     // Fixed Average Cost Scaling for higher ages
     const avgCostForAge = 40 * Math.pow(1.5, state.enemyAge - 1); // 1:40, 2:60, 3:90, 4:135, 5:202, 6:303
@@ -609,13 +666,14 @@ export class AIBehaviorUtils {
     hasRanged: boolean;
     hasMelee: boolean;
     hasTanks: boolean;
+    isSwarm: boolean;
     avgDamage: number;
     avgHealth: number;
     totalCount: number;
   } {
     if (state.playerUnits.length === 0) {
         return {
-            hasRanged: false, hasMelee: false, hasTanks: false,
+            hasRanged: false, hasMelee: false, hasTanks: false, isSwarm: false,
             avgDamage: 0, avgHealth: 0, totalCount: 0
         };
     }
@@ -636,14 +694,23 @@ export class AIBehaviorUtils {
         totalDmg += unit.damage;
         totalHp += unit.health;
     }
+    
+    const count = state.playerUnits.length;
+    const avgHealth = totalHp / count;
+    
+    // SWARM DEFINITION:
+    // 1. High unit count (> 3)
+    // 2. Low average health (< 200) - indicates mostly spam units
+    const isSwarm = count >= 4 && avgHealth < 200;
 
     return {
       hasRanged: rangedCount > 1, // At least 2 to consider it a threat pattern
       hasMelee: meleeCount > 0,
       hasTanks: tankCount > 0,
-      avgDamage: totalDmg / state.playerUnits.length,
-      avgHealth: totalHp / state.playerUnits.length,
-      totalCount: state.playerUnits.length
+      isSwarm,
+      avgDamage: totalDmg / count,
+      avgHealth: avgHealth,
+      totalCount: count
     };
   }
   
@@ -655,13 +722,16 @@ export class AIBehaviorUtils {
     hasRanged: boolean;
     hasMelee: boolean;
     hasTanks: boolean;
+    isSwarm: boolean;
   }): number {
     let bonus = 1.0;
     
     // REDUCED HP threshold for tanks in Age 1 to work properly (100hp+)
+    const roles = unitDef.role || [];
     const isRanged = (unitDef.range ?? 1) > 1.5;
-    const isTank = unitDef.health > 100; 
+    const isTank = roles.includes('TANK') || unitDef.health > 100; 
     const isFast = unitDef.speed > 6.0;
+    const isSiege = roles.includes('SIEGE') || unitDef.skill?.type === 'aoe' || unitDef.skill?.type === 'flamethrower';
     
     // Ranged units counter melee swarms
     if (isRanged && playerComp.hasMelee) {
@@ -681,6 +751,13 @@ export class AIBehaviorUtils {
     // High-damage units counter tanks
     if (unitDef.damage > 80 && playerComp.hasTanks) {
       bonus *= 1.3;
+    }
+    
+    // Siege/AOE counters Swarms
+    // User Request: "mix in if enemy has lots of smaller units"
+    if (isSiege && playerComp.isSwarm) {
+       // Strong bonus to prioritize splashing the swarm
+       bonus *= 1.6;
     }
     
     return bonus;
@@ -892,22 +969,31 @@ export class AIBehaviorUtils {
    * Returns true if unit would die before reaching the base
    * Uses EXACT formula from GameEngine.ts for accuracy
    */
-  static isEnemyTurretTooStrong(state: GameStateSnapshot, unitHealth: number, unitSpeed: number = 1.5): boolean {
+  static isEnemyTurretTooStrong(state: GameStateSnapshot, unitDef: UnitDef): boolean {
     const turretLevel = state.playerTurretLevel;
     if (turretLevel === 0) return false; // No turret
     
+    const unitHealth = unitDef.health;
+    const unitSpeed = unitDef.speed || 1.5;
+    const unitRange = unitDef.range || 1;
+
     // Use centralized configuration for turret stats
     const turretDPS = calculateTurretDPS(turretLevel);
     const turretRange = calculateTurretRange(turretLevel);
     
+    // Distance the unit must walk UNDER FIRE
+    // If unit has 5 range and turret has 20, it walks 15 units under fire.
+    // If unit has 25 range and turret has 20, it walks 0 units under fire.
+    const distanceUnderFire = Math.max(0, turretRange - unitRange);
+    
     // How long does unit spend in turret range?
-    const timeInRange = turretRange / unitSpeed;
+    const timeInRange = distanceUnderFire / unitSpeed;
     
     // How much damage will unit take?
     const damageFromTurret = turretDPS * timeInRange;
     
     // Unit needs to survive crossing the range + have HP to fight
-    // Add 30% safety margin
+    // Add 30% safety margin (Survivable damage must be < 70% of Max HP)
     return damageFromTurret >= unitHealth * 0.7;
   }
   

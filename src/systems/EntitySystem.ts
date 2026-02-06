@@ -41,6 +41,11 @@ export class EntitySystem {
 
       for (const [otherId, other] of state.entities) {
         if (id === otherId) continue;
+        
+        // GHOST LOGIC: If either unit has width roughly 0, they do not collide
+        const otherDef = UNIT_DEFS[other.unitId];
+        if ((unitDef?.width ?? 1) < 0.1 || (otherDef?.width ?? 1) < 0.1) continue;
+
         const dx = other.transform.x - entity.transform.x;
         const distance = Math.abs(dx);
         // Facing check: only blocked by things in front
@@ -258,26 +263,47 @@ export class EntitySystem {
             entity.attack.cooldownRemaining = 1 / Math.max(0.1, entity.attack.speed);
         }
      } else {
-         // Melee
-         const baseDmg = entity.attack.damage * deltaSeconds;
-         const protection = CombatUtils.getTowerProtectionMultiplier(target, state);
-         let dmg = baseDmg * protection;
-         
-         const targetDef = UNIT_DEFS[target.unitId];
-         if (targetDef?.teleporter) {
-            dmg *= (1 - targetDef.teleporter.damageReduction);
+         // Melee (Tick-based)
+         entity.attack.cooldownRemaining -= deltaSeconds;
+         if (entity.attack.cooldownRemaining <= 0) {
+             const baseDmg = entity.attack.damage; // Full damage per hit
+             const protection = CombatUtils.getTowerProtectionMultiplier(target, state);
+             let dmg = baseDmg * protection;
+             
+             const targetDef = UNIT_DEFS[target.unitId];
+             if (targetDef?.teleporter) {
+                dmg *= (1 - targetDef.teleporter.damageReduction);
+             }
+             
+             // Fix: Apply Mana Shield to melee damage as well
+             if (targetDef?.manaShield) {
+                 const ownerEcon = target.owner === 'PLAYER' ? state.economy.player : state.economy.enemy;
+                 const shieldableDamage = Math.floor(dmg * 0.9);
+                 // 1 Mana absorbs 2 Damage
+                 const manaNeeded = Math.ceil(shieldableDamage / 2);
+                 const manaUsed = Math.min(manaNeeded, ownerEcon.mana);
+                 const damageAbsorbed = manaUsed * 2;
+                 
+                 if (manaUsed > 0) {
+                    ownerEcon.mana -= manaUsed;
+                    dmg = Math.max(1, dmg - damageAbsorbed); // Min 1 dmg always penetrates
+                 }
+             }
+             
+             target.health.current -= dmg;
+             
+             if (unitDef?.manaLeech) {
+                 const mana = dmg * unitDef.manaLeech;
+                 const ownerEcon = entity.owner === 'PLAYER' ? state.economy.player : state.economy.enemy;
+                 ownerEcon.mana = ownerEcon.mana + mana; // Leech mana on hit
+             }
+             
+             if (entity.owner === 'PLAYER') state.stats.damageDealt.player += dmg;
+             else state.stats.damageDealt.enemy += dmg;
+
+             // Reset Cooldown
+             entity.attack.cooldownRemaining = 1.0 / Math.max(0.1, entity.attack.speed);
          }
-         
-         target.health.current -= dmg;
-         
-         if (unitDef?.manaLeech) {
-             const mana = dmg * unitDef.manaLeech;
-             const ownerEcon = entity.owner === 'PLAYER' ? state.economy.player : state.economy.enemy;
-             ownerEcon.mana += mana;
-         }
-         
-         if (entity.owner === 'PLAYER') state.stats.damageDealt.player += dmg;
-         else state.stats.damageDealt.enemy += dmg;
      }
   }
 
@@ -323,11 +349,19 @@ export class EntitySystem {
                 entity.attack.cooldownRemaining = 1 / Math.max(0.1, entity.attack.speed);
               }
           } else {
-              const dmg = entity.attack.damage * deltaSeconds;
-              targetBase.health -= dmg;
-              targetBase.lastAttackTime = (state.tick * FIXED_TIMESTEP) / 1000;
-              if (entity.owner === 'PLAYER') state.stats.damageDealt.player += dmg;
-              else state.stats.damageDealt.enemy += dmg;
+              // Melee Attack on Base (Tick-Based)
+              entity.attack.cooldownRemaining -= deltaSeconds;
+              if (entity.attack.cooldownRemaining <= 0) {
+                  const dmg = entity.attack.damage; // Full damage
+                  targetBase.health -= dmg;
+                  targetBase.lastAttackTime = (state.tick * FIXED_TIMESTEP) / 1000;
+                  
+                  if (entity.owner === 'PLAYER') state.stats.damageDealt.player += dmg;
+                  else state.stats.damageDealt.enemy += dmg;
+                  
+                  // Reset Cooldown
+                  entity.attack.cooldownRemaining = 1.0 / Math.max(0.1, entity.attack.speed);
+              }
           }
           entity.animationState = 'ATTACK';
       }

@@ -36,8 +36,8 @@ export class RenderSystem {
     this.ctx.setLineDash([]);
 
     // Draw bases
-    this.drawBase(state.playerBase, true, state.progression.player.age, state.battlefield.width);
-    this.drawBase(state.enemyBase, false, state.progression.enemy.age, state.battlefield.width);
+    this.drawBase(state.playerBase, true, state.progression.player.age, state.battlefield.width, state.vfx);
+    this.drawBase(state.enemyBase, false, state.progression.enemy.age, state.battlefield.width, state.vfx);
 
     // Draw units
     for (const entity of state.entities.values()) {
@@ -74,7 +74,7 @@ export class RenderSystem {
     return { x: baseX, y: turretY };
   }
 
-  private drawBase(base: any, isPlayer: boolean, age: number, battlefieldWidth: number): void {
+  private drawBase(base: any, isPlayer: boolean, age: number, battlefieldWidth: number, vfx: GameState['vfx']): void {
     const x = (base.x / battlefieldWidth) * this.canvas.width;
     const y = this.canvas.height / 2;
     
@@ -201,40 +201,88 @@ export class RenderSystem {
       this.ctx.strokeRect(x - bunkerWidth/2, y - bunkerHeight, bunkerWidth, bunkerHeight);
     }
 
+    // Check for Active Barrage Effect
+    const isBarrageActive = (vfx || []).some(v => 
+        v.type === 'ability_cast' && 
+        v.data?.turretAbility === 'artillery_barrage' && 
+        Math.abs(v.x - base.x) < 5 // Check if this effect belongs to this base
+    );
+
     // TURRET
     if (turretLevel > 0) {
       const turretScreenPos = this.getTurretScreenPosition(x, y, age);
       const turretSize = this.getTurretSize(turretLevel);
       
+      // Draw Base Platform (Rotating Gear/Base)
       this.ctx.fillStyle = color2;
-      this.ctx.fillRect(turretScreenPos.x - turretSize - 3, turretScreenPos.y, turretSize * 2 + 6, 6);
+      this.ctx.beginPath();
+      this.ctx.roundRect(turretScreenPos.x - turretSize - 3, turretScreenPos.y, turretSize * 2 + 6, 8, 4);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#000';
+      this.ctx.lineWidth = 1;
+      this.ctx.stroke();
+
+      this.ctx.save();
       
+      // Determine Cannon Rotation
+      let rotation = 0;
+      if (isBarrageActive) {
+          // Point UP with recoil jitter (UP is -PI/2 for both sides)
+          const jitter = (Math.random() - 0.5) * 0.1;
+          rotation = -Math.PI / 2 + jitter; 
+      } else {
+          // Standard angle (slightly up towards enemy)
+          // Player: Face Right (-0.1 rad)
+          // Enemy: Face Left (PI + 0.1 rad)
+          rotation = isPlayer ? -0.1 : Math.PI + 0.1;
+      }
+      
+      // Translate to pivot point
+      this.ctx.translate(turretScreenPos.x, turretScreenPos.y + 4);
+      this.ctx.rotate(rotation);
+
       if (turretLevel >= 7) {
+        // High Tech Turret (Dual Railgun Style)
+        this.ctx.shadowBlur = 5;
+        this.ctx.shadowColor = isPlayer ? '#00ccff' : '#ff4400';
+        
+        // Main Body
         this.ctx.fillStyle = isPlayer ? '#fbbf24' : '#fb923c';
         this.ctx.beginPath();
-        this.ctx.moveTo(turretScreenPos.x - turretSize, turretScreenPos.y);
-        this.ctx.lineTo(turretScreenPos.x - turretSize/3, turretScreenPos.y - turretSize);
-        this.ctx.lineTo(turretScreenPos.x + turretSize/3, turretScreenPos.y - turretSize);
-        this.ctx.lineTo(turretScreenPos.x + turretSize, turretScreenPos.y);
-        this.ctx.closePath();
+        // Sleek shape
+        this.ctx.moveTo(-10, -10);
+        this.ctx.lineTo(30, -8); // Muzzle
+        this.ctx.lineTo(30, 8);
+        this.ctx.lineTo(-10, 10);
+        this.ctx.lineTo(-15, 0);
         this.ctx.fill();
-        const cannonOffset = turretSize * this.getCannonOffsetRatio(turretLevel);
-        this.ctx.fillStyle = '#374151';
-        this.ctx.fillRect(turretScreenPos.x - 10, turretScreenPos.y - cannonOffset, 5, 12);
-        this.ctx.fillRect(turretScreenPos.x + 5, turretScreenPos.y - cannonOffset, 5, 12);
+        
+        // Detail lines / Rails
+        this.ctx.fillStyle = '#111';
+        this.ctx.fillRect(-5, -3, 35, 6); // Barrel hole/gap
+        
+        // Glowy Bits
+        this.ctx.fillStyle = isPlayer ? '#00ffff' : '#ffaa00';
+        this.ctx.fillRect(5, -1, 20, 2);
+
+        this.ctx.shadowBlur = 0;
+
       } else if (turretLevel >= 4) {
+        // Mid Tier Turret (Heavy Cannon)
         this.ctx.fillStyle = isPlayer ? '#8b5cf6' : '#f97316';
-        this.ctx.fillRect(turretScreenPos.x - turretSize * 0.7, turretScreenPos.y - turretSize, turretSize * 1.4, turretSize);
-        const cannonOffset = turretSize * this.getCannonOffsetRatio(turretLevel);
-        this.ctx.fillStyle = '#374151';
-        this.ctx.fillRect(turretScreenPos.x - 3, turretScreenPos.y - cannonOffset, 6, 12);
-      } else {
-        this.ctx.fillStyle = color1;
-        this.ctx.fillRect(turretScreenPos.x - turretSize * 0.6, turretScreenPos.y - turretSize * 0.7, turretSize * 1.2, turretSize * 0.7);
-        const cannonOffset = turretSize * this.getCannonOffsetRatio(turretLevel);
+        this.ctx.fillRect(-5, -turretSize/2, turretSize * 1.5, turretSize);
+        
+        // Barrel Ring
         this.ctx.fillStyle = '#4b5563';
-        this.ctx.fillRect(turretScreenPos.x - 2, turretScreenPos.y - cannonOffset, 4, 8);
+        this.ctx.fillRect(turretSize, -turretSize/2 - 2, 4, turretSize + 4);
+
+      } else {
+        // Basic Turret (Simple Tube)
+        this.ctx.fillStyle = color1;
+        this.ctx.fillRect(0, -turretSize/2, turretSize * 1.2, turretSize);
       }
+      
+      this.ctx.restore();
     }
 
     // RANGE CIRCLE
@@ -289,9 +337,27 @@ export class RenderSystem {
 
   private drawProjectiles(projectiles: Projectile[], battlefieldWidth: number): void {
     for (const p of projectiles) {
+      if (p.delayMs && p.delayMs > 0) continue; // Skip if delayed
+
       const x = (p.x / battlefieldWidth) * this.canvas.width;
       const baselineY = this.canvas.height / 2;
       const y = baselineY - unitsToPixels(p.y); // Use helper
+
+      if (p.isFalling) {
+        // Falling Artillery Shell (Vertical Oval/Teardrop)
+        this.ctx.fillStyle = '#ff4400';
+        this.ctx.beginPath();
+        // Smaller than normal (Radius 2x5)
+        this.ctx.ellipse(x, y, 2, 5, 0, 0, Math.PI * 2);
+        this.ctx.fill();
+        
+        // Trail
+        this.ctx.fillStyle = 'rgba(255, 100, 0, 0.4)';
+        this.ctx.beginPath();
+        this.ctx.ellipse(x, y - 6, 1.5, 4, 0, 0, Math.PI * 2);
+        this.ctx.fill();
+        continue;
+      }
 
       if (p.id > 200000) {
         // Turret
@@ -331,97 +397,139 @@ export class RenderSystem {
       if (vfx.type === 'ability_cast') {
         if (vfx.data?.turretAbility === 'chain_lightning' && vfx.data.targetPositions) {
             // Chain Lightning Visuals
-            this.ctx.shadowBlur = 10;
-            this.ctx.shadowColor = '#00ffff';
-            this.ctx.lineCap = 'round';
-            this.ctx.lineJoin = 'round';
             
-            // Draw bolts from source to targets
-            let startX = x; // Base position
-            let startY = y;
+            // Phase Logic (Total 600ms)
+            const maxLife = 600;
+            const elapsed = maxLife - vfx.lifeMs;
             
+            // Draw SOURCE Glow (Charge Up)
+            const chargeSize = Math.min(20, elapsed / 5); // Grow to 20px
+            const pulse = 1.0 + Math.sin(vfx.lifeMs / 50) * 0.2;
+            
+            const grad = this.ctx.createRadialGradient(x, y, 0, x, y, chargeSize * pulse);
+            grad.addColorStop(0, '#ffffff');
+            grad.addColorStop(0.5, '#00ffff');
+            grad.addColorStop(1, 'rgba(0,0,255,0)');
+            
+            this.ctx.fillStyle = grad;
             this.ctx.beginPath();
-            
+            this.ctx.arc(x, y, chargeSize * pulse, 0, Math.PI * 2);
+            this.ctx.fill();
+
+            // Draw Bolts (Only after 150ms charge)
+            if (elapsed > 150) {
+                this.ctx.shadowBlur = 10;
+                this.ctx.shadowColor = '#00ffff';
+                this.ctx.lineCap = 'round';
+                this.ctx.lineJoin = 'round';
+                
+                // Draw bolts from source to targets
+                let startX = x; // Base position
+                let startY = y;
+                
+                this.ctx.beginPath();
+                
+                for (const targetPos of vfx.data.targetPositions) {
+                    const tx = (targetPos.x / battlefieldWidth) * this.canvas.width;
+                    const ty = this.canvas.height / 2 + (targetPos.y * 15);
+                    
+                    // Draw jagged line for lightning
+                    const segments = 5;
+                    let curX = startX;
+                    let curY = startY;
+                    
+                    this.ctx.moveTo(startX, startY);
+                    
+                    for (let i = 1; i <= segments; i++) {
+                        const progress = i / segments;
+                        const nextX = startX + (tx - startX) * progress;
+                        const nextY = startY + (ty - startY) * progress;
+                        
+                        // Jitter
+                        const jitterX = (Math.random() - 0.5) * 20 * (1 - progress); // More jitter near start
+                        const jitterY = (Math.random() - 0.5) * 30; // Random vertical jitter
+                        
+                        const drawX = (i === segments) ? tx : nextX + jitterX;
+                        const drawY = (i === segments) ? ty : nextY + jitterY;
+                        
+                        this.ctx.lineTo(drawX, drawY);
+                        
+                        curX = drawX;
+                        curY = drawY;
+                    }
+                    
+                    // Chain to next target
+                    startX = tx;
+                    startY = ty;
+                }
+                
+                this.ctx.strokeStyle = `rgba(180, 230, 255, ${alpha})`;
+                this.ctx.lineWidth = 4;
+                this.ctx.stroke();
+                
+                this.ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+                this.ctx.lineWidth = 2;
+                this.ctx.stroke();
+                
+                this.ctx.shadowBlur = 0;
+            }
+        } else if (vfx.data?.turretAbility === 'piercing_shot' && vfx.data.targetPositions) {
+             // Piercing Shot Visuals (Fading Line)
+            this.ctx.shadowBlur = 5;
+            this.ctx.shadowColor = '#a855f7'; // Purple-ish shadow
+
+            const startX = x;
+            const startY = y;
+
             for (const targetPos of vfx.data.targetPositions) {
                 const tx = (targetPos.x / battlefieldWidth) * this.canvas.width;
                 const ty = this.canvas.height / 2 + (targetPos.y * 15);
-                
-                // Draw jagged line for lightning
-                const segments = 5;
-                let curX = startX;
-                let curY = startY;
-                
+
+                this.ctx.beginPath();
                 this.ctx.moveTo(startX, startY);
+                this.ctx.lineTo(tx, ty);
                 
-                for (let i = 1; i <= segments; i++) {
-                    const progress = i / segments;
-                    const nextX = startX + (tx - startX) * progress;
-                    const nextY = startY + (ty - startY) * progress;
-                    
-                    // Jitter
-                    const jitterX = (Math.random() - 0.5) * 20 * (1 - progress); // More jitter near start
-                    const jitterY = (Math.random() - 0.5) * 30; // Random vertical jitter
-                    
-                    const drawX = (i === segments) ? tx : nextX + jitterX;
-                    const drawY = (i === segments) ? ty : nextY + jitterY;
-                    
-                    this.ctx.lineTo(drawX, drawY);
-                    
-                    curX = drawX;
-                    curY = drawY;
-                }
-                
-                // Chain to next target (conceptually, though here we draw from base to all targets in parallel or series?)
-                // TurretSystem logic: "chain_lightning" implies A -> B -> C. Code: "from base to targets[i]".
-                // The TurretSystem logic actually hits targets[0], [1], [2] separately in current impl?
-                // Wait, TurretSystem: "targets[i].health -= chainDamage".
-                // Visually it looks better if it chains 0 -> 1 -> 2.
-                // The targetPositions array is ordered 0, 1, 2.
-                
-                // Let's update start point for next bolt to create a chain effect
-                startX = tx;
-                startY = ty;
+                // Outer glow
+                this.ctx.lineWidth = 3;
+                this.ctx.strokeStyle = `rgba(168, 85, 247, ${alpha * 0.5})`; // Purple
+                this.ctx.stroke();
+
+                // Inner core
+                this.ctx.lineWidth = 1;
+                this.ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.8})`; // White core
+                this.ctx.stroke();
             }
-            
-            this.ctx.strokeStyle = `rgba(180, 230, 255, ${alpha})`;
-            this.ctx.lineWidth = 4;
-            this.ctx.stroke();
-            
-            this.ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-            this.ctx.lineWidth = 2;
-            this.ctx.stroke();
-            
             this.ctx.shadowBlur = 0;
-            
+
         } else if (vfx.data?.turretAbility === 'artillery_barrage') {
-             // Multiple rockets launching up
-             const targets = vfx.data?.targets || 3;
-             const phase = (1200 - vfx.lifeMs) / 1200; // 0 to 1
-             
-             for(let i=0; i<targets; i++) {
-                 // Launch staggered
-                 const myStart = i * 0.1;
-                 const myEnd = myStart + 0.4;
+             // MUZZLE FLASH ANIMATION (Instead of Rocket Launch)
+             // Rapid flashing (Machine Gun style or Pulse width)
+             const pulse = Math.sin(vfx.lifeMs * 0.5); // Rapid flicker
+             if (pulse > 0) {
+                 // Draw Flash pointing UP
+                 this.ctx.save();
+                 this.ctx.translate(x, y);
+                 // IsPlayer?? We just assume pointing UP
+                 // Draw a cone cone facing -Y (Up)
+                 const flashSize = 25 + Math.random() * 10;
                  
-                 if (phase >= myStart && phase <= myEnd) {
-                     const myPhase = (phase - myStart) / 0.4;
-                     const height = myPhase * 100; // Go up 100px
-                     const offsetX = (i - 1) * 10;
-                     
-                     // Rocket
-                     this.ctx.fillStyle = '#ffaa00';
-                     this.ctx.beginPath();
-                     this.ctx.arc(x + offsetX, y - height, 3, 0, Math.PI * 2);
-                     this.ctx.fill();
-                     
-                     // Smoke Trail
-                     this.ctx.strokeStyle = `rgba(100, 100, 100, ${0.5 * (1-myPhase)})`;
-                     this.ctx.lineWidth = 4;
-                     this.ctx.beginPath();
-                     this.ctx.moveTo(x + offsetX, y - height * 0.8);
-                     this.ctx.lineTo(x + offsetX, y - height);
-                     this.ctx.stroke();
-                 }
+                 const grad = this.ctx.createRadialGradient(0, -10, 0, 0, -20, flashSize);
+                 grad.addColorStop(0, '#ffffff');
+                 grad.addColorStop(0.3, '#ffaa00');
+                 grad.addColorStop(1, 'rgba(255, 0, 0, 0)');
+                 
+                 this.ctx.fillStyle = grad;
+                 this.ctx.beginPath();
+                 this.ctx.ellipse(0, -20, 10, flashSize, 0, 0, Math.PI * 2);
+                 this.ctx.fill();
+                 
+                 // Smoke Puff
+                 this.ctx.fillStyle = `rgba(100, 100, 100, 0.3)`;
+                 this.ctx.beginPath();
+                 this.ctx.arc(0 + (Math.random()-0.5)*10, -40, 15, 0, Math.PI*2);
+                 this.ctx.fill();
+
+                 this.ctx.restore();
              }
 
         } else {
@@ -562,15 +670,15 @@ export class RenderSystem {
         // Use additive blending for brighter fire
         this.ctx.globalCompositeOperation = 'screen';
 
-        const segments = 20; // Number of circles
+        const segments = 25; // Dense fire (was 20)
         const step = screenRange / segments;
         
         for (let i = 0; i < segments; i++) {
            const progress = i / segments; // 0 to 1
            const dist = i * step;
            
-           // Radius grows with distance
-           const radius = (5 + progress * 25) * (0.8 + Math.random() * 0.4);
+           // Radius grows with distance (BOOSTED for visibility)
+           const radius = (8 + progress * 35) * (0.8 + Math.random() * 0.4);
            
            // Wiggle (Chaotic, not just sine)
            const timeScale = (state.tick / 60) * 20;
@@ -580,8 +688,10 @@ export class RenderSystem {
            const cx = x + (dist * direction);
            const cy = y + yOffset;
            
-           // Alpha fades out at end
-           const particleAlpha = Math.min(1.0, alpha * 2.0) * (1 - Math.pow(progress, 2));
+           // Alpha fades out at end.
+           // BOOSTED VISIBILITY: Multiplier 6.0 -> 12.0 to keep it opaque longer.
+           // CURVE: pow(4) keeps the tip thicker for longer than pow(2).
+           const particleAlpha = Math.min(1.0, alpha * 12.0) * (1 - Math.pow(progress, 4));
            
            this.ctx.beginPath();
            this.ctx.arc(cx, cy, radius, 0, Math.PI * 2);
@@ -595,7 +705,7 @@ export class RenderSystem {
               
               const grad = this.ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
               grad.addColorStop(0, `rgba(200, 255, 200, ${particleAlpha})`);
-              grad.addColorStop(0.6, `rgba(${r}, ${g}, ${b}, ${particleAlpha * 0.8})`);
+              grad.addColorStop(0.7, `rgba(${r}, ${g}, ${b}, ${particleAlpha * 0.95})`);
               grad.addColorStop(1, `rgba(0, 0, 0, 0)`);
               this.ctx.fillStyle = grad;
 
@@ -605,13 +715,15 @@ export class RenderSystem {
               
               if (progress < 0.2) {
                  grad.addColorStop(0, `rgba(255, 255, 255, ${particleAlpha})`);
+                 grad.addColorStop(0.7, `rgba(255, 255, 200, ${particleAlpha * 0.9})`);
                  grad.addColorStop(1, `rgba(255, 200, 100, 0)`);
               } else if (progress < 0.6) {
-                 grad.addColorStop(0, `rgba(255, 200, 50, ${particleAlpha})`);
+                 grad.addColorStop(0, `rgba(255, 220, 50, ${particleAlpha})`);
+                 grad.addColorStop(0.7, `rgba(255, 100, 0, ${particleAlpha * 0.9})`);
                  grad.addColorStop(1, `rgba(200, 50, 0, 0)`);
               } else {
-                 grad.addColorStop(0, `rgba(200, 50, 0, ${particleAlpha * 0.7})`);
-                 grad.addColorStop(1, `rgba(50, 50, 50, 0)`);
+                 grad.addColorStop(0, `rgba(255, 80, 0, ${particleAlpha * 0.95})`);
+                 grad.addColorStop(1, `rgba(100, 50, 50, 0)`);
               }
               this.ctx.fillStyle = grad;
            }

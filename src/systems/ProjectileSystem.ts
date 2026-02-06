@@ -17,6 +17,12 @@ export class ProjectileSystem {
     for (let i = 0; i < state.projectiles.length; i++) {
         const p = state.projectiles[i];
         
+        // Handle Start Delay
+        if (p.delayMs && p.delayMs > 0) {
+            p.delayMs -= deltaSeconds * 1000;
+            continue; // Skip movement and collision
+        }
+
         // Move
         p.x += p.vx * deltaSeconds;
         p.y += p.vy * deltaSeconds;
@@ -24,7 +30,8 @@ export class ProjectileSystem {
         
         let hitBase = false;
         
-        // Base Collision
+        // Base Collision (Falling projectiles don't hit bases usually, or maybe they do?)
+        // Standard logic: checks X bounds.
         if (p.owner === 'PLAYER' && p.x >= state.battlefield.width - 1) {
             state.enemyBase.health -= p.damage;
             state.enemyBase.lastAttackTime = state.tick * (1000/60) / 1000;
@@ -45,8 +52,23 @@ export class ProjectileSystem {
             // Entity Collision
             for (const [eid, ent] of state.entities) {
                 if (ent.owner === p.owner) continue;
-                const dist = Math.abs(ent.transform.x - p.x);
-                if (dist < 0.8) {
+
+                // SPECIAL FALLING LOGIC
+                if (p.isFalling) {
+                   // Only collide if near target Y (ground)
+                   const groundY = p.targetY || ent.transform.laneY; // Use entity's lane if undefined
+                   if (Math.abs(p.y - groundY) > 2.0) continue; // Still in air
+                   
+                   // Check X proximity
+                   if (Math.abs(ent.transform.x - p.x) > 1.2) continue; // Stricter X check?
+                } else {
+                   // Standard projectile collision (ignores Y distance, assumes shared lane/height)
+                   const dist = Math.abs(ent.transform.x - p.x);
+                   if (dist > 0.8) continue;
+                }
+
+                // If we get here, collision confirmed
+                {
                     // Collision Logic
                     const protectionMultiplier = callbacks.getTowerProtectionMultiplier(ent);
                     let actualDamage = p.damage * protectionMultiplier;

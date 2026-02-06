@@ -56,43 +56,65 @@ export class TurretSystem {
           const canUseAbility = (base.turretAbilityCooldown ?? 0) <= 0;
           
           if (turretLevel >= 9 && canUseAbility && targets.length >= 3) {
-            base.turretAbilityCooldown = 8.0;
-            const aoeDamage = damagePerShot * 2.5;
+            base.turretAbilityCooldown = 18.0; // Increased cooldown (10s requested + active time)
             
-            // Cast Effect at Turret
+            // Get Cannon Tip Position for VFX
+            const cannonPos = TurretSystem.getTurretPosition(base.x, age, turretLevel);
+
+            // Spawn 100 falling projectiles
+            const barrageCount = 100;
+            const barrageDuration = 3000; // 3 seconds
+            const abilityRange = getEffectiveTurretRange(turretLevel);
+            
+            // Determine covered area (X range)
+            const minX = isPlayer ? base.x : base.x - abilityRange;
+            const maxX = isPlayer ? base.x + abilityRange : base.x;
+            
+            for (let i = 0; i < barrageCount; i++) {
+                const delay = Math.random() * barrageDuration;
+                const targetX = minX + Math.random() * (maxX - minX);
+                const targetY = (Math.random() - 0.5) * 4; // Spread across lanes (-2 to 2)
+                
+                // Falling from SKY (Positive Y is Up in Projectile Render Logic)
+                const startY = 25; // Start high above
+                const speed = -15; // Falling DOWN (Negative VY)
+                const distY = Math.abs(startY - targetY); // Distance to fall
+                const travelTime = (distY / Math.abs(speed)) * 1000;
+                
+                state.projectiles.push({ 
+                  id: (state.nextEntityId++) + projIdOffset + i, 
+                  owner: owner as 'PLAYER' | 'ENEMY', 
+                  x: targetX, 
+                  y: startY, 
+                  vx: 0, 
+                  vy: speed,
+                  damage: 250, 
+                  lifeMs: travelTime + 500, // Life enough to hit ground
+                  delayMs: delay,
+                  isFalling: true,
+                  targetY: targetY
+                });
+            }
+            
+            // Cast Effect at Turret (Just visual)
             state.vfx.push({
               id: state.nextVfxId++,
               type: 'ability_cast',
-              x: base.x,
-              y: 0,
+              x: cannonPos.x, // Use cannon tip X
+              y: cannonPos.y, // Use cannon tip Y
               age,
-              lifeMs: 1200,
+              lifeMs: 3000,
               data: { turretAbility: 'artillery_barrage', targets: targets.length },
             });
             
-            // Impact Effects on Targets (Delayed slightly to look like falling shells)
-            targets.forEach((target, i) => {
-                 target.health.current -= aoeDamage;
-                 
-                  state.vfx.push({
-                      id: state.nextVfxId++,
-                      type: 'ability_impact',
-                      x: target.transform.x,
-                      y: target.transform.laneY, 
-                      age,
-                      lifeMs: 1000,
-                      data: {
-                          subtype: 'artillery_shell',
-                          delay: i * 0.15, // Stagger them
-                          radius: 5 
-                      }
-                  });
-            });
           } else if (turretLevel >= 7 && canUseAbility && targets.length >= 2) {
             base.turretAbilityCooldown = 5.0;
             const maxChainTargets = 3;
             const chainPositions: {x: number, y: number}[] = [];
             
+            // Get Cannon Tip
+            const cannonPos = TurretSystem.getTurretPosition(base.x, age, turretLevel);
+
             for (let i = 0; i < Math.min(maxChainTargets, targets.length); i++) {
               const chainDamage = damagePerShot * (2.0 - i * 0.4);
               targets[i].health.current -= chainDamage;
@@ -101,10 +123,10 @@ export class TurretSystem {
              state.vfx.push({
               id: state.nextVfxId++,
               type: 'ability_cast',
-              x: base.x,
-              y: 0,
+              x: cannonPos.x, 
+              y: cannonPos.y,
               age,
-              lifeMs: 500, // Faster life for lightning
+              lifeMs: 600, // Slightly longer for charging effect (was 500)
               data: { turretAbility: 'chain_lightning', targetPositions: chainPositions },
             });
           } else if (turretLevel >= 5 && canUseAbility && targets.length >= 2) {
@@ -112,14 +134,22 @@ export class TurretSystem {
             const pierceDamage = damagePerShot * 1.5;
             targets[0].health.current -= pierceDamage;
             targets[1].health.current -= pierceDamage;
+            
+            const cannonPos = TurretSystem.getTurretPosition(base.x, age, turretLevel);
+            
+            const targetPositions = [
+                { x: targets[0].transform.x, y: targets[0].transform.laneY },
+                { x: targets[1].transform.x, y: targets[1].transform.laneY }
+            ];
+
              state.vfx.push({
               id: state.nextVfxId++,
               type: 'ability_cast',
-              x: base.x,
-              y: 0,
+              x: cannonPos.x,
+              y: cannonPos.y,
               age,
               lifeMs: 600,
-              data: { turretAbility: 'piercing_shot', targets: 2 },
+              data: { turretAbility: 'piercing_shot', targets: 2, targetPositions },
             });
           } else {
             const target = targets[0];

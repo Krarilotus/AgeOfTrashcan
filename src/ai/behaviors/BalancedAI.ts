@@ -32,6 +32,7 @@ export class BalancedAI implements IAIBehavior {
   private currentWarchest = 0; // DEBUG: Current accumulated warchest
   private debugMetrics: any = {}; // Store calculation details for debug UI
   private lastRecruitmentDecision: string = ""; // DEBUG: Store detailed reasoning
+  private lastRejectedUnits: string = ""; // DEBUG: Store rejection reasons
 
   getName(): string {
     return this.name;
@@ -47,11 +48,12 @@ export class BalancedAI implements IAIBehavior {
           // Provide context on what Dynamic Recruitment is thinking
           planDescription = `Dynamic: ${this.lastRecruitmentDecision}`;
       }
-
+      
       return {
           strategy: this.currentStrategy,
           warchest: Math.floor(this.currentWarchest),
           plan: planDescription,
+          rejected: this.lastRejectedUnits,
           currentGroupPlan: this.currentGroupPlan, // Expose raw plan for Debug UI
           ...this.debugMetrics,
           lastAgeUp: this.lastAgeUpTime.toFixed(1),
@@ -176,7 +178,8 @@ export class BalancedAI implements IAIBehavior {
         reserved: `${Math.floor(Math.min(state.enemyGold, totalReserved))} / ${Math.floor(totalReserved)}`,
         comp: compInfo,
         pushEst: `${attackStatus.feasibility.toFixed(2)} (${Math.floor(attackStatus.requiredMeatShield)}hp)`,
-        turret: state.enemyTurretLevel 
+        turret: state.enemyTurretLevel,
+        manaLvl: state.enemyManaLevel
     };
     
     // Check for base emergency (< 25% health AND attacked within last 3 seconds)
@@ -254,93 +257,50 @@ export class BalancedAI implements IAIBehavior {
       this.consecutiveDefenseFrames = 0; // Clear after 5 frames or when not desperate
     }
     
-    // Priority 1.5: Meat Shield Defense (Smart Turret Support)
-    // If we have no units but have a turret, and are threatened, we need a body to stall for the turret.
-    // FIX: Do not interrupt an active Group Plan unless threat is HIGH+.
-    // If we are just saving for a big tank (Plan), don't panic-buy cheap trash (Pyro/Medic) just because threat is LOW.
-    const allowMeatShieldInterruption = !this.currentGroupPlan || threat >= ThreatLevel.HIGH;
-
-    if (state.enemyUnitCount === 0 && state.enemyTurretLevel > 0 && threat >= ThreatLevel.LOW && allowMeatShieldInterruption) {
-        const availableUnits = getUnitsForAge(state.enemyAge);
-        let cheapestNonHealer: string | null = null;
-        let minCost = Infinity;
+    // Priority 1.5: Empty Field Defense (Smart Meat Shield)
+    // If we have no units on the field and none in queue, we must maintain presence.
+    // User Request: "detect that when it has nothing on its side and can recruit a single unit, it should do so... and use the best one it finds in budget for price to HP pool"
+    const isFieldEmpty = state.enemyUnitCount === 0 && state.enemyQueueSize === 0;
+    
+    if (isFieldEmpty && state.enemyTurretLevel > 0) {
         
-        let tankiestUnit: string | null = null;
-        let maxHealth = -1;
+        // Triggers only if Player units have crossed into our territory ( > 50% field width)
+        // User Request: "only does it when an enemy unit is already on the half of the battle field on its side"
+        const encroachingUnits = state.playerUnits.some(u => u.position > state.battlefieldWidth * 0.5);
 
-        // Find candidates
-        for (const [id, def] of Object.entries(availableUnits)) {
-            // Check budget: STRICTLY use 'spendableGold' unless threat is HIGH/CRITICAL (Emergency)
-            // User Request: "normal defense should NOT use the emergency funding!"
-            const goldPool = (threat >= ThreatLevel.HIGH) ? state.enemyGold : recruitmentGold;
+        if (encroachingUnits) {
             
-            if (def.cost > goldPool) continue;
+            const availableUnits = getUnitsForAge(state.enemyAge);
+            
+            // Allow dipping into savings slightly if threat is HIGH, otherwise strict budget
+            const goldBudget = (threat >= ThreatLevel.HIGH) ? state.enemyGold : recruitmentGold;
+            
+            let bestUnitId: string | null = null;
+            let maxHpPerGold = -1;
 
-            const isHealer = def.skill?.type === 'heal';
-            
-            // Prefer non-healers for meat shielding if possible
-            // STRICT FILTER: For MeatShield, we ideally want a Frontline unit.
-            // A Medic or Mage is NOT a good meat shield.
-            // If threat is only LOW/MODERATE, allow skipping bad units to wait for a real tank.
-            const isFrontline = (def.range ?? 1) < 4 || def.health > 250;
-            
-            // Refined Logic:
-            // 1. Must be Non-Healer (never buy medic as solo meatshield)
-            // 2. Ideally Frontline
-            if (!isHealer) {
-                // If we are under high threat, we take anything non-healer.
-                // If threat is manageable, we ONLY consider Frontline units as "worth interrupting" for.
-                if (threat >= ThreatLevel.HIGH || isFrontline) {
-                    if (def.cost < minCost) {
-                        minCost = def.cost;
-                        cheapestNonHealer = id;
-                    }
+            for (const [id, def] of Object.entries(availableUnits)) {
+                if (def.cost > goldBudget) continue;
+                if (def.teleporter) continue; // Don't use teleporters as meatShields
+                if (def.skill?.type === 'heal' && state.enemyUnitCount === 0) continue; // Don't send solo medic
+                
+                // Calculate Efficiency: HP per Gold
+                const hpPerGold = def.health / def.cost;
+                
+                if (hpPerGold > maxHpPerGold) {
+                    maxHpPerGold = hpPerGold;
+                    bestUnitId = id;
                 }
             }
-            // Still track tankiest regardless
-            if (def.health > maxHealth) {
-                maxHealth = def.health;
-                tankiestUnit = id;
+            
+            if (bestUnitId) {
+                 const reason = `Empty Field Defense: Recruiting ${bestUnitId} (Encroaching Enemy, Best HP/Gold: ${maxHpPerGold.toFixed(1)})`;
+                 this.lastRecruitmentDecision = reason;
+                 return {
+                     action: 'RECRUIT_UNIT',
+                     parameters: { unitType: bestUnitId, priority: 'normal' }, // Normal priority
+                     reasoning: reason
+                 };
             }
-        }
-        
-        // Use non-healer cheap unit if available, else whatever is cheapest (fallback handled logic below implicitly)
-        // If we only have healers affordable, we might have to skip or pick healer (better than nothing? Medic dies instantly though)
-        // Let's stick effectively to cheapestNonHealer if found.
-
-        // Decision: If vastly outnumbered (7+ enemies), try to get a Tank. Else Cheapest.
-        // User Request: "if enemy is like 7 to 1 overwhelming maybe even a tanky one"
-        const overwhelming = state.playerUnitCount >= 7;
-        let targetUnit = cheapestNonHealer; 
-        
-        // If we only found Healers (targetUnit null), stick to logic.
-        // We do NOT default to tankiestUnit if it's a healer, unless CRITICAL.
-        if (!targetUnit && tankiestUnit) {
-             const tankDef = availableUnits[tankiestUnit];
-             const isHealer = tankDef.skill?.type === 'heal';
-             // Only fallback to a Healer/Support tank if threat is CRITICAL.
-             if (!isHealer || threat >= ThreatLevel.CRITICAL) {
-                targetUnit = tankiestUnit;
-             }
-        }
-        
-        if (overwhelming && tankiestUnit) {
-             // Verify we can actually afford the tank with the correct budget
-             const tankDef = availableUnits[tankiestUnit];
-             const goldPool = (threat >= ThreatLevel.HIGH) ? state.enemyGold : recruitmentGold;
-             if (goldPool >= tankDef.cost) {
-                 targetUnit = tankiestUnit;
-             }
-        }
-
-        if (targetUnit) {
-             const reason = `[MeatShield] Recruited ${targetUnit} to support turret (Overwhelming: ${overwhelming})`;
-             this.lastRecruitmentDecision = reason;
-             return {
-                 action: 'RECRUIT_UNIT',
-                 parameters: { unitType: targetUnit, priority: (threat >= ThreatLevel.HIGH) ? 'emergency' : 'normal' },
-                 reasoning: reason
-             };
         }
     }
 
@@ -352,7 +312,52 @@ export class BalancedAI implements IAIBehavior {
     // OP Unit consideration (Super Weapon - Cheater Only)
     const opUnitDecision = this.considerOpUnit(state, ageUpgradeGold);
     if (opUnitDecision) urgentActions.push(opUnitDecision);
+
+    // CYBER ASSASSIN MANA BONUS TRIGGER (Age 6)
+    // Attempt to trigger the 6k and 12k mana bonuses by spawning an assassin in the window.
+    // The GameEngine handles the actual "10x HP" logic and "Once" check.
+    // We just ensure we spawn one when we cross the threshold.
+    if (state.enemyAge === 6) {
+        let shouldForceAssassin = false;
+        // Window for 6k trigger (e.g. 6000-6500)
+        if (state.enemyMana > 6000 && state.enemyMana < 6500 && state.enemyQueueSize < 2) {
+             shouldForceAssassin = true;
+        }
+        // Window for 12k trigger (e.g. 12000-12500)
+        if (state.enemyMana > 12000 && state.enemyMana < 12500 && state.enemyQueueSize < 2) {
+             shouldForceAssassin = true;
+        }
+        
+        if (shouldForceAssassin) {
+             urgentActions.push({
+                 action: 'RECRUIT_UNIT',
+                 parameters: { unitType: 'cyber_assassin', priority: 'emergency' },
+                 reasoning: `Mana Threshold Trigger (${Math.floor(state.enemyMana)}): Deploying Cyber Assassin for Potential Bonus`
+             });
+        }
+    }
     
+    // AGE 6 EMERGENCY DEFENSE (User Request: "placeholder in between")
+    // If enemy is at our gates and we have no units, spawn a cheap tank even if saving.
+    if (state.enemyAge === 6 && state.playerUnitsNearEnemyBase > 0 && state.enemyUnitCount < 3) {
+        const emergencyDecision = this.considerAge6Defense(state, recruitmentGold);
+        if (emergencyDecision) urgentActions.push(emergencyDecision);
+    }
+    
+    // BASE REPAIR (Age 6 Excess Mana)
+    // User Request: "if the ai has 20k mana it should start repairing its base with the excess"
+    if (state.enemyAge === 6 && state.enemyMana > 20000 && state.enemyBaseHealth < state.enemyBaseMaxHealth) {
+         // Check if damaged
+         const missingHP = state.enemyBaseMaxHealth - state.enemyBaseHealth;
+         if (missingHP > 10) { // Don't spam for 1 HP
+             this.lastRecruitmentDecision = "Excess Mana: Repairing Base";
+             urgentActions.push({
+                 action: 'REPAIR_BASE',
+                 reasoning: `Excess Mana Repair (>20k): 500 Mana -> 200 HP`,
+             });
+         }
+    }
+
     // Mana upgrades (Smart Projected Mana Needs)
     // We want to upgrade mana if we PLAN to use mana-heavy units, not just if we have low mana.
     // Calculate projected mana consumption for preferred units
@@ -518,13 +523,13 @@ export class BalancedAI implements IAIBehavior {
   }
 
   /**
-   * Consider building the OP Unit (Void Reaper) at Age 6 (Cheater only)
+   * Consider building the OP Unit (Void Reaper) at Age 6
    * This is a special "Super Age Up" equivalent.
    */
   private considerOpUnit(state: GameStateSnapshot, totalGold: number): AIDecision | null {
-      // Only for Cheater, Age 6, and if we have the money
-      if (state.difficulty !== 'CHEATER' || state.enemyAge < 6) return null;
-      if (state.enemyManaLevel < 12) return null; // Must max mana first (or be close to it, Level 12/13)
+      // Age 6, and if we have the money
+      if (state.enemyAge < 6) return null;
+      // if (state.enemyManaLevel < 12) return null; // Relaxed: Don't strictly force mana maxing
 
       // Cost of Void Reaper is 10000
       const OP_UNIT_COST = 10000;
@@ -535,6 +540,29 @@ export class BalancedAI implements IAIBehavior {
               parameters: { unitType: 'void_reaper', priority: 'emergency' }, // High priority
               reasoning: 'UNLEASH THE VOID REAPER (Max Out Age 6)',
           };
+      }
+      return null;
+  }
+  
+  /**
+   * Emergency Age 6 Defense
+   * Spawns a quick-building, high-HP unit (Robot Soldier) to stall enemies
+   * allowing the main plan (Void Reaper/Mana) to continue afterwards.
+   */
+  private considerAge6Defense(state: GameStateSnapshot, availableGold: number): AIDecision | null {
+      // Robot Soldier is the best candidate: 180g, 850HP, 5s build time.
+      // It's much faster/cheaper than the Mech Walker (350g, 8s) or Titan (11s).
+      const DEFENDER_TYPE = 'robot_soldier'; 
+      const def = UNIT_DEFS[DEFENDER_TYPE];
+      
+      if (!def) return null; // Should not happen
+      
+      if (availableGold >= def.cost) {
+           return {
+               action: 'RECRUIT_UNIT',
+               parameters: { unitType: DEFENDER_TYPE, priority: 'emergency' },
+               reasoning: 'Age 6 Emergency: Deploying Robot Soldier to hold the line',
+           };
       }
       return null;
   }
@@ -606,11 +634,11 @@ export class BalancedAI implements IAIBehavior {
     // Also wait until we have some units on the field before pouring money into mana.
     if (state.enemyAge === 1) return null;
 
-    // Check max level (13 based on UI)
-    if (state.enemyManaLevel >= 13) return null;
+    // Check max level (40 based on config)
+    if (state.enemyManaLevel >= 40) return null;
     
-    // Cost calculation (100 * 1.5^level)
-    const cost = Math.floor(100 * Math.pow(1.5, state.enemyManaLevel));
+    // Cost calculation (aligned with GameBalance)
+    const cost = getManaCost(state.enemyManaLevel);
     
     // Check affordability
     if (availableGold < cost) return null;
@@ -624,7 +652,8 @@ export class BalancedAI implements IAIBehavior {
     const isDeficit = projectedManaNeed > currentManaIncome;
     
     // 1. Critical Low Mana
-    if (state.enemyMana < 15) {
+    // Ensure we can actually afford it (using availableGold which already respects warchest)
+    if (state.enemyMana < 15 && availableGold >= cost) {
          const reason = `Mana Critical: Low reserves (${Math.floor(state.enemyMana)})`;
          this.lastRecruitmentDecision = reason;
          return {
@@ -634,7 +663,7 @@ export class BalancedAI implements IAIBehavior {
     }
 
     // 2. Planned Deficit
-    if (isDeficit) {
+    if (isDeficit && availableGold >= cost) {
         const reason = `Mana Planning: Need ${projectedManaNeed.toFixed(1)}/s, have ${currentManaIncome.toFixed(1)}/s`;
         this.lastRecruitmentDecision = reason;
         return {
@@ -648,19 +677,40 @@ export class BalancedAI implements IAIBehavior {
     
     // 3. Standard Progression (if rich enough)
     if (state.enemyManaLevel < targetLevel) {
-       // Age 6 Adjustment: We MUST max mana.
-       // If in Age 6, we treat Mana Upgrade as a "Savings Goal" rather than just an impulse buy.
-       // If we have 50% of the cash, we STOP recruiting to save for it.
-       if (state.enemyAge === 6 && availableGold < cost && availableGold > cost * 0.5) {
-           const reason = `Saving for Mana Level ${state.enemyManaLevel + 1} (${Math.floor(availableGold)}/${cost}g)`;
-           this.lastRecruitmentDecision = reason;
-           return {
-               action: 'WAIT',
-               reasoning: reason,
-           };
+       // Age 6 Adjustment: We MUST max mana eventually, but not at the cost of having 0 units.
+       if (state.enemyAge === 6) {
+           const minRecruitGold = AIBehaviorUtils.calculateMinimumRecruitmentGold(state, state.difficulty);
+           
+           // ALTERNATING LOGIC:
+           // If we have a weak army, we prioritize TROOPS over Mana.
+           // Only buy mana if we have a surplus AFTER reserving funds for a squad.
+           // User Issue: "upgrades mana in age 6 then doesnt attack and then upgrades mana agin"
+           // This happens because AI spends down to 0, then saves, then spends on Mana again.
+           // We require a SOLID SURPLUS (Cost + 80% of Recruitment Target) to break the loop.
+           
+           const hasDecentArmy = state.enemyUnitCount >= 8 || state.enemyUnitsNearPlayerBase > 2;
+           const requiredSurplus = minRecruitGold * 0.8; 
+           
+           if (!hasDecentArmy) {
+               // We need units. Only buy mana if we are swimming in gold.
+               if (availableGold < cost + requiredSurplus) return null;
+           } else {
+               // Even with a decent army, don't bankrupt ourselves if we are aiming for big units
+               if (availableGold < cost + 500) return null;
+           }
+           
+           // If we have a decent army and surplus, upgrade.
+           if (availableGold >= cost) {
+              const reason = `Age 6 Progression: Upgrading Mana (Level ${state.enemyManaLevel}->${state.enemyManaLevel+1})`;
+              this.lastRecruitmentDecision = reason;
+              return {
+                action: 'UPGRADE_MANA',
+                reasoning: reason,
+              };
+           }
        }
 
-       if (availableGold > cost * 1.2 || (state.enemyAge === 6 && availableGold >= cost)) {
+       if (availableGold > cost * 1.2) {
           const reason = `Standard Progression: Reaching target mana level ${targetLevel} for Age ${state.enemyAge}`;
           this.lastRecruitmentDecision = reason;
           return {
@@ -697,6 +747,7 @@ export class BalancedAI implements IAIBehavior {
     
     const turretCost = getTurretCost(state.enemyTurretLevel);
     if (spendableGold < turretCost) return null;
+    if (state.enemyTurretLevel >= 10) return null; // Max level check
     
     // Context: Are we in danger?
     const isEmergency = threat === ThreatLevel.HIGH || threat === ThreatLevel.CRITICAL;
@@ -803,7 +854,14 @@ export class BalancedAI implements IAIBehavior {
       // Can we afford this unit?
       if (unitDef && spendableGold >= unitDef.cost && state.enemyMana >= (unitDef.manaCost ?? 0)) {
         // CHECK: Will this unit survive the turret?
-        if (state.playerTurretLevel >= 3 && AIBehaviorUtils.isEnemyTurretTooStrong(state, unitDef.health, unitDef.speed)) {
+        // FIX: If we have a frontline (Meat Shield), we don't care if THIS unit is weak.
+        // The weakness check usually prevents sending solo archers to die.
+        const hasFrontline = state.enemyUnits.some(u => {
+            const def = UNIT_DEFS[u.unitId];
+            return def.health > 500 || (def.range ?? 1) < 4;
+        });
+
+        if (!hasFrontline && state.playerTurretLevel >= 3 && AIBehaviorUtils.isEnemyTurretTooStrong(state, unitDef)) {
           // Unit too weak - abandon this group plan
           this.currentGroupPlan = null;
           return {
@@ -839,7 +897,16 @@ export class BalancedAI implements IAIBehavior {
     // Calculate minimum gold needed based on actual unit costs and difficulty
     const minRecruitGold = AIBehaviorUtils.calculateMinimumRecruitmentGold(state, state.difficulty);
     
-    if (spendableGold < minRecruitGold) {
+    // AGE 6 "MANA DUMP" ADJUSTMENT
+    // User Issue: "waits for gold target to be 3200 after mana upgrade"
+    // Fix: If we just upgraded mana (Age 6 high level), lower the gold threshold to allow spending
+    // whatever is left on army, rather than waiting for 3200 again.
+    let adjustedThreshold = minRecruitGold;
+    if (state.enemyAge === 6 && state.enemyManaLevel > 5) {
+        adjustedThreshold *= 0.5; // Halve the gold requirement
+    }
+
+    if (spendableGold < adjustedThreshold) {
       // Calculate what we are roughly saving for (Avg cost * multiplier)
       // Reverse engineer the minRecruitGold to explain "Why"
       const multiplier = (AI_TUNING.recruitment.difficultyStackMultipliers as any)?.[state.difficulty] || 2.0;
@@ -851,11 +918,11 @@ export class BalancedAI implements IAIBehavior {
           ? `Completing Squad (${this.currentGroupPlan.name})`
           : `Building Reserves for Flexible Response`;
 
-      const limitDescription = `Target: ${minRecruitGold}g (Avg Unit: ~${approxAvgCost}g)`;
+      const limitDescription = `Target: ${adjustedThreshold}g (Avg Unit: ~${approxAvgCost}g)`;
 
       // Create specific reasoning string
       const reason = this.currentGroupPlan 
-          ? `[Save] Group: Waiting for Gold (${Math.floor(spendableGold)}/${minRecruitGold}g) - ${planContext}` 
+          ? `[Save] Group: Waiting for Gold (${Math.floor(spendableGold)}/${adjustedThreshold}g) - ${planContext}` 
           : `[Save] ${planContext} - ${limitDescription}. Have ${Math.floor(spendableGold)}g`;
           
       this.lastRecruitmentDecision = reason;
@@ -976,7 +1043,7 @@ export class BalancedAI implements IAIBehavior {
        // Filter out Void Reaper from normal recruitment flow (it has special logic)
        if (name === 'void_reaper') continue;
 
-       if (shouldCheckTurret && AIBehaviorUtils.isEnemyTurretTooStrong(state, def.health, def.speed || 1.0)) {
+       if (shouldCheckTurret && AIBehaviorUtils.isEnemyTurretTooStrong(state, def)) {
          continue; 
        }
        unitsToConsider[name] = def;
@@ -1060,17 +1127,30 @@ export class BalancedAI implements IAIBehavior {
     let frontlineAdded = 0;
     for (let i = 0; i < numFrontline; i++) {
         const slotsRemaining = (totalSlots - slotsFilled) - 1;
-        // Strong bias for Tank/Melee to override generic scoring
-        // Melee preference boosted to 5.0 to really force the issue
-        const unit = findUnitForRole(
-            { ...personality, meleePreference: 5.0, tankPreference: 3.0, rangedPreference: -1.0 },
-            slotsRemaining
-        );
+        
+        // VARIETY & MEATSHIELD ORDERING:
+        // First Unit (i=0): Hard Tank bias to ensure the "Point Man" is durable.
+        // Subsequent Units: Lower Tank bias, higher Melee/Damage bias to mix in DPS units.
+        const isPointMan = (i === 0);
+        
+        const rolePrefs = { 
+            ...personality, 
+            meleePreference: isPointMan ? 3.0 : 2.0,       // Reduced from 5.0
+            tankPreference: isPointMan ? 4.0 : 1.5,        // First unit = Wall, Others = Bruisers
+            rangedPreference: -1.0,
+            // Point Man: Heavy Slow Preference (-3.0) -> Prefer Slowest Unit
+            // Others: Slightly positive or random (0.0 to 1.0)
+            fastPreference: isPointMan ? -3.0 : (personality.fastPreference + (Math.random() * 0.5)) 
+        };
+
+        const unit = findUnitForRole(rolePrefs, slotsRemaining);
         
         if (unit) {
             unitsToRecruit.push(unit);
             currentBudget -= availableUnits[unit].cost;
             frontlineAdded++;
+            // Soft-exhaustion: Slightly reduce budget effectively to encourage variety? 
+            // No, budget is real. 'findBestUnit' will naturally pick smaller units as budget shrinks.
         }
         slotsFilled++;
     }
@@ -1087,8 +1167,16 @@ export class BalancedAI implements IAIBehavior {
     // 2. Fill Ranged
     for (let i = 0; i < numRanged; i++) {
         const slotsRemaining = (totalSlots - slotsFilled) - 1;
+        
+        // VARIETY IN RANGED UNITS:
+        // Use noise in preferences to alternate between different ranged units (e.g. Archers vs Mages vs Skirmishers)
         const unit = findUnitForRole(
-            { ...personality, rangedPreference: 5.0, meleePreference: -1.0 },
+            { 
+               ...personality, 
+               rangedPreference: 5.0, 
+               meleePreference: -1.0,
+               manaUnitPreference: personality.manaUnitPreference + (Math.random() * 2.0 - 1.0) // +/- 1.0 jitter
+            },
             slotsRemaining
         );
         
@@ -1248,7 +1336,9 @@ export class BalancedAI implements IAIBehavior {
              // Filter: Must be Frontline (Melee or Tanky)
              const isFrontline = def.range && def.range < 2.5 || def.health > 250;
              if (!isFrontline) continue;
-             if (def.cost > 2000 && personality.name !== 'Cheater') continue; // Skip super-units if not cheater
+             
+             // Cap cost, but allow expensive units in Age 6 or if Cheater
+             if (def.cost > 2000 && personality.name !== 'Cheater' && state.enemyAge < 6) continue; 
              
              if (def.health > bestTankHP) {
                  bestTankHP = def.health;
@@ -1324,13 +1414,28 @@ export class BalancedAI implements IAIBehavior {
 
     // Only apply strict turret check if turret is significant (Level 3+)
     const shouldCheckTurret = state.playerTurretLevel >= 3;
+    const rejectionReasons: string[] = [];
 
     for (const [name, def] of Object.entries(availableUnits)) {
-       if (shouldCheckTurret && AIBehaviorUtils.isEnemyTurretTooStrong(state, def.health, def.speed || 1.0)) {
+       // Allow expensive units in Age 6
+       if (def.cost > 2000 && personality.name !== 'Cheater' && state.enemyAge < 6) continue;
+       
+       // SPECIFIC FIX: Cyber Assassin should NOT be recruited via normal means (only via Mana Trigger in Age 6)
+       // Unless specifically requested by a plan (which shouldn't happen if role is removed)
+       if (name === 'cyber_assassin') continue;
+
+       if (shouldCheckTurret && AIBehaviorUtils.isEnemyTurretTooStrong(state, def)) {
+         rejectionReasons.push(`${name}(TooWeak)`);
          continue; // Skip suicide units
        }
        safeUnits[name] = def;
        hasSafeUnit = true;
+    }
+
+    if (rejectionReasons.length > 0) {
+        this.lastRejectedUnits = rejectionReasons.join(", ");
+    } else {
+        this.lastRejectedUnits = "None";
     }
     
     // If no units are safe, wait.
@@ -1361,6 +1466,9 @@ export class BalancedAI implements IAIBehavior {
             const isTanky = def.health > 250;
             
             if (!isRanged || isTanky) {
+                // If it's a Frontline role, we discard things that don't fit.
+                // But we also check "Is this unit too fast?".
+                // If we want slow units first, maybe we penalize fast ones in scoreUnit.
                 filtered[name] = def;
                 count++;
             }
