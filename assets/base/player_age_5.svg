@@ -1,0 +1,14 @@
+﻿<svg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'>
+  <defs>
+    <linearGradient id='base_grad_5_player' x1='0' y1='0' x2='0' y2='1'>
+      <stop offset='0%' stop-color='#3b82f6'/>
+      <stop offset='100%' stop-color='#1e40af'/>
+    </linearGradient>
+  </defs>
+  <rect x='28' y='38' width='40' height='42' fill='url(#base_grad_5_player)'/>
+  <polygon points='33,33 43,30 33,27' fill='#60a5fa'/>
+  <rect x='36' y='53' width='3' height='10' fill='#000'/>
+  <rect x='57' y='53' width='3' height='10' fill='#000'/>
+  <rect x='36' y='68' width='3' height='10' fill='#000'/>
+  <rect x='57' y='68' width='3' height='10' fill='#000'/>
+</svg>

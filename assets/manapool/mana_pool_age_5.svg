@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="160" viewBox="0 0 96 160">
+  <defs>
+    <linearGradient id="stone" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#6f6256"/>
+      <stop offset="100%" stop-color="#1f1713"/>
+    </linearGradient>
+    <linearGradient id="liquid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f87171"/>
+      <stop offset="100%" stop-color="#7f1d1d"/>
+    </linearGradient>
+  </defs>
+  <ellipse cx="48" cy="20" rx="26" ry="9" fill="url(#stone)"/>
+  <rect x="22" y="20" width="52" height="84" rx="24" fill="#31261f"/>
+  <rect x="28" y="24" width="40" height="76" rx="16" fill="url(#liquid)"/>
+  <ellipse cx="48" cy="20" rx="18" ry="5" fill="#301313" opacity="0.95"/>
+  <ellipse cx="48" cy="96" rx="15" ry="6" fill="#ef4444" opacity="0.62"/>
+  <ellipse cx="48" cy="96" rx="22" ry="10" fill="#ef4444" opacity="0.18"/>
+</svg>

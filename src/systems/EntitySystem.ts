@@ -1,5 +1,6 @@
 import { Entity, GameState } from '../GameEngine';
 import { UNIT_DEFS } from '../config/units';
+import { getGoldToManaConversionRate } from '../config/gameBalance';
 import { SkillSystem } from './SkillSystem';
 import { CombatUtils } from './CombatUtils';
 
@@ -376,8 +377,9 @@ export class EntitySystem {
       if (deadEntity.owner === 'ENEMY') {
           // Player Killed Enemy
           state.economy.player.gold += bounty;
-          if (state.progression.player.manaGenerationLevel >= 4) {
-              state.economy.player.mana += Math.floor(bounty * 0.1);
+          const playerConversionRate = getGoldToManaConversionRate(state.progression.player.manaGenerationLevel);
+          if (playerConversionRate > 0) {
+              state.economy.player.mana += Math.floor(bounty * playerConversionRate);
           }
           state.vfx.push({
               id: Date.now() + Math.random()*1000,
@@ -389,8 +391,9 @@ export class EntitySystem {
       } else {
           // Enemy Killed Player
           state.economy.enemy.gold += bounty;
-          if (state.progression.enemy.manaGenerationLevel >= 4) {
-              state.economy.enemy.mana += Math.floor(bounty * 0.1);
+          const enemyConversionRate = getGoldToManaConversionRate(state.progression.enemy.manaGenerationLevel);
+          if (enemyConversionRate > 0) {
+              state.economy.enemy.mana += Math.floor(bounty * enemyConversionRate);
           }
       }
   }

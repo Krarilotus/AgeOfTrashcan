@@ -21,6 +21,8 @@ import {
   getManaCost,
   getGoldIncome,
   getManaGeneration,
+  PROGRESSION_CONFIG,
+  QUEUE_CONFIG,
 } from './config/gameBalance';
 import { 
   getTurretUpgradeCost,
@@ -338,7 +340,7 @@ export class GameEngine {
   
 
   private async loadUnitSprites(): Promise<void> {
-    const basePath = '/assets/units/';
+    const basePath = '/units/';
     
     // AUTO-DISCOVERY: define sprites based on UNIT_DEFS keys
     // This enforces convention: sprite filename = unitId + ".svg"
@@ -349,7 +351,7 @@ export class GameEngine {
 
   // Load a specific list of sprites
   private async loadSpecificSprites(unitIds: string[]): Promise<void> {
-      const basePath = '/assets/units/';
+      const basePath = '/units/';
       const entries = unitIds.map((unitId) => {
       // Skip if already loaded (unless error)
       if (this.unitSprites.has(unitId)) return Promise.resolve();
@@ -777,7 +779,7 @@ export class GameEngine {
     const unitDef = UNIT_DEFS[unitId] || UNIT_DEFS.stone_clubman;
     const econ = owner === 'PLAYER' ? this.state.economy.player : this.state.economy.enemy;
     const queue = owner === 'PLAYER' ? this.state.playerQueue : this.state.enemyQueue;
-    const maxQueue = 5;
+    const maxQueue = QUEUE_CONFIG.maxQueueSize;
     if (queue.length >= maxQueue) return false;
     // enforce age availability
     const ownerAge = owner === 'PLAYER' ? this.state.progression.player.age : this.state.progression.enemy.age;
@@ -818,7 +820,7 @@ export class GameEngine {
     const prog = owner === 'PLAYER' ? this.state.progression.player : this.state.progression.enemy;
     const econ = owner === 'PLAYER' ? this.state.economy.player : this.state.economy.enemy;
     const base = owner === 'PLAYER' ? this.state.playerBase : this.state.enemyBase;
-    if (prog.age >= 6) return false;
+    if (prog.age >= PROGRESSION_CONFIG.maxAge) return false;
     const cost = prog.ageProgress.costGold;
     if (econ.gold < cost) return false;
     prog.age += 1;
@@ -856,8 +858,8 @@ export class GameEngine {
     this.syncBasePositions();
     
     // Double base max health and restore by that amount
-    const healthIncrease = base.maxHealth;
-    base.maxHealth *= 2;
+    const healthIncrease = base.maxHealth * (PROGRESSION_CONFIG.ageBaseHealthMultiplier - 1);
+    base.maxHealth *= PROGRESSION_CONFIG.ageBaseHealthMultiplier;
     base.health += healthIncrease;
     if (base.health > base.maxHealth) base.health = base.maxHealth;
     
@@ -965,15 +967,6 @@ export class GameEngine {
     (snapshot as any).unitCatalog = UNIT_DEFS;
     // telemetry
     (snapshot as any).stats = this.state.stats;
-    // meta info about upgrades (UI-friendly) - progressive damage: +6, +8, +10, etc.
-    (snapshot as any).meta = { 
-      turretProgressiveDamage: true, // Flag to indicate progressive scaling
-      turretBaseDamagePerShot: 1.6, // 4 * 0.4 fireInterval
-      turretFireInterval: 0.4,
-      ageGoldIncomePerUpgrade: 'progressive', // +2g/s age 1→2, +3g/s age 2→3, etc.
-      ageBaseHealthMultiplier: 2 // Base HP doubles per age
-    };
-    
     // Debug: Expose AI State
     if (this.aiController) {
         (snapshot as any).aiState = this.aiController.getState();
@@ -1002,6 +995,12 @@ export class GameEngine {
         state: {
           ...this.state,
           entities: entitiesArray, // Serialize as array
+        },
+        runtime: {
+          aiAccumulatorMs: this.aiAccumulatorMs,
+          lastUpdateTime: this.lastUpdateTime,
+          enemyCyberAssassin6kBonusUsed: this.enemyCyberAssassin6kBonusUsed,
+          enemyCyberAssassin12kBonusUsed: this.enemyCyberAssassin12kBonusUsed,
         },
         aiState: this.aiController.getState(), // Persist AI state (warchest, learning)
         seed: this.seed,
@@ -1076,6 +1075,10 @@ export class GameEngine {
       
       // Restore complete state
       this.state = loadedState;
+      this.aiAccumulatorMs = saveData.runtime?.aiAccumulatorMs ?? 0;
+      this.lastUpdateTime = saveData.runtime?.lastUpdateTime ?? 0;
+      this.enemyCyberAssassin6kBonusUsed = saveData.runtime?.enemyCyberAssassin6kBonusUsed ?? false;
+      this.enemyCyberAssassin12kBonusUsed = saveData.runtime?.enemyCyberAssassin12kBonusUsed ?? false;
       
       // Reinitialize PRNG with restored seed
       this.prng = new PRNG(this.seed);

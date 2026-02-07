@@ -15,8 +15,8 @@ import {
   AttackGroupParams,
 } from '../AIBehavior';
 import { AIPersonality, AI_TUNING, ATTACK_GROUPS } from '../../config/aiConfig';
-import { UNIT_DEFS, getUnitsForAge, filterUnits, UnitDef } from '../../config/units';
-import { getAgeCost, getManaCost, getTurretCost, DIFFICULTY_CONFIG } from '../../config/gameBalance';
+import { UNIT_DEFS, getUnitsForAge, UnitDef } from '../../config/units';
+import { getManaCost, getTurretCost } from '../../config/gameBalance';
 
 /**
  * Balanced AI - intelligent, adaptive strategy with warchest system

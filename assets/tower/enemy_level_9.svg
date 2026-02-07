@@ -1,0 +1,38 @@
+﻿<svg xmlns='http://www.w3.org/2000/svg' width='160' height='120' viewBox='0 0 160 120'>
+  <rect x='46' y='74' width='68' height='9' rx='4' fill='#991b1b' stroke='#000' stroke-width='1'/>
+  <circle cx='80' cy='78' r='9.5' fill='#fca5a5' opacity='0.2'/>
+  <rect x='48' y='75' width='4' height='7' fill='#334155'/>
+  <rect x='108' y='75' width='4' height='7' fill='#334155'/>  <rect x='54' y='81' width='2' height='2' fill='#0f172a'/>
+  <rect x='60.5' y='81' width='2' height='2' fill='#0f172a'/>
+  <rect x='67' y='81' width='2' height='2' fill='#0f172a'/>
+  <rect x='73.5' y='81' width='2' height='2' fill='#0f172a'/>
+  <rect x='80' y='81' width='2' height='2' fill='#0f172a'/>
+  <rect x='86.5' y='81' width='2' height='2' fill='#0f172a'/>
+  <rect x='93' y='81' width='2' height='2' fill='#0f172a'/>
+  <rect x='99.5' y='81' width='2' height='2' fill='#0f172a'/>
+  <rect x='106' y='81' width='2' height='2' fill='#0f172a'/>
+
+  <g transform='translate(80 78) rotate(185.72957795)'>
+    <polygon points='-8,-6.7 29.3,-5.7 29.3,5.7 -8,6.7 -12,0' fill='#fda4af' stroke='#111827' stroke-width='1'/>
+    <rect x='4' y='-7.7' width='9.6' height='15.4' fill='#334155'/>
+    <rect x='10' y='-2' width='15.3' height='4' fill='#0f172a'/>
+    <line x1='-2' y1='-7.2' x2='0' y2='-7.2' stroke='rgba(254,205,211,0.45)' stroke-width='1'/>
+    <line x1='1.03' y1='-7.2' x2='3.03' y2='-7.2' stroke='rgba(254,205,211,0.45)' stroke-width='1'/>
+    <line x1='4.07' y1='-7.2' x2='6.07' y2='-7.2' stroke='rgba(254,205,211,0.45)' stroke-width='1'/>
+    <line x1='7.1' y1='-7.2' x2='9.1' y2='-7.2' stroke='rgba(254,205,211,0.45)' stroke-width='1'/>
+    <line x1='10.13' y1='-7.2' x2='12.13' y2='-7.2' stroke='rgba(254,205,211,0.45)' stroke-width='1'/>
+    <line x1='13.17' y1='-7.2' x2='15.17' y2='-7.2' stroke='rgba(254,205,211,0.45)' stroke-width='1'/>
+    <line x1='16.2' y1='-7.2' x2='18.2' y2='-7.2' stroke='rgba(254,205,211,0.45)' stroke-width='1'/>
+    <line x1='19.23' y1='-7.2' x2='21.23' y2='-7.2' stroke='rgba(254,205,211,0.45)' stroke-width='1'/>
+    <line x1='22.27' y1='-7.2' x2='24.27' y2='-7.2' stroke='rgba(254,205,211,0.45)' stroke-width='1'/>
+    <polygon points='29.3,-3 38.3,0 29.3,3' fill='#f8fafc'/>
+    <line x1='2' y1='-7.7' x2='2' y2='-16.7' stroke='#67e8f9' stroke-width='1.5'/>
+    <circle cx='2' cy='-17.7' r='2.5' fill='#22d3ee'/>
+    <rect x='6' y='-12.7' width='3' height='5' fill='#9ca3af'/>
+    <rect x='6.5' y='-12.7' width='2' height='2' fill='#111827'/>
+    <rect x='11' y='-12.7' width='3' height='5' fill='#9ca3af'/>
+    <rect x='11.5' y='-12.7' width='2' height='2' fill='#111827'/>
+    <rect x='16' y='-12.7' width='3' height='5' fill='#9ca3af'/>
+    <rect x='16.5' y='-12.7' width='2' height='2' fill='#111827'/>
+  </g>
+</svg>

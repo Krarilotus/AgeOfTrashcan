@@ -49,6 +49,16 @@ export const TURRET_VISUALS = {
   PLATFORM_OFFSET_UNITS: 0.3,
 };
 
+export const MANA_POOL_VISUALS = {
+  // Keep mana pool art size fixed; tier progression should come from the SVGs themselves.
+  DRAW_HEIGHT_PX: 96,
+  // The SVG rim sits ~20px from the top in a 160px source canvas.
+  RIM_OFFSET_RATIO: 20 / 160,
+  // Shift toward battlefield by a quarter of base width so it sits under the base centerline.
+  INWARD_SHIFT_BASE_WIDTH_RATIO: 0.20,
+  BASELINE_Y_OFFSET_PX: 3,
+} as const;
+
 /**
  * Converts screen pixels to logical game units
  */

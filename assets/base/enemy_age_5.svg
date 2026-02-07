@@ -1,0 +1,14 @@
+﻿<svg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'>
+  <defs>
+    <linearGradient id='base_grad_5_enemy' x1='0' y1='0' x2='0' y2='1'>
+      <stop offset='0%' stop-color='#ef4444'/>
+      <stop offset='100%' stop-color='#991b1b'/>
+    </linearGradient>
+  </defs>
+  <rect x='28' y='38' width='40' height='42' fill='url(#base_grad_5_enemy)'/>
+  <polygon points='33,33 43,30 33,27' fill='#f87171'/>
+  <rect x='36' y='53' width='3' height='10' fill='#000'/>
+  <rect x='57' y='53' width='3' height='10' fill='#000'/>
+  <rect x='36' y='68' width='3' height='10' fill='#000'/>
+  <rect x='57' y='68' width='3' height='10' fill='#000'/>
+</svg>

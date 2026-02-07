@@ -1,5 +1,10 @@
 import { GameState, Entity, Projectile } from '../GameEngine';
-import { TURRET_CONSTANTS, calculateTurretDamage, calculateTurretRange } from '../config/turretConfig';
+import {
+  TURRET_ABILITY_CONFIG,
+  TURRET_CONSTANTS,
+  calculateTurretDamage,
+  calculateTurretRange,
+} from '../config/turretConfig';
 import { TURRET_VISUALS, pixelsToUnits, unitsToPixels } from '../config/renderConfig';
 
 export class TurretSystem {
@@ -35,6 +40,7 @@ export class TurretSystem {
       const age = isPlayer ? state.progression.player.age : state.progression.enemy.age;
       const turretLevel = base.turretLevel;
       const turretRange = getEffectiveTurretRange(turretLevel);
+      const piercingRange = turretRange * TURRET_ABILITY_CONFIG.PIERCING_SHOT.rangeMultiplier;
       
       const targets: Entity[] = [];
       for (const entity of state.entities.values()) {
@@ -46,24 +52,42 @@ export class TurretSystem {
         }
       }
       targets.sort((a, b) => Math.abs(a.transform.x - base.x) - Math.abs(b.transform.x - base.x));
+
+      let piercingTarget: Entity | null = null;
+      if (turretLevel >= TURRET_ABILITY_CONFIG.PIERCING_SHOT.requiredLevel) {
+        for (const entity of state.entities.values()) {
+          if (entity.owner !== targetOwner) continue;
+          const dist = Math.abs(entity.transform.x - base.x);
+          if (dist <= piercingRange) {
+            if (!piercingTarget || dist < Math.abs(piercingTarget.transform.x - base.x)) {
+              piercingTarget = entity;
+            }
+          }
+        }
+      }
       
-      if (targets.length > 0) {
+      if (targets.length > 0 || piercingTarget) {
         accumulator += deltaSeconds;
         if (accumulator >= FIRE_INTERVAL) {
           accumulator -= FIRE_INTERVAL;
           
           const damagePerShot = calculateTurretDamage(turretLevel);
           const canUseAbility = (base.turretAbilityCooldown ?? 0) <= 0;
+          // Single source-of-truth muzzle position for this shot tick.
+          const muzzlePos = TurretSystem.getTurretPosition(base.x, age, turretLevel);
           
-          if (turretLevel >= 9 && canUseAbility && targets.length >= 3) {
-            base.turretAbilityCooldown = 18.0; // Increased cooldown (10s requested + active time)
-            
-            // Get Cannon Tip Position for VFX
-            const cannonPos = TurretSystem.getTurretPosition(base.x, age, turretLevel);
+          if (
+            turretLevel >= TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.requiredLevel &&
+            canUseAbility &&
+            targets.length >= TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.minTargets
+          ) {
+            base.turretAbilityCooldown = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.cooldownSeconds;
+            const barrageDamage =
+              damagePerShot * TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.damageMultiplier;
 
             // Spawn 100 falling projectiles
-            const barrageCount = 100;
-            const barrageDuration = 3000; // 3 seconds
+            const barrageCount = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.projectileCount;
+            const barrageDuration = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.durationMs;
             const abilityRange = getEffectiveTurretRange(turretLevel);
             
             // Determine covered area (X range)
@@ -73,11 +97,11 @@ export class TurretSystem {
             for (let i = 0; i < barrageCount; i++) {
                 const delay = Math.random() * barrageDuration;
                 const targetX = minX + Math.random() * (maxX - minX);
-                const targetY = (Math.random() - 0.5) * 4; // Spread across lanes (-2 to 2)
+                const targetY = (Math.random() - 0.5) * TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.spreadLaneY;
                 
                 // Falling from SKY (Positive Y is Up in Projectile Render Logic)
-                const startY = 25; // Start high above
-                const speed = -15; // Falling DOWN (Negative VY)
+                const startY = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.startY;
+                const speed = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.fallSpeed;
                 const distY = Math.abs(startY - targetY); // Distance to fall
                 const travelTime = (distY / Math.abs(speed)) * 1000;
                 
@@ -88,8 +112,8 @@ export class TurretSystem {
                   y: startY, 
                   vx: 0, 
                   vy: speed,
-                  damage: 250, 
-                  lifeMs: travelTime + 500, // Life enough to hit ground
+                  damage: barrageDamage, 
+                  lifeMs: travelTime + TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.extraLifeMs,
                   delayMs: delay,
                   isFalling: true,
                   targetY: targetY
@@ -100,62 +124,75 @@ export class TurretSystem {
             state.vfx.push({
               id: state.nextVfxId++,
               type: 'ability_cast',
-              x: cannonPos.x, // Use cannon tip X
-              y: cannonPos.y, // Use cannon tip Y
+              x: muzzlePos.x,
+              // RenderSystem treats VFX y as lane offset (+down), while turret/projectile
+              // muzzle y is world-up. Flip sign so cast source matches projectile source.
+              y: -muzzlePos.y,
               age,
-              lifeMs: 3000,
+              lifeMs: TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.vfxLifeMs,
               data: { turretAbility: 'artillery_barrage', targets: targets.length },
             });
             
-          } else if (turretLevel >= 7 && canUseAbility && targets.length >= 2) {
-            base.turretAbilityCooldown = 5.0;
-            const maxChainTargets = 3;
+          } else if (
+            turretLevel >= TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.requiredLevel &&
+            canUseAbility &&
+            targets.length >= TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.minTargets
+          ) {
+            base.turretAbilityCooldown = TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.cooldownSeconds;
+            const maxChainTargets = TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.maxTargets;
             const chainPositions: {x: number, y: number}[] = [];
-            
-            // Get Cannon Tip
-            const cannonPos = TurretSystem.getTurretPosition(base.x, age, turretLevel);
 
             for (let i = 0; i < Math.min(maxChainTargets, targets.length); i++) {
-              const chainDamage = damagePerShot * (2.0 - i * 0.4);
+              const chainDamage =
+                damagePerShot *
+                (
+                  TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.initialDamageMultiplier -
+                  i * TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.bounceFalloff
+                );
               targets[i].health.current -= chainDamage;
               chainPositions.push({ x: targets[i].transform.x, y: targets[i].transform.laneY });
             }
              state.vfx.push({
               id: state.nextVfxId++,
               type: 'ability_cast',
-              x: cannonPos.x, 
-              y: cannonPos.y,
+              x: muzzlePos.x, 
+              y: -muzzlePos.y,
               age,
-              lifeMs: 600, // Slightly longer for charging effect (was 500)
+              lifeMs: TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.vfxLifeMs,
               data: { turretAbility: 'chain_lightning', targetPositions: chainPositions },
             });
-          } else if (turretLevel >= 5 && canUseAbility && targets.length >= 2) {
-            base.turretAbilityCooldown = 3.0;
-            const pierceDamage = damagePerShot * 1.5;
-            targets[0].health.current -= pierceDamage;
-            targets[1].health.current -= pierceDamage;
-            
-            const cannonPos = TurretSystem.getTurretPosition(base.x, age, turretLevel);
-            
+          } else if (
+            turretLevel >= TURRET_ABILITY_CONFIG.PIERCING_SHOT.requiredLevel &&
+            canUseAbility &&
+            !!piercingTarget
+          ) {
+            base.turretAbilityCooldown = TURRET_ABILITY_CONFIG.PIERCING_SHOT.cooldownSeconds;
+            const pierceDamage = damagePerShot * TURRET_ABILITY_CONFIG.PIERCING_SHOT.damageMultiplier;
+            piercingTarget.health.current -= pierceDamage;
+
             const targetPositions = [
-                { x: targets[0].transform.x, y: targets[0].transform.laneY },
-                { x: targets[1].transform.x, y: targets[1].transform.laneY }
+              { x: piercingTarget.transform.x, y: piercingTarget.transform.laneY },
             ];
 
              state.vfx.push({
               id: state.nextVfxId++,
               type: 'ability_cast',
-              x: cannonPos.x,
-              y: cannonPos.y,
+              x: muzzlePos.x,
+              y: -muzzlePos.y,
               age,
-              lifeMs: 600,
-              data: { turretAbility: 'piercing_shot', targets: 2, targetPositions },
+              lifeMs: TURRET_ABILITY_CONFIG.PIERCING_SHOT.vfxLifeMs,
+              data: {
+                turretAbility: 'piercing_shot',
+                targets: 1,
+                targetPositions,
+                durationMs: TURRET_ABILITY_CONFIG.PIERCING_SHOT.vfxLifeMs,
+              },
             });
           } else {
+            if (targets.length === 0) return accumulator;
             const target = targets[0];
-            const turretPos = TurretSystem.getTurretPosition(base.x, age, base.turretLevel);
-            const projX = turretPos.x;
-            const projY = turretPos.y;
+            const projX = muzzlePos.x;
+            const projY = muzzlePos.y;
             
             const dx = target.transform.x - projX;
             const dy = target.transform.laneY - projY;

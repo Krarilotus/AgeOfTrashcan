@@ -133,6 +133,7 @@ Thumbs.db
 
 # VS Code specific (keeping it light, often people want shared configs)
 .vscode/*
+.vscode
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json

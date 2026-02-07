@@ -1,0 +1,16 @@
+﻿<svg xmlns='http://www.w3.org/2000/svg' width='160' height='120' viewBox='0 0 160 120'>
+  <rect x='58' y='74' width='44' height='9' rx='4' fill='#1e40af' stroke='#000' stroke-width='1'/>
+  <circle cx='80' cy='78' r='6.5' fill='#93c5fd' opacity='0.2'/>
+  <rect x='60' y='75' width='4' height='7' fill='#334155'/>
+  <rect x='96' y='75' width='4' height='7' fill='#334155'/>  <rect x='66' y='81' width='2' height='2' fill='#0f172a'/>
+  <rect x='80' y='81' width='2' height='2' fill='#0f172a'/>
+  <rect x='94' y='81' width='2' height='2' fill='#0f172a'/>
+
+  <g transform='translate(80 78) rotate(-5.72957795)'>
+    <polygon points='-8,-4.9 19.1,-3.9 19.1,3.9 -8,4.9 -12,0' fill='#60a5fa' stroke='#111827' stroke-width='1'/>
+    <rect x='4' y='-5.9' width='7.2' height='11.8' fill='#334155'/>
+    <line x1='-2' y1='-5.4' x2='0' y2='-5.4' stroke='rgba(186,230,253,0.45)' stroke-width='1'/>
+    <line x1='3.7' y1='-5.4' x2='5.7' y2='-5.4' stroke='rgba(186,230,253,0.45)' stroke-width='1'/>
+    <line x1='9.4' y1='-5.4' x2='11.4' y2='-5.4' stroke='rgba(186,230,253,0.45)' stroke-width='1'/>
+  </g>
+</svg>

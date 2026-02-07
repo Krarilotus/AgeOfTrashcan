@@ -1,3 +1,5 @@
+import { getTurretUpgradeCost } from './turretConfig';
+
 /**
  * Game Balance Configuration
  * All costs, income rates, XP rates, and game mechanics in one place
@@ -40,15 +42,15 @@ export const INCOME_CONFIG = {
   },
 };
 
-/**
- * XP and Leveling Configuration
- */
-export const XP_CONFIG = {
-  baseXpRequired: 500,
-  xpMultiplierPerAge: 2.0,
-};
+export const PROGRESSION_CONFIG = {
+  maxAge: 6,
+  ageBaseHealthMultiplier: 2,
+} as const;
 
-
+export const MANA_CONVERSION_CONFIG = {
+  unlockLevel: 6,
+  percentPerLevel: 0.02,
+} as const;
 
 /**
  * Age Progression Costs
@@ -62,7 +64,7 @@ export const AGE_UPGRADE_COSTS: Record<number, number> = {
   4: 1500,  // Age 3 -> 4
   5: 2500,  // Age 4 -> 5
   6: 4000,  // Age 5 -> 6
-  7: 9500,  // Age 6 -> 7 (or max) - using 7 as theoretical max or display
+  7: 10000,  // Age 6 -> 7 (or max) - using 7 as theoretical max or display
 };
 
 export const getAgeUpgradeCost = (currentAge: number): number => {
@@ -137,19 +139,16 @@ export const DIFFICULTY_CONFIG = {
   },
   MEDIUM: {
     goldMultiplier: 1.2,
-    xpMultiplier: 1.1,
     stackSizeMultiplier: 2.5,
     stackSizeMultiplierMax: 3.0,
   },
   HARD: {
     goldMultiplier: 1.5,
-    xpMultiplier: 1.3,
     stackSizeMultiplier: 3.0,
     stackSizeMultiplierMax: 3.5,
   },
   CHEATER: {
     goldMultiplier: 2.0,
-    xpMultiplier: 1.5,
     stackSizeMultiplier: 3.5,
     stackSizeMultiplierMax: 4.0,
   },
@@ -160,7 +159,7 @@ export const DIFFICULTY_CONFIG = {
  */
 export const QUEUE_CONFIG = {
   // Maximum units that can be queued
-  maxQueueSize: 10,
+  maxQueueSize: 5,
   
   // Time penalty for each unit in queue (makes later units train slower)
   queueTimePenaltyMs: 100,
@@ -184,64 +183,20 @@ export const GAME_LOOP_CONFIG = {
 };
 
 /**
- * Helper function to calculate age advancement cost
- * ACTUAL GAME LOGIC (hardcoded in GameEngine.upgradeAge):
- * Age 1->2: 500g, 2->3: 1000g, 3->4: 1500g, 4->5: 2500g, 5->6: 4000g
- */
-export function getAgeCost(currentAge: number): number {
-  const ageCosts: Record<number, number> = {
-    1: 500,  // Age 1 -> 2
-    2: 1000, // Age 2 -> 3
-    3: 1500, // Age 3 -> 4
-    4: 2500, // Age 4 -> 5
-    5: 4000, // Age 5 -> 6
-  };
-  return ageCosts[currentAge] || 0;
-}
-
-/**
- * Helper function to calculate XP required for next age
- */
-export function getXpRequired(currentAge: number): number {
-  return Math.floor(
-    XP_CONFIG.baseXpRequired * Math.pow(XP_CONFIG.xpMultiplierPerAge, currentAge - 1)
-  );
-}
-
-/**
  * Helper function to calculate mana upgrade cost
- * ACTUAL GAME LOGIC: (level + 1) * 200
- * Level 0->1: 200g, Level 1->2: 400g, Level 2->3: 600g, etc.
+ * ACTUAL GAME LOGIC: (level + 1) * 150
+ * Level 0->1: 150g, Level 1->2: 300g, Level 2->3: 450g, etc.
  */
 export function getManaCost(currentLevel: number): number {
-  return (currentLevel + 1) * 200;
+  return (currentLevel + 1) * 150;
 }
 
 /**
- * Helper function to calculate turret upgrade cost
- * ACTUAL GAME LOGIC (from GameEngine.upgradeTurret):
- * Levels 1-4: 100g * level (100, 200, 300, 400)
- * Level 5: 600g, Level 6: 800g, Level 7: 1000g, Level 8: 1200g
- * Level 9: 1500g, Level 10: 1900g
+ * Helper function to calculate turret upgrade cost for current level.
+ * Delegates to turret config as single source of truth.
  */
 export function getTurretCost(currentLevel: number): number {
-  const nextLevel = currentLevel + 1;
-  if (nextLevel <= 4) {
-    return nextLevel * 100;
-  } else if (nextLevel === 5) {
-    return 600;
-  } else if (nextLevel === 6) {
-    return 800;
-  } else if (nextLevel === 7) {
-    return 1000;
-  } else if (nextLevel === 8) {
-    return 1200;
-  } else if (nextLevel === 9) {
-    return 1500;
-  } else if (nextLevel === 10) {
-    return 1900;
-  }
-  return 0; // Max level
+  return getTurretUpgradeCost(currentLevel);
 }
 
 /**
@@ -274,4 +229,10 @@ export function getGoldIncome(age: number): number {
 export function getManaGeneration(manaLevel: number): number {
   return BASE_CONFIG.baseManaPerSecond + 
          (manaLevel * INCOME_CONFIG.manaUpgrade.manaPerSecondPerLevel);
+}
+
+export function getGoldToManaConversionRate(manaLevel: number): number {
+  if (manaLevel < MANA_CONVERSION_CONFIG.unlockLevel) return 0;
+  const unlockedLevels = manaLevel - MANA_CONVERSION_CONFIG.unlockLevel + 1;
+  return unlockedLevels * MANA_CONVERSION_CONFIG.percentPerLevel;
 }

@@ -105,3 +105,28 @@ html, body {
 .animate-shake {
   animation: shake 0.5s ease-in-out;
 }
+
+/* Unit training panel scrollbar */
+.training-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #64748b #1e293b;
+}
+
+.training-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.training-scroll::-webkit-scrollbar-track {
+  background: #1e293b;
+  border-radius: 9999px;
+}
+
+.training-scroll::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #64748b, #475569);
+  border-radius: 9999px;
+  border: 2px solid #1e293b;
+}
+
+.training-scroll::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #94a3b8, #64748b);
+}
