@@ -24,12 +24,18 @@ export class ProjectileSystem {
 
       // Base collisions
       if (p.owner === 'PLAYER' && p.x >= state.battlefield.width - 1) {
+        if (p.splitOnImpact) {
+          this.spawnSplitProjectiles(state, p, state.battlefield.width - 1, 0);
+        }
         state.enemyBase.health = Math.max(0, state.enemyBase.health - p.damage);
         state.enemyBase.lastAttackTime = state.tick * (1000 / 60) / 1000;
         state.stats.damageDealt.player += p.damage;
         projToRemove.push(p.id);
         hitResolved = true;
       } else if (p.owner === 'ENEMY' && p.x <= 1) {
+        if (p.splitOnImpact) {
+          this.spawnSplitProjectiles(state, p, 1, 0);
+        }
         state.playerBase.health = Math.max(0, state.playerBase.health - p.damage);
         state.playerBase.lastAttackTime = state.tick * (1000 / 60) / 1000;
         state.stats.damageDealt.enemy += p.damage;
@@ -53,6 +59,7 @@ export class ProjectileSystem {
           if (Math.abs(ent.transform.x - p.x) > 1.2) continue;
         } else {
           if (Math.abs(ent.transform.x - p.x) > 0.8) continue;
+          if (Math.abs(ent.transform.laneY - p.y) > 1.5) continue;
         }
 
         candidates.push(ent);
@@ -155,16 +162,19 @@ export class ProjectileSystem {
       const dx = targetX - impactX;
       const dy = targetY - impactY;
       const dist = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
+      const nx = dx / dist;
+      const ny = dy / dist;
 
         state.projectiles.push({
           id: state.nextEntityId++,
           owner: projectile.owner,
-          x: impactX,
-          y: impactY,
+          x: impactX + nx * 0.9,
+          y: impactY + ny * 0.9,
           vx: (dx / dist) * split.childSpeed,
           vy: (dy / dist) * split.childSpeed,
           damage: split.childDamage,
           lifeMs: split.childLifeMs,
+          delayMs: 20,
           radiusPx: Math.max(2, (projectile.radiusPx ?? 4) * 0.8),
           color: projectile.color,
           glowColor: projectile.glowColor,

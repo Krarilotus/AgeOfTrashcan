@@ -434,6 +434,10 @@ export class RenderSystem {
       const tail = Math.min(20, Math.max(6, speed * 0.18));
       const nx = speed > 0.1 ? p.vx / speed : 0;
       const ny = speed > 0.1 ? p.vy / speed : 0;
+      const screenVx = p.vx;
+      const screenVy = -p.vy;
+      const screenSpeed = Math.max(0.1, Math.sqrt(screenVx * screenVx + screenVy * screenVy));
+      const angle = Math.atan2(screenVy, screenVx);
 
       this.ctx.globalAlpha = trailAlpha;
       this.ctx.strokeStyle = glow;
@@ -445,16 +449,33 @@ export class RenderSystem {
       this.ctx.stroke();
 
       this.ctx.globalAlpha = 1.0;
+      this.ctx.save();
+      this.ctx.translate(x, y);
+      this.ctx.rotate(angle);
       this.ctx.fillStyle = fill;
       this.ctx.beginPath();
-      this.ctx.arc(x, y, baseRadius, 0, Math.PI * 2);
+      // Velocity-oriented projectile body.
+      this.ctx.ellipse(0, 0, baseRadius * 1.35, Math.max(1.5, baseRadius * 0.75), 0, 0, Math.PI * 2);
       this.ctx.fill();
+      this.ctx.restore();
 
       this.ctx.strokeStyle = glow;
       this.ctx.lineWidth = Math.max(1, baseRadius * 0.25);
       this.ctx.beginPath();
       this.ctx.arc(x, y, baseRadius + 0.5, 0, Math.PI * 2);
       this.ctx.stroke();
+
+      // Secondary velocity wake for high-speed shots.
+      if (screenSpeed > 24) {
+        this.ctx.globalAlpha = Math.min(0.6, trailAlpha + 0.15);
+        this.ctx.strokeStyle = glow;
+        this.ctx.lineWidth = Math.max(1, baseRadius * 0.4);
+        this.ctx.beginPath();
+        this.ctx.moveTo(x - nx * (tail * 1.6), y + ny * (tail * 1.6));
+        this.ctx.lineTo(x - nx * (tail * 0.35), y + ny * (tail * 0.35));
+        this.ctx.stroke();
+        this.ctx.globalAlpha = 1.0;
+      }
     }
   }
 

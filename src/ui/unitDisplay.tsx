@@ -1,4 +1,4 @@
-﻿import React from 'react';
+import React from 'react';
 
 export function getUnitName(unitId: string): string {
   const names: Record<string, string> = {

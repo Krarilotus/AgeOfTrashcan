@@ -116,15 +116,26 @@ export class TurretSystem {
     const dy = target.transform.laneY - mount.y;
     const distanceToTarget = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
     const speed = Math.max(1, projectile.speed);
+    const curvature = projectile.curvature ?? 0;
+
+    let vx = (dx / distanceToTarget) * speed;
+    let vy = (dy / distanceToTarget) * speed;
+
+    // Ballistic launch for curved projectiles so velocity/trajectory is visibly distinct.
+    if (Math.abs(curvature) > 0.001) {
+      const flightTime = Math.max(0.2, Math.abs(dx) / Math.max(speed * 0.9, 0.1));
+      vx = dx / flightTime;
+      vy = (dy - 0.5 * curvature * flightTime * flightTime) / flightTime;
+    }
 
     state.projectiles.push({
       id: state.nextEntityId++,
       owner,
       x: mount.x,
       y: mount.y,
-      vx: (dx / distanceToTarget) * speed,
-      vy: (dy / distanceToTarget) * speed,
-      curvature: projectile.curvature ?? 0,
+      vx,
+      vy,
+      curvature,
       damage: projectile.damage,
       lifeMs: projectile.lifeMs ?? (distanceToTarget / speed) * 1200,
       remainingPierces: projectile.pierceCount ?? 0,

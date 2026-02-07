@@ -1,14 +1,9 @@
-<svg xmlns='http://www.w3.org/2000/svg' width='160' height='120' viewBox='0 0 160 120'>
-  <defs>
-    <linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
-      <stop offset='0%' stop-color='#f59e0b' />
-      <stop offset='100%' stop-color='#78350f' />
-    </linearGradient>
-  </defs>
-  <rect x='6' y='86' width='148' height='24' rx='6' fill='#0f172a' opacity='0.75'/>
-  <rect x='22' y='62' width='116' height='26' rx='8' fill='url(#g)' stroke='#0b1120' stroke-width='4'/>
-  <circle cx='48' cy='75' r='7' fill='#0f172a' opacity='0.7'/>
-  <circle cx='112' cy='75' r='7' fill='#0f172a' opacity='0.7'/>
-  <rect x='70' y='18' width='20' height='48' rx='6' fill='url(#g)' stroke='#0b1120' stroke-width='4'/>
-  <polygon points='80,8 95,24 65,24' fill='#f59e0b' stroke='#0b1120' stroke-width='3'/>
+﻿<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
+  <rect x="0" y="92" width="160" height="28" fill="#1e293b"/>
+  <rect x="12" y="74" width="136" height="16" rx="8" fill="#7c2d12" stroke="#431407" stroke-width="4"/>
+  <polygon points="28,72 80,34 132,72" fill="#92400e" stroke="#431407" stroke-width="4"/>
+  <line x1="52" y1="52" x2="108" y2="52" stroke="#fcd34d" stroke-width="5"/>
+  <line x1="80" y1="40" x2="80" y2="74" stroke="#fcd34d" stroke-width="5"/>
+  <circle cx="80" cy="52" r="12" fill="#f59e0b" stroke="#78350f" stroke-width="3"/>
+  <polygon points="80,18 86,30 100,30 89,38 93,52 80,44 67,52 71,38 60,30 74,30" fill="#fde047" stroke="#ca8a04" stroke-width="2"/>
 </svg>
