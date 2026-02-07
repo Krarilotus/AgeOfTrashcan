@@ -6,7 +6,6 @@
 
 import { AIPersonality, AttackGroup, AI_TUNING } from '../config/aiConfig';
 import { UnitDef, UNIT_DEFS, getUnitsForAge } from '../config/units';
-import { calculateTurretDPS, calculateTurretRange } from '../config/turretConfig';
 
 /**
  * Game state snapshot for AI decision making
@@ -39,11 +38,33 @@ export interface GameStateSnapshot {
   playerBaseHealth: number;
   playerBaseMaxHealth: number;
   playerTurretLevel: number;
+  playerTurretDps: number;
+  playerTurretMaxRange: number;
+  playerTurretAvgRange: number;
+  playerTurretProtectionMultiplier: number;
+  playerTurretSlotsUnlocked: number;
+  playerTurretInstalledCount: number;
+  playerTurretSlots: Array<{
+    slotIndex: number;
+    turretId: string | null;
+    cooldownRemaining: number;
+  }>;
   
   // Enemy base & defenses (AI's own base)
   enemyBaseHealth: number;
   enemyBaseMaxHealth: number;
   enemyTurretLevel: number;
+  enemyTurretDps: number;
+  enemyTurretMaxRange: number;
+  enemyTurretAvgRange: number;
+  enemyTurretProtectionMultiplier: number;
+  enemyTurretSlotsUnlocked: number;
+  enemyTurretInstalledCount: number;
+  enemyTurretSlots: Array<{
+    slotIndex: number;
+    turretId: string | null;
+    cooldownRemaining: number;
+  }>;
   
   // Units
   playerUnitCount: number;
@@ -68,6 +89,8 @@ export interface GameStateSnapshot {
   // Queues
   playerQueueSize: number;
   enemyQueueSize: number;
+  playerTurretQueueCount: number;
+  enemyTurretQueueCount: number;
   
   // Battlefield
   battlefieldWidth: number;
@@ -98,7 +121,9 @@ export type AIAction =
   | 'RECRUIT_UNIT' // Recruit a specific unit
   | 'AGE_UP' // Advance to next age
   | 'UPGRADE_MANA' // Upgrade mana generation
-  | 'BUILD_TURRET' // Build a turret
+  | 'UPGRADE_TURRET_SLOTS'
+  | 'BUY_TURRET_ENGINE'
+  | 'SELL_TURRET_ENGINE'
   | 'REPAIR_BASE' // Repair base health using mana (Age 6+)
   | 'ACTIVATE_SKILL' // Use a unit skill
   | 'EXECUTE_ATTACK_GROUP'; // Execute a coordinated attack group
@@ -287,8 +312,8 @@ export class AIBehaviorUtils {
     }
     
     // Factor in turret strength as defensive power
-    const playerTurretPower = state.playerTurretLevel * 100; // Each turret level = 100 combat value
-    const enemyTurretPower = state.enemyTurretLevel * 100;
+    const playerTurretPower = state.playerTurretDps * 6 + state.playerTurretMaxRange * 5;
+    const enemyTurretPower = state.enemyTurretDps * 6 + state.enemyTurretMaxRange * 5;
     
     // Add turret power ONLY if it helps defense. 
     // We EXCLUDE the Player's turret from the "Survival Threat" calculation. 
@@ -342,7 +367,7 @@ export class AIBehaviorUtils {
    */
   static evaluateAttackFeasibility(state: GameStateSnapshot): { feasibility: number; requiredMeatShield: number } {
      // 1. Calculate Enemy Static Defense (Turret)
-     const turretDps = calculateTurretDPS(state.playerTurretLevel);
+     const turretDps = state.playerTurretDps;
      const turretHealth = state.playerBaseHealth;
      
      // 2. Calculate Enemy Defending Units
@@ -361,7 +386,8 @@ export class AIBehaviorUtils {
      }
      
      // Base Resistance Score
-     const resistance = (turretDps * 50) + defendingStrength; // Turret is very scary
+     const auraResistance = (1 - (state.playerTurretProtectionMultiplier || 1)) * 1200;
+     const resistance = (turretDps * 50) + defendingStrength + auraResistance; // Turret + aura resistance
      
      // Our available pushing power (current units)
      let pushingPower = 0;
@@ -970,16 +996,13 @@ export class AIBehaviorUtils {
    * Uses EXACT formula from GameEngine.ts for accuracy
    */
   static isEnemyTurretTooStrong(state: GameStateSnapshot, unitDef: UnitDef): boolean {
-    const turretLevel = state.playerTurretLevel;
-    if (turretLevel === 0) return false; // No turret
-    
+    const turretDPS = state.playerTurretDps;
+    const turretRange = state.playerTurretMaxRange;
+    if (turretDPS <= 0 || turretRange <= 0) return false; // No turret
+
     const unitHealth = unitDef.health;
     const unitSpeed = unitDef.speed || 1.5;
     const unitRange = unitDef.range || 1;
-
-    // Use centralized configuration for turret stats
-    const turretDPS = calculateTurretDPS(turretLevel);
-    const turretRange = calculateTurretRange(turretLevel);
     
     // Distance the unit must walk UNDER FIRE
     // If unit has 5 range and turret has 20, it walks 15 units under fire.
@@ -989,8 +1012,10 @@ export class AIBehaviorUtils {
     // How long does unit spend in turret range?
     const timeInRange = distanceUnderFire / unitSpeed;
     
-    // How much damage will unit take?
-    const damageFromTurret = turretDPS * timeInRange;
+    // Turret protection auras make enemy frontline survive longer near their base.
+    // Model this as extra time under fire before a push can break through.
+    const defensiveLineFactor = 1 / Math.max(0.45, state.playerTurretProtectionMultiplier || 1);
+    const damageFromTurret = turretDPS * timeInRange * defensiveLineFactor;
     
     // Unit needs to survive crossing the range + have HP to fight
     // Add 30% safety margin (Survivable damage must be < 70% of Max HP)

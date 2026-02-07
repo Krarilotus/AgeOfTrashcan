@@ -1,244 +1,310 @@
-import { GameState, Entity, Projectile } from '../GameEngine';
+import { Entity, GameState } from '../GameEngine';
+import { UNIT_DEFS } from '../config/units';
 import {
-  TURRET_ABILITY_CONFIG,
-  TURRET_CONSTANTS,
-  calculateTurretDamage,
-  calculateTurretRange,
-} from '../config/turretConfig';
-import { TURRET_VISUALS, pixelsToUnits, unitsToPixels } from '../config/renderConfig';
+  getSlotMountYOffsetUnits,
+  getTurretEngineDef,
+  type TurretEngineDef,
+} from '../config/turrets';
+import { TURRET_VISUALS, pixelsToUnits } from '../config/renderConfig';
 
 export class TurretSystem {
-  private turretAccumPlayerMs = 0;
-  private turretAccumEnemyMs = 0;
+  public update(state: GameState, deltaSeconds: number): void {
+    const updateTurretsForOwner = (owner: 'PLAYER' | 'ENEMY') => {
+      const base = owner === 'PLAYER' ? state.playerBase : state.enemyBase;
+      const enemyOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+      const age = owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age;
 
-  public update(state: GameState, deltaSeconds: number, projectileSystem: any): void {
-    
-    // Update cooldowns
-    if (state.playerBase.turretAbilityCooldown && state.playerBase.turretAbilityCooldown > 0) {
-      state.playerBase.turretAbilityCooldown -= deltaSeconds;
-    }
-    if (state.enemyBase.turretAbilityCooldown && state.enemyBase.turretAbilityCooldown > 0) {
-      state.enemyBase.turretAbilityCooldown -= deltaSeconds;
-    }
+      for (let slotIndex = 0; slotIndex < base.turretSlotsUnlocked; slotIndex++) {
+        const slot = base.turretSlots[slotIndex];
+        if (!slot) continue;
+        slot.cooldownRemaining = Math.max(0, slot.cooldownRemaining - deltaSeconds);
+        if (!slot.turretId) continue;
 
-    const { FIRE_INTERVAL, PROJECTILE_SPEED, BASE_HITBOX_RADIUS } = { ...TURRET_CONSTANTS, BASE_HITBOX_RADIUS: 3 };
-    
-    const getEffectiveTurretRange = (level: number): number => {
-      const nominalRange = calculateTurretRange(level);
-      const maxRange = state.battlefield.width / 2;
-      return Math.min(nominalRange, maxRange);
+        const engine = getTurretEngineDef(slot.turretId);
+        if (!engine) continue;
+        if (slot.cooldownRemaining > 0) continue;
+
+        const target = this.selectTarget(state, base.x, enemyOwner, engine);
+        if (!target) continue;
+
+        const mount = TurretSystem.getTurretPosition(base.x, age, slotIndex);
+
+        if (engine.attackType === 'projectile' && engine.projectile) {
+          this.fireProjectile(state, owner, mount, target, engine);
+          slot.cooldownRemaining = engine.fireIntervalSec;
+          continue;
+        }
+
+        if (engine.attackType === 'chain_lightning' && engine.chainLightning) {
+          this.castChainLightning(state, owner, base.x, mount, engine);
+          slot.cooldownRemaining = engine.chainLightning.cooldownSeconds;
+          continue;
+        }
+
+        if (engine.attackType === 'artillery_barrage' && engine.artillery) {
+          this.castArtilleryBarrage(state, owner, base.x, mount, engine);
+          slot.cooldownRemaining = engine.artillery.cooldownSeconds;
+          continue;
+        }
+
+        if (engine.attackType === 'oil_pour' && engine.oil) {
+          this.castOilPour(state, owner, base.x, engine);
+          slot.cooldownRemaining = engine.oil.cooldownSeconds;
+          continue;
+        }
+
+        if (engine.attackType === 'drone_swarm' && engine.drones) {
+          this.launchDroneSwarm(state, owner, mount, target, engine);
+          slot.cooldownRemaining = engine.drones.cooldownSeconds;
+        }
+      }
     };
 
-    const updateTurretForSide = (
-      isPlayer: boolean,
-      accumulator: number,
-      projIdOffset: number
-    ): number => {
-      const base = isPlayer ? state.playerBase : state.enemyBase;
-      const owner = isPlayer ? 'PLAYER' : 'ENEMY';
-      const targetOwner = isPlayer ? 'ENEMY' : 'PLAYER';
-      const age = isPlayer ? state.progression.player.age : state.progression.enemy.age;
-      const turretLevel = base.turretLevel;
-      const turretRange = getEffectiveTurretRange(turretLevel);
-      const piercingRange = turretRange * TURRET_ABILITY_CONFIG.PIERCING_SHOT.rangeMultiplier;
-      
-      const targets: Entity[] = [];
-      for (const entity of state.entities.values()) {
-        if (entity.owner === targetOwner) {
-          const dist = Math.abs(entity.transform.x - base.x);
-          if (dist <= turretRange || dist <= BASE_HITBOX_RADIUS) {
-            targets.push(entity);
-          }
-        }
-      }
-      targets.sort((a, b) => Math.abs(a.transform.x - base.x) - Math.abs(b.transform.x - base.x));
-
-      let piercingTarget: Entity | null = null;
-      if (turretLevel >= TURRET_ABILITY_CONFIG.PIERCING_SHOT.requiredLevel) {
-        for (const entity of state.entities.values()) {
-          if (entity.owner !== targetOwner) continue;
-          const dist = Math.abs(entity.transform.x - base.x);
-          if (dist <= piercingRange) {
-            if (!piercingTarget || dist < Math.abs(piercingTarget.transform.x - base.x)) {
-              piercingTarget = entity;
-            }
-          }
-        }
-      }
-      
-      if (targets.length > 0 || piercingTarget) {
-        accumulator += deltaSeconds;
-        if (accumulator >= FIRE_INTERVAL) {
-          accumulator -= FIRE_INTERVAL;
-          
-          const damagePerShot = calculateTurretDamage(turretLevel);
-          const canUseAbility = (base.turretAbilityCooldown ?? 0) <= 0;
-          // Single source-of-truth muzzle position for this shot tick.
-          const muzzlePos = TurretSystem.getTurretPosition(base.x, age, turretLevel);
-          
-          if (
-            turretLevel >= TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.requiredLevel &&
-            canUseAbility &&
-            targets.length >= TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.minTargets
-          ) {
-            base.turretAbilityCooldown = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.cooldownSeconds;
-            const barrageDamage =
-              damagePerShot * TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.damageMultiplier;
-
-            // Spawn 100 falling projectiles
-            const barrageCount = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.projectileCount;
-            const barrageDuration = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.durationMs;
-            const abilityRange = getEffectiveTurretRange(turretLevel);
-            
-            // Determine covered area (X range)
-            const minX = isPlayer ? base.x : base.x - abilityRange;
-            const maxX = isPlayer ? base.x + abilityRange : base.x;
-            
-            for (let i = 0; i < barrageCount; i++) {
-                const delay = Math.random() * barrageDuration;
-                const targetX = minX + Math.random() * (maxX - minX);
-                const targetY = (Math.random() - 0.5) * TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.spreadLaneY;
-                
-                // Falling from SKY (Positive Y is Up in Projectile Render Logic)
-                const startY = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.startY;
-                const speed = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.fallSpeed;
-                const distY = Math.abs(startY - targetY); // Distance to fall
-                const travelTime = (distY / Math.abs(speed)) * 1000;
-                
-                state.projectiles.push({ 
-                  id: (state.nextEntityId++) + projIdOffset + i, 
-                  owner: owner as 'PLAYER' | 'ENEMY', 
-                  x: targetX, 
-                  y: startY, 
-                  vx: 0, 
-                  vy: speed,
-                  damage: barrageDamage, 
-                  lifeMs: travelTime + TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.extraLifeMs,
-                  delayMs: delay,
-                  isFalling: true,
-                  targetY: targetY
-                });
-            }
-            
-            // Cast Effect at Turret (Just visual)
-            state.vfx.push({
-              id: state.nextVfxId++,
-              type: 'ability_cast',
-              x: muzzlePos.x,
-              // RenderSystem treats VFX y as lane offset (+down), while turret/projectile
-              // muzzle y is world-up. Flip sign so cast source matches projectile source.
-              y: -muzzlePos.y,
-              age,
-              lifeMs: TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.vfxLifeMs,
-              data: { turretAbility: 'artillery_barrage', targets: targets.length },
-            });
-            
-          } else if (
-            turretLevel >= TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.requiredLevel &&
-            canUseAbility &&
-            targets.length >= TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.minTargets
-          ) {
-            base.turretAbilityCooldown = TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.cooldownSeconds;
-            const maxChainTargets = TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.maxTargets;
-            const chainPositions: {x: number, y: number}[] = [];
-
-            for (let i = 0; i < Math.min(maxChainTargets, targets.length); i++) {
-              const chainDamage =
-                damagePerShot *
-                (
-                  TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.initialDamageMultiplier -
-                  i * TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.bounceFalloff
-                );
-              targets[i].health.current -= chainDamage;
-              chainPositions.push({ x: targets[i].transform.x, y: targets[i].transform.laneY });
-            }
-             state.vfx.push({
-              id: state.nextVfxId++,
-              type: 'ability_cast',
-              x: muzzlePos.x, 
-              y: -muzzlePos.y,
-              age,
-              lifeMs: TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.vfxLifeMs,
-              data: { turretAbility: 'chain_lightning', targetPositions: chainPositions },
-            });
-          } else if (
-            turretLevel >= TURRET_ABILITY_CONFIG.PIERCING_SHOT.requiredLevel &&
-            canUseAbility &&
-            !!piercingTarget
-          ) {
-            base.turretAbilityCooldown = TURRET_ABILITY_CONFIG.PIERCING_SHOT.cooldownSeconds;
-            const pierceDamage = damagePerShot * TURRET_ABILITY_CONFIG.PIERCING_SHOT.damageMultiplier;
-            piercingTarget.health.current -= pierceDamage;
-
-            const targetPositions = [
-              { x: piercingTarget.transform.x, y: piercingTarget.transform.laneY },
-            ];
-
-             state.vfx.push({
-              id: state.nextVfxId++,
-              type: 'ability_cast',
-              x: muzzlePos.x,
-              y: -muzzlePos.y,
-              age,
-              lifeMs: TURRET_ABILITY_CONFIG.PIERCING_SHOT.vfxLifeMs,
-              data: {
-                turretAbility: 'piercing_shot',
-                targets: 1,
-                targetPositions,
-                durationMs: TURRET_ABILITY_CONFIG.PIERCING_SHOT.vfxLifeMs,
-              },
-            });
-          } else {
-            if (targets.length === 0) return accumulator;
-            const target = targets[0];
-            const projX = muzzlePos.x;
-            const projY = muzzlePos.y;
-            
-            const dx = target.transform.x - projX;
-            const dy = target.transform.laneY - projY;
-            const distanceToTarget = Math.sqrt(dx * dx + dy * dy);
-            const angle = Math.atan2(dy, dx);
-            
-            const projVx = Math.cos(angle) * PROJECTILE_SPEED;
-            const projVy = Math.sin(angle) * PROJECTILE_SPEED;
-            const lifeMs = (distanceToTarget / PROJECTILE_SPEED) * 1000 * 1.2;
-            const projId = (state.nextEntityId++) + projIdOffset;
-            
-            state.projectiles.push({ 
-              id: projId, 
-              owner: owner as 'PLAYER' | 'ENEMY', 
-              x: projX, 
-              y: projY, 
-              vx: projVx, 
-              vy: projVy,
-              damage: damagePerShot, 
-              lifeMs 
-            });
-          }
-        }
-      } else {
-        accumulator = 0;
-      }
-      return accumulator;
-    };
-
-    this.turretAccumPlayerMs = updateTurretForSide(true, this.turretAccumPlayerMs, 200000);
-    this.turretAccumEnemyMs = updateTurretForSide(false, this.turretAccumEnemyMs, 300000);
+    updateTurretsForOwner('PLAYER');
+    updateTurretsForOwner('ENEMY');
   }
 
-  // Helper methods
-  public static getTurretPosition(baseX: number, age: number, turretLevel: number): { x: number; y: number } {
+  private selectTarget(
+    state: GameState,
+    baseX: number,
+    targetOwner: 'PLAYER' | 'ENEMY',
+    engine: TurretEngineDef
+  ): Entity | null {
+    let best: Entity | null = null;
+    let bestScore = -Infinity;
+
+    for (const entity of state.entities.values()) {
+      if (entity.owner !== targetOwner) continue;
+      const dist = Math.abs(entity.transform.x - baseX);
+      if (dist > engine.range) continue;
+
+      const healthPct = entity.health.max > 0 ? entity.health.current / entity.health.max : 0;
+      const dps = entity.attack.damage * Math.max(entity.attack.speed, 0.2);
+      const unitDef = UNIT_DEFS[entity.unitId];
+      const skill = unitDef?.skill;
+      const skillDps = skill
+        ? ((skill.damage ?? skill.power ?? 0) * Math.max(skill.radius ?? skill.power ?? 1, 1)) / Math.max(skill.cooldownMs / 1000, 0.1)
+        : 0;
+
+      let score = 0;
+      if (engine.targeting === 'nearest') score = -dist;
+      else if (engine.targeting === 'healthiest') score = entity.health.current + healthPct * 1000;
+      else if (engine.targeting === 'lowest_health') score = -entity.health.current;
+      else if (engine.targeting === 'highest_dps') score = dps * 10 - dist;
+      else if (engine.targeting === 'strongest_ability_dps') score = skillDps * 10 + dps * 3 - dist;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = entity;
+      }
+    }
+
+    return best;
+  }
+
+  private fireProjectile(
+    state: GameState,
+    owner: 'PLAYER' | 'ENEMY',
+    mount: { x: number; y: number },
+    target: Entity,
+    engine: TurretEngineDef
+  ): void {
+    const projectile = engine.projectile;
+    if (!projectile) return;
+
+    const dx = target.transform.x - mount.x;
+    const dy = target.transform.laneY - mount.y;
+    const distanceToTarget = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
+    const speed = Math.max(1, projectile.speed);
+
+    state.projectiles.push({
+      id: state.nextEntityId++,
+      owner,
+      x: mount.x,
+      y: mount.y,
+      vx: (dx / distanceToTarget) * speed,
+      vy: (dy / distanceToTarget) * speed,
+      curvature: projectile.curvature ?? 0,
+      damage: projectile.damage,
+      lifeMs: projectile.lifeMs ?? (distanceToTarget / speed) * 1200,
+      remainingPierces: projectile.pierceCount ?? 0,
+      splitOnImpact: projectile.splitOnImpact,
+      splashRadius: projectile.splashRadius,
+      radiusPx: projectile.radiusPx,
+      color: projectile.color,
+      glowColor: projectile.glowColor,
+      trailAlpha: projectile.trailAlpha,
+    });
+
+    if ((projectile.pierceCount ?? 0) > 0) {
+      state.vfx.push({
+        id: state.nextVfxId++,
+        type: 'ability_cast',
+        x: mount.x,
+        y: -mount.y,
+        age: owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age,
+        lifeMs: 220,
+        data: {
+          turretAbility: 'piercing_shot',
+          durationMs: 220,
+          targetPositions: [{ x: target.transform.x, y: target.transform.laneY }],
+        },
+      });
+    }
+  }
+
+  private castChainLightning(
+    state: GameState,
+    owner: 'PLAYER' | 'ENEMY',
+    baseX: number,
+    mount: { x: number; y: number },
+    engine: TurretEngineDef
+  ): void {
+    const config = engine.chainLightning;
+    if (!config) return;
+
+    const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+    const targets = Array.from(state.entities.values())
+      .filter((entity) => entity.owner === targetOwner && Math.abs(entity.transform.x - baseX) <= engine.range)
+      .sort((a, b) => Math.abs(a.transform.x - baseX) - Math.abs(b.transform.x - baseX))
+      .slice(0, config.maxTargets);
+
+    if (targets.length === 0) return;
+
+    const positions: Array<{ x: number; y: number }> = [];
+    let damage = config.initialDamage;
+
+    for (const target of targets) {
+      target.health.current -= damage;
+      positions.push({ x: target.transform.x, y: target.transform.laneY });
+      damage *= config.falloffMultiplier;
+    }
+
+    state.vfx.push({
+      id: state.nextVfxId++,
+      type: 'ability_cast',
+      x: mount.x,
+      y: -mount.y,
+      age: owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age,
+      lifeMs: 550,
+      data: { turretAbility: 'chain_lightning', targetPositions: positions },
+    });
+  }
+
+  private castArtilleryBarrage(
+    state: GameState,
+    owner: 'PLAYER' | 'ENEMY',
+    baseX: number,
+    mount: { x: number; y: number },
+    engine: TurretEngineDef
+  ): void {
+    const config = engine.artillery;
+    if (!config) return;
+
+    const direction = owner === 'PLAYER' ? 1 : -1;
+
+    state.vfx.push({
+      id: state.nextVfxId++,
+      type: 'ability_cast',
+      x: mount.x,
+      y: -mount.y,
+      age: owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age,
+      lifeMs: 520,
+      data: { turretAbility: 'artillery_barrage' },
+    });
+
+    for (let i = 0; i < config.barrageCount; i++) {
+      const randomForward = Math.random() * config.spreadRange;
+      const targetX = baseX + direction * randomForward;
+      const targetY = (Math.random() - 0.5) * config.spreadLaneY;
+      const distanceY = Math.abs(config.startY - targetY);
+      const shellLife = (distanceY / Math.max(Math.abs(config.fallSpeed), 1)) * 1000 + 350;
+
+      state.projectiles.push({
+        id: state.nextEntityId++,
+        owner,
+        x: targetX,
+        y: config.startY,
+        vx: 0,
+        vy: config.fallSpeed,
+        damage: config.shellDamage,
+        lifeMs: shellLife,
+        isFalling: true,
+        targetY,
+        splashRadius: config.shellRadius,
+        delayMs: Math.random() * 800,
+        radiusPx: 3,
+        color: '#fb7185',
+        glowColor: 'rgba(251,113,133,0.9)',
+        trailAlpha: 0.35,
+      });
+    }
+  }
+
+  private castOilPour(state: GameState, owner: 'PLAYER' | 'ENEMY', baseX: number, engine: TurretEngineDef): void {
+    const config = engine.oil;
+    if (!config) return;
+
+    const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+    const direction = owner === 'PLAYER' ? 1 : -1;
+    const centerX = baseX + direction * 2.5;
+
+    for (const entity of state.entities.values()) {
+      if (entity.owner !== targetOwner) continue;
+      const dist = Math.abs(entity.transform.x - centerX);
+      if (dist > config.radius) continue;
+      entity.health.current -= config.damage;
+    }
+
+    state.vfx.push({
+      id: state.nextVfxId++,
+      type: 'ability_cast',
+      x: centerX,
+      y: 0,
+      age: owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age,
+      lifeMs: 900,
+      data: { turretAbility: 'oil_pour', radius: config.radius },
+    });
+  }
+
+  private launchDroneSwarm(
+    state: GameState,
+    owner: 'PLAYER' | 'ENEMY',
+    mount: { x: number; y: number },
+    target: Entity,
+    engine: TurretEngineDef
+  ): void {
+    const config = engine.drones;
+    if (!config) return;
+
+    for (let i = 0; i < config.droneCount; i++) {
+      const jitterY = (Math.random() - 0.5) * 1.4;
+      const dx = target.transform.x - mount.x;
+      const dy = target.transform.laneY + jitterY - mount.y;
+      const distance = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
+      const speed = Math.max(8, config.droneSpeed);
+
+      state.projectiles.push({
+        id: state.nextEntityId++,
+        owner,
+        x: mount.x,
+        y: mount.y,
+        vx: (dx / distance) * speed,
+        vy: (dy / distance) * speed,
+        damage: config.droneDamage,
+        lifeMs: 1800,
+        radiusPx: 5,
+        color: '#93c5fd',
+        glowColor: 'rgba(147,197,253,0.85)',
+        trailAlpha: 0.25,
+      });
+    }
+  }
+
+  public static getTurretPosition(baseX: number, age: number, slotIndex: number): { x: number; y: number } {
     const dims = TURRET_VISUALS.BASE_DIMENSIONS[age - 1] || TURRET_VISUALS.BASE_DIMENSIONS[0];
     const platformY = pixelsToUnits(dims.height) + TURRET_VISUALS.PLATFORM_OFFSET_UNITS;
-    
-    // Inline static calls
-    const baseSize = TURRET_VISUALS.BASE_SIZE + turretLevel * TURRET_VISUALS.SIZE_PER_LEVEL;
-    let ratio = 0.4;
-    if (turretLevel >= 7) ratio = 0.6;
-    else if (turretLevel >= 4) ratio = 0.5;
-    
-    const cannonOffsetPx = baseSize * ratio;
-    const cannonTipY = platformY + pixelsToUnits(cannonOffsetPx);
-    return { x: baseX, y: cannonTipY };
+    const slotYOffset = getSlotMountYOffsetUnits(slotIndex);
+    return { x: baseX, y: platformY + slotYOffset };
   }
 }

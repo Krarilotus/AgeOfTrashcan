@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 
 export function getUnitName(unitId: string): string {
   const names: Record<string, string> = {
@@ -55,7 +55,7 @@ export function getAbilityDisplay(skill: any): React.ReactNode {
 
   if (skill.type === 'aoe') {
     const damage = skill.damage ?? 0;
-    const radius = skill.power;
+    const radius = skill.radius ?? skill.power;
     const range = skill.range ?? 6;
 
     return (
@@ -99,7 +99,7 @@ export function getAbilityText(skill: any): string {
     return `💚 Heal ${Math.abs(skill.power)} HP (Cost: ${skill.manaCost}m, CD: ${cooldownSec}s)`;
   }
   if (skill.type === 'aoe') {
-    return `💥 AOE: ${skill.damage ?? 0} Dmg (Rad: ${skill.power}, Rng: ${skill.range ?? 6}, Cost: ${skill.manaCost}m, CD: ${cooldownSec}s)`;
+    return `💥 AOE: ${skill.damage ?? 0} Dmg (Rad: ${skill.radius ?? skill.power}, Rng: ${skill.range ?? 6}, Cost: ${skill.manaCost}m, CD: ${cooldownSec}s)`;
   }
   if (skill.type === 'flamethrower') {
     return `🔥 Flamethrower (Range: ${skill.range}, Dmg: ${skill.power}/tick, Rate: ${(1000 / skill.cooldownMs).toFixed(0)}/s)`;

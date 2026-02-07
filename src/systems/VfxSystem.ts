@@ -1,7 +1,7 @@
 import { GameState } from '../GameEngine';
 
 // Define VFX Types in a central place or import from config
-export type VfxType = 'ability_cast' | 'ability_impact' | 'kill_reward';
+export type VfxType = 'ability_cast' | 'ability_impact' | 'kill_reward' | 'flamethrower';
 
 export interface VfxData {
   id: number;

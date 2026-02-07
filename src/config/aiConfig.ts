@@ -169,7 +169,7 @@ export const AI_TUNING = {
   
   // Turret placement
   turret: {
-    maxTurrets: 3,
+    maxTurrets: 4,
     placementInterval: 15000, // 15 seconds between turret builds
     minGoldMultiplier: 1.5, // Need 2x turret cost before building
   },

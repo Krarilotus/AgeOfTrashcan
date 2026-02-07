@@ -256,7 +256,7 @@ export class SkillSystem {
   ): boolean {
     const direction = entity.owner === 'PLAYER' ? 1 : -1;
     const maxCastRange = skill.range ?? 6;
-    const radius = skill.power; 
+    const radius = skill.radius ?? skill.power; 
     
     // 1. Find Target Center
     // Scan for closest enemy within cast range to center the blast on

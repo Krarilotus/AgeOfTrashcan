@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+﻿import React, { useEffect, useRef, useState } from 'react';
 import { GameEngine } from './GameEngine';
 import {
   BASE_CONFIG,
@@ -10,10 +10,8 @@ import {
   getManaGeneration,
 } from './config/gameBalance';
 import {
-  TURRET_ABILITY_CONFIG,
-  calculateTurretDPS,
-  calculateTurretProtectionReductionPercent,
-} from './config/turretConfig';
+  calculateTurretDefenseStats,
+} from './config/turrets';
 import { GameOverOverlay } from './ui/GameOverOverlay';
 import { StartScreen, type Difficulty } from './ui/StartScreen';
 import { UnitTrainingPanel } from './ui/UnitTrainingPanel';
@@ -167,8 +165,16 @@ export default function App() {
     gameRef.current?.upgradeAge();
   };
 
-  const handleUpgradeTurret = () => {
-    gameRef.current?.upgradeTurret();
+  const handleQueueTurretSlotUpgrade = () => {
+    gameRef.current?.queueTurretSlotUpgrade();
+  };
+
+  const handleQueueTurretEngine = (slotIndex: number, turretId: string) => {
+    gameRef.current?.queueTurretEngine('PLAYER', slotIndex, turretId);
+  };
+
+  const handleSellTurretEngine = (slotIndex: number) => {
+    gameRef.current?.sellTurretEngine('PLAYER', slotIndex);
   };
 
   const handleUpgradeManaGeneration = () => {
@@ -309,6 +315,7 @@ export default function App() {
           <UnitTrainingPanel
             gameState={gameState}
             onSpawnUnit={handleSpawnUnit}
+            onQueueTurretEngine={handleQueueTurretEngine}
             onCancelQueueItem={handleCancelQueueItem}
           />
 
@@ -364,8 +371,8 @@ export default function App() {
                       <span className="font-bold text-red-400">{gameState?.progression?.enemy?.age ?? 1}</span>
                     </div>
                     <div className="flex justify-between text-slate-400">
-                      <span>Turret Lvl:</span>
-                      <span className="font-bold text-red-400">Lvl {aiDebugInfo?.behaviorParams?.turret ?? gameState?.enemyBase?.turretLevel ?? 0}</span>
+                      <span>Turret Slots:</span>
+                      <span className="font-bold text-red-400">{gameState?.enemyBase?.turretSlotsUnlocked ?? 1} / {gameState?.enemyBase?.maxTurretSlots ?? 4}</span>
                     </div>
                     <div className="flex justify-between text-slate-400">
                       <span>Gold/Mana:</span>
@@ -416,7 +423,7 @@ export default function App() {
             <div className="space-y-2 text-xs">
               <div className="flex justify-between"><span>Age</span><span className="font-bold text-amber-400">{gameState?.progression?.player?.age ?? 1}</span></div>
               <div className="border-t border-slate-600 pt-2 mt-2">
-                <div className="flex justify-between"><span>Turret</span><span className="font-bold text-blue-400">Lv.{gameState?.playerBase?.turretLevel ?? 0}</span></div>
+                <div className="flex justify-between"><span>Turret Slots</span><span className="font-bold text-blue-400">{gameState?.playerBase?.turretSlotsUnlocked ?? 1}/{gameState?.playerBase?.maxTurretSlots ?? 4}</span></div>
               </div>
               <div className="border-t border-slate-600 pt-2 mt-2">
                 <div className="flex justify-between">
@@ -430,40 +437,19 @@ export default function App() {
               </div>
             </div>
             <div className="mt-3 text-xs">
-              <div className="flex justify-between"><span>Damage Dealt</span><span className="font-semibold">{Math.floor(gameState?.stats?.damageDealt?.player ?? 0)} / {Math.floor(gameState?.stats?.damageDealt?.enemy ?? 0)}</span></div>
-              <div className="flex justify-between mt-1">
-                <span>Turret Effect</span>
-                <span className="font-semibold">
-                  {(() => {
-                    const level = gameState?.playerBase?.turretLevel ?? 0;
-                    const dps = calculateTurretDPS(level);
-                    return `${dps.toFixed(1)} DPS`;
-                  })()}
-                </span>
-              </div>
-              <div className="flex justify-between mt-1 text-slate-400">
-                <span>Next Turret +</span>
-                <span className="font-mono">
-                  {(() => {
-                    const level = gameState?.playerBase?.turretLevel ?? 0;
-                    const nextLevel = Math.min(level + 1, 10);
-                    const dpsIncrease = calculateTurretDPS(nextLevel) - calculateTurretDPS(level);
-                    return `+${dpsIncrease.toFixed(0)} DPS`;
-                  })()}
-                </span>
-              </div>
               {(() => {
-                const level = gameState?.playerBase?.turretLevel ?? 0;
-                const piercingLv = TURRET_ABILITY_CONFIG.PIERCING_SHOT.requiredLevel;
-                const chainLv = TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.requiredLevel;
-                const barrageLv = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.requiredLevel;
-                if (level === piercingLv - 1) return <div className="flex justify-between mt-1 text-purple-400"><span>Next: Piercing Shot</span><span className="text-xs">Lv.{piercingLv} Ability</span></div>;
-                if (level === chainLv - 1) return <div className="flex justify-between mt-1 text-purple-400"><span>Next: Chain Lightning</span><span className="text-xs">Lv.{chainLv} Ability</span></div>;
-                if (level === barrageLv - 1) return <div className="flex justify-between mt-1 text-purple-400"><span>Next: Artillery Barrage</span><span className="text-xs">Lv.{barrageLv} Ability</span></div>;
-                if (level >= piercingLv && level < chainLv) return <div className="flex justify-between mt-1 text-green-400"><span>Piercing Shot</span><span className="text-xs">Active</span></div>;
-                if (level >= chainLv && level < barrageLv) return <div className="flex justify-between mt-1 text-green-400"><span>Chain Lightning</span><span className="text-xs">Active</span></div>;
-                if (level >= barrageLv) return <div className="flex justify-between mt-1 text-green-400"><span>Artillery Barrage</span><span className="text-xs">Active</span></div>;
-                return null;
+                const stats =
+                  gameState?.playerBase?.turretDefenseStats ??
+                  calculateTurretDefenseStats(gameState?.playerBase ?? { turretSlotsUnlocked: 1, turretSlots: [] });
+                const protectionPct = Math.round((1 - (stats?.strongestProtectionMultiplier ?? 1)) * 100);
+                return (
+                  <>
+                    <div className="flex justify-between"><span>Damage Dealt</span><span className="font-semibold">{Math.floor(gameState?.stats?.damageDealt?.player ?? 0)} / {Math.floor(gameState?.stats?.damageDealt?.enemy ?? 0)}</span></div>
+                    <div className="flex justify-between mt-1"><span>Turret DPS</span><span className="font-semibold">{(stats?.totalDps ?? 0).toFixed(1)}</span></div>
+                    <div className="flex justify-between mt-1 text-slate-400"><span>Max Turret Range</span><span className="font-mono">{(stats?.maxRange ?? 0).toFixed(1)}</span></div>
+                    <div className="flex justify-between mt-1 text-slate-400"><span>Best Protection Aura</span><span className="font-mono">{protectionPct}%</span></div>
+                  </>
+                );
               })()}
               <div className="flex justify-between mt-1 text-slate-400">
                 <span>Age Upgrade Benefit</span>
@@ -472,15 +458,6 @@ export default function App() {
                   if (age >= PROGRESSION_CONFIG.maxAge) return 'Max age reached';
                   const goldGain = getGoldIncome(age + 1) - getGoldIncome(age);
                   return `+${goldGain}g/s, ${PROGRESSION_CONFIG.ageBaseHealthMultiplier}x HP`;
-                })()}</span>
-              </div>
-              <div className="flex justify-between mt-1">
-                <span>Turret Protection</span>
-                <span className="font-semibold">{(() => {
-                  const level = gameState?.playerBase?.turretLevel ?? 0;
-                  if (level === 0) return 'None';
-                  const reduction = calculateTurretProtectionReductionPercent(level);
-                  return `${reduction.toFixed(1)}% dmg reduction`;
                 })()}</span>
               </div>
             </div>
@@ -561,15 +538,57 @@ export default function App() {
                 </button>
               )}
 
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2"><span>🗼</span><span className="text-sm">Turret Lv.{gameState?.playerBase?.turretLevel ?? 0}</span></div>
-                <button
-                  onClick={handleUpgradeTurret}
-                  className="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 rounded border border-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={(gameState?.economy?.player?.gold ?? 0) < (gameState?.playerBase?.turretUpgradeCost ?? 100)}
-                >
-                  {(gameState?.playerBase?.turretUpgradeCost ?? 100)}g
-                </button>
+              {(() => {
+                const slotsUnlocked = gameState?.playerBase?.turretSlotsUnlocked ?? 1;
+                const maxSlots = gameState?.playerBase?.maxTurretSlots ?? 4;
+                const nextSlotCost = gameState?.playerBase?.nextTurretSlotCost ?? 0;
+                const slotUpgradeQueued = (gameState?.playerQueue ?? []).some((q: any) => q.kind === 'turret_slot');
+                const queueFull = (gameState?.playerQueue?.length ?? 0) >= 5;
+                const canUnlock =
+                  slotsUnlocked < maxSlots &&
+                  nextSlotCost > 0 &&
+                  (gameState?.economy?.player?.gold ?? 0) >= nextSlotCost &&
+                  !slotUpgradeQueued &&
+                  !queueFull;
+                const unlockLabel =
+                  slotsUnlocked >= maxSlots
+                    ? '✅ All turret slots unlocked'
+                    : `🔩 Unlock Slot ${Math.min(slotsUnlocked + 1, maxSlots)} - ${nextSlotCost}g`;
+
+                return (
+                  <button
+                    onClick={handleQueueTurretSlotUpgrade}
+                    className="w-full px-3 py-2 text-sm bg-amber-900 hover:bg-amber-800 border border-amber-700 rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                    disabled={!canUnlock}
+                  >
+                    {unlockLabel}
+                  </button>
+                );
+              })()}
+
+              <div className="space-y-2 border-t border-slate-600 pt-2 mt-2">
+                <div className="text-sm text-slate-300">Mounted Turret Engines</div>
+                {(gameState?.playerBase?.turretSlots ?? []).slice(0, gameState?.playerBase?.turretSlotsUnlocked ?? 1).map((slot: any, idx: number) => {
+                  const turret = gameState?.turretCatalog?.[slot.turretId ?? ''];
+                  return (
+                    <div key={idx} className="flex items-center justify-between text-xs bg-slate-700/40 rounded px-2 py-1">
+                      <div>
+                        <div className="text-slate-300">Slot {idx + 1}</div>
+                        <div className="text-slate-400">{turret?.name ?? (slot.turretId ? slot.turretId : 'Empty')}</div>
+                      </div>
+                      {slot.turretId ? (
+                        <button
+                          onClick={() => handleSellTurretEngine(idx)}
+                          className="px-2 py-1 text-xs bg-rose-900 hover:bg-rose-800 border border-rose-700 rounded"
+                        >
+                          Sell
+                        </button>
+                      ) : (
+                        <span className="text-slate-500">-</span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -592,3 +611,4 @@ export default function App() {
     </div>
   );
 }
+

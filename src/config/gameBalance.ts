@@ -1,5 +1,3 @@
-import { getTurretUpgradeCost } from './turretConfig';
-
 /**
  * Game Balance Configuration
  * All costs, income rates, XP rates, and game mechanics in one place
@@ -189,14 +187,6 @@ export const GAME_LOOP_CONFIG = {
  */
 export function getManaCost(currentLevel: number): number {
   return (currentLevel + 1) * 150;
-}
-
-/**
- * Helper function to calculate turret upgrade cost for current level.
- * Delegates to turret config as single source of truth.
- */
-export function getTurretCost(currentLevel: number): number {
-  return getTurretUpgradeCost(currentLevel);
 }
 
 /**

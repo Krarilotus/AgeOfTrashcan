@@ -1,16 +1,67 @@
-import React, { useEffect, useRef, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { UNIT_DEFS } from '../GameEngine';
+import { estimateEngineDps, type TurretEngineDef } from '../config/turrets';
 import { getAbilityDisplay, getAbilityText, getUnitName } from './unitDisplay';
+
+type TurretCatalog = Record<string, TurretEngineDef>;
 
 interface UnitTrainingPanelProps {
   gameState: any;
   onSpawnUnit: (unitId: string) => void;
+  onQueueTurretEngine: (slotIndex: number, turretId: string) => void;
   onCancelQueueItem: (index: number) => void;
 }
 
-export function UnitTrainingPanel({ gameState, onSpawnUnit, onCancelQueueItem }: UnitTrainingPanelProps) {
+function getTurretCooldown(def: TurretCatalog[string]): number {
+  if (def.attackType === 'chain_lightning') return def.chainLightning?.cooldownSeconds ?? def.fireIntervalSec;
+  if (def.attackType === 'artillery_barrage') return def.artillery?.cooldownSeconds ?? def.fireIntervalSec;
+  if (def.attackType === 'oil_pour') return def.oil?.cooldownSeconds ?? def.fireIntervalSec;
+  if (def.attackType === 'drone_swarm') return def.drones?.cooldownSeconds ?? def.fireIntervalSec;
+  return def.fireIntervalSec;
+}
+
+function getTurretSkillSummary(def: TurretCatalog[string]): string {
+  if (def.attackType === 'chain_lightning' && def.chainLightning) {
+    return `Chain lightning: ${def.chainLightning.maxTargets} jumps, ${def.chainLightning.initialDamage} base dmg`;
+  }
+
+  if (def.attackType === 'artillery_barrage' && def.artillery) {
+    return `Artillery barrage: ${def.artillery.barrageCount} shells, ${def.artillery.shellDamage} dmg, ${def.artillery.shellRadius} radius`;
+  }
+
+  if (def.attackType === 'oil_pour' && def.oil) {
+    return `Oil pour: ${def.oil.damage} dmg in ${def.oil.radius} radius`;
+  }
+
+  if (def.attackType === 'drone_swarm' && def.drones) {
+    return `Drone swarm: ${def.drones.droneCount} drones, ${def.drones.droneDamage} dmg each`;
+  }
+
+  if (def.projectile?.splitOnImpact) {
+    const split = def.projectile.splitOnImpact;
+    return `Split impact: +${split.childCount} shards (${split.childDamage} dmg) in ${split.spreadRadius} radius`;
+  }
+
+  if (def.projectile?.pierceCount && def.projectile.pierceCount > 0) {
+    return `Piercing shot: pierces ${def.projectile.pierceCount} extra targets`;
+  }
+
+  if (def.projectile?.splashRadius && def.projectile.splashRadius > 0) {
+    return `Explosive shot: ${def.projectile.splashRadius} splash radius`;
+  }
+
+  return 'Single-target projectile';
+}
+
+export function UnitTrainingPanel({
+  gameState,
+  onSpawnUnit,
+  onQueueTurretEngine,
+  onCancelQueueItem,
+}: UnitTrainingPanelProps) {
   const playerAge = gameState?.progression?.player?.age ?? 1;
   const [activeAge, setActiveAge] = useState<number>(playerAge);
+  const [selectedTurretSlot, setSelectedTurretSlot] = useState<number>(0);
   const previousAgeRef = useRef<number>(playerAge);
 
   useEffect(() => {
@@ -27,15 +78,51 @@ export function UnitTrainingPanel({ gameState, onSpawnUnit, onCancelQueueItem }:
   const availableAges = [1, 2, 3, 4, 5, 6].filter((age) => age <= playerAge);
   const unitsInActiveAge = Object.entries(UNIT_DEFS).filter(([_, def]) => (def.age ?? 1) === activeAge);
 
+  const turretCatalog = (gameState?.turretCatalog ?? {}) as TurretCatalog;
+  const turretEnginesInAge = useMemo(
+    () => Object.entries(turretCatalog)
+      .filter(([_, def]) => (def.age ?? 1) === activeAge)
+      .sort((a, b) => (a[1].cost ?? 0) - (b[1].cost ?? 0)),
+    [turretCatalog, activeAge]
+  );
+
+  const slotsUnlocked = gameState?.playerBase?.turretSlotsUnlocked ?? 1;
+  const slots = gameState?.playerBase?.turretSlots ?? [];
+  const maxSlots = gameState?.playerBase?.maxTurretSlots ?? 4;
+  const playerGold = gameState?.economy?.player?.gold ?? 0;
+  const playerMana = gameState?.economy?.player?.mana ?? 0;
+
+  const firstEmptySlot = useMemo(() => {
+    for (let i = 0; i < slotsUnlocked; i++) {
+      if (!slots[i]?.turretId) return i;
+    }
+    return -1;
+  }, [slots, slotsUnlocked]);
+
+  useEffect(() => {
+    if (selectedTurretSlot >= slotsUnlocked) {
+      setSelectedTurretSlot(Math.max(0, slotsUnlocked - 1));
+      return;
+    }
+
+    if (slots[selectedTurretSlot]?.turretId && firstEmptySlot >= 0) {
+      setSelectedTurretSlot(firstEmptySlot);
+    }
+  }, [selectedTurretSlot, slotsUnlocked, slots, firstEmptySlot]);
+
+  const selectedSlotOccupied = !!slots[selectedTurretSlot]?.turretId;
+  const selectedSlotQueued = (gameState?.playerQueue ?? []).some(
+    (q: any) => q.kind === 'turret_engine' && q.slotIndex === selectedTurretSlot
+  );
+  const canBuildInSelectedSlot = selectedTurretSlot < slotsUnlocked && !selectedSlotOccupied && !selectedSlotQueued;
+
   return (
-    <div className="training-scroll bg-slate-800 border border-slate-700 rounded-xl p-4 max-h-[450px] overflow-y-auto">
+    <div className="training-scroll bg-slate-800 border border-slate-700 rounded-xl p-4 max-h-[500px] overflow-y-auto">
       <div className="text-sm text-slate-400 mb-3 flex justify-between items-center">
         <span>⚔️ Unit Training</span>
         <span className="text-xs">
           Build Time: {Math.floor((1 - (playerAge - 1) * 0.1) * 100)}%
-          {playerAge > 1 && (
-            <span className="text-green-400"> ({(playerAge - 1) * 10}% faster)</span>
-          )}
+          {playerAge > 1 && <span className="text-green-400"> ({(playerAge - 1) * 10}% faster)</span>}
         </span>
       </div>
 
@@ -66,13 +153,13 @@ export function UnitTrainingPanel({ gameState, onSpawnUnit, onCancelQueueItem }:
               );
             })}
           </div>
+
           <div className="text-xs font-bold mb-2" style={{ color: ageColors[activeAge - 1] }}>
             Age {activeAge}: {ageNames[activeAge - 1]}
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">
             {unitsInActiveAge.map(([id, def]) => {
-              const playerGold = gameState?.economy?.player?.gold ?? 0;
-              const playerMana = gameState?.economy?.player?.mana ?? 0;
               const needsMana = (def.manaCost ?? 0) > 0;
               const disabled = playerGold < def.cost || (needsMana && playerMana < (def.manaCost ?? 0));
               const buildTimeMultiplier = Math.max(0.4, 1 - (playerAge - 1) * 0.1);
@@ -99,18 +186,81 @@ export function UnitTrainingPanel({ gameState, onSpawnUnit, onCancelQueueItem }:
                       <span title="Build Time">⏱️ {actualBuildTime}s</span>
                     </div>
                     {def.skill && <div className="text-purple-400 text-xs">{getAbilityDisplay(def.skill)}</div>}
-                    {def.manaLeech && (
-                      <div className="text-blue-400 text-xs mt-1">💧 Mana Leech: {Math.round(def.manaLeech * 100)}%</div>
-                    )}
+                    {def.manaLeech && <div className="text-blue-400 text-xs mt-1">💧 Mana Leech: {Math.round(def.manaLeech * 100)}%</div>}
                     {def.manaShield && <div className="text-cyan-400 text-xs mt-1">🛡️ Mana Shield</div>}
-                    {def.burstFire && (
-                      <div className="text-orange-400 text-xs mt-1">🔫 Burst: {def.burstFire.shots}x</div>
-                    )}
+                    {def.burstFire && <div className="text-orange-400 text-xs mt-1">🔫 Burst: {def.burstFire.shots}x</div>}
                     {def.teleporter && <div className="text-pink-400 text-xs mt-1">🌌 Teleporter</div>}
                   </div>
                 </button>
               );
             })}
+          </div>
+
+          <div className="border-t border-slate-600 pt-3">
+            <div className="text-xs text-slate-300 mb-2">🗼 Turret Engine Purchase Cards</div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {turretEnginesInAge.map(([turretId, turret]) => {
+                const protectionPct = Math.round((1 - (turret.protectionMultiplier ?? 1)) * 100);
+                const cooldown = getTurretCooldown(turret);
+                const dps = estimateEngineDps(turret).toFixed(1);
+                const disabled = !canBuildInSelectedSlot || playerGold < turret.cost;
+                const skillSummary = getTurretSkillSummary(turret);
+                return (
+                  <div
+                    key={turretId}
+                    className="bg-slate-800 p-2 rounded text-left border border-slate-700"
+                    title={`${turret.name}\nCost: ${turret.cost}g\nDPS: ${dps}\nCooldown: ${cooldown.toFixed(2)}s\nRange: ${turret.range}\nProtection Radius: ${turret.range}\nProtection: ${protectionPct}%\nSkill: ${skillSummary}\nTargeting: ${turret.targeting}\nBuild: ${(turret.buildMs / 1000).toFixed(1)}s`}
+                  >
+                    <div className="text-sm font-semibold truncate">{turret.name}</div>
+                    <div className="text-xs text-slate-400 space-y-0.5">
+                      <div>💰 {turret.cost}g · ⏱️ {(turret.buildMs / 1000).toFixed(1)}s</div>
+                      <div>⚔️ DPS {dps} · 🕒 CD {cooldown.toFixed(2)}s</div>
+                      <div>🎯 Range {turret.range} · 🛡️ Protection {protectionPct}%</div>
+                      <div>🧠 Targeting: {turret.targeting}</div>
+                      <div className="text-purple-300">✨ Skill: {skillSummary}</div>
+                      <div className="pt-1">
+                        <div className="text-[11px] text-slate-500 mb-1">Choose slot:</div>
+                        <div className="flex flex-wrap gap-1">
+                          {Array.from({ length: maxSlots }).map((_, idx) => {
+                            const unlocked = idx < slotsUnlocked;
+                            const occupied = !!slots[idx]?.turretId;
+                            const queued = (gameState?.playerQueue ?? []).some(
+                              (q: any) => q.kind === 'turret_engine' && q.slotIndex === idx
+                            );
+                            return (
+                              <button
+                                key={idx}
+                                type="button"
+                                onClick={() => unlocked && setSelectedTurretSlot(idx)}
+                                disabled={!unlocked}
+                                className={`px-1.5 py-0.5 rounded text-[10px] border transition-colors ${
+                                  selectedTurretSlot === idx ? 'border-cyan-400 bg-slate-700 text-cyan-200' : 'border-slate-600 bg-slate-900 text-slate-300'
+                                } ${unlocked ? '' : 'opacity-50 cursor-not-allowed'}`}
+                                title={unlocked ? (occupied ? 'Mounted' : queued ? 'Queued' : 'Empty') : 'Locked'}
+                              >
+                                S{idx + 1}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onQueueTurretEngine(selectedTurretSlot, turretId)}
+                      disabled={disabled}
+                      className="mt-2 w-full px-2 py-1.5 text-xs bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Queue on Slot S{selectedTurretSlot + 1}
+                    </button>
+                  </div>
+                );
+              })}
+              {turretEnginesInAge.length === 0 && (
+                <div className="text-xs text-slate-500">No turret engines available in this age yet.</div>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -120,16 +270,19 @@ export function UnitTrainingPanel({ gameState, onSpawnUnit, onCancelQueueItem }:
           <div className="flex items-center gap-2 text-sm text-slate-300">
             <span className="text-xs text-slate-400">Queue:</span>
             <div className="flex gap-1 flex-wrap">
-              {(gameState?.playerQueue ?? []).map((q: any, i: number) => (
-                <button
-                  key={i}
-                  onClick={() => onCancelQueueItem(i)}
-                  title="Click to cancel"
-                  className="bg-slate-600 hover:bg-red-700 px-2 py-1 rounded text-xs transition-colors cursor-pointer"
-                >
-                  {getUnitName(q.unitId)} {((q.remainingMs ?? 0) / 1000).toFixed(1)}s ✕
-                </button>
-              ))}
+              {(gameState?.playerQueue ?? []).map((q: any, i: number) => {
+                const label = q.kind === 'unit' ? getUnitName(q.unitId) : (q.label ?? q.kind);
+                return (
+                  <button
+                    key={i}
+                    onClick={() => onCancelQueueItem(i)}
+                    title="Click to cancel"
+                    className="bg-slate-600 hover:bg-red-700 px-2 py-1 rounded text-xs transition-colors cursor-pointer"
+                  >
+                    {label} {((q.remainingMs ?? 0) / 1000).toFixed(1)}s ✕
+                  </button>
+                );
+              })}
             </div>
           </div>
         ) : (

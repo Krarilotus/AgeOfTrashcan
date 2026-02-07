@@ -87,7 +87,7 @@ AI agents return decisions with this structure:
 
 ```typescript
 interface AIDecision {
-  action: 'RECRUIT_UNIT' | 'AGE_UP' | 'UPGRADE_MANA' | 'BUILD_TURRET' | 'WAIT';
+  action: 'RECRUIT_UNIT' | 'AGE_UP' | 'UPGRADE_MANA' | 'UPGRADE_TURRET_SLOTS' | 'BUY_TURRET_ENGINE' | 'SELL_TURRET_ENGINE' | 'WAIT';
   reasoning?: string;  // Optional for debugging
   parameters?: any;    // Action-specific parameters
 }
@@ -116,9 +116,17 @@ interface AIDecision {
    { action: 'UPGRADE_MANA', reasoning: 'Economy boost' }
    ```
 
-4. **BUILD_TURRET** - Upgrade base turret
+4. **UPGRADE_TURRET_SLOTS** - Unlock next mounted turret slot
    ```typescript
-   { action: 'BUILD_TURRET', reasoning: 'Defense layer' }
+   { action: 'UPGRADE_TURRET_SLOTS', reasoning: 'Unlock slot 3 for more defense coverage' }
+   ```
+5. **BUY_TURRET_ENGINE** - Buy and queue an engine for a specific slot
+   ```typescript
+   { action: 'BUY_TURRET_ENGINE', parameters: { slotIndex: 1, turretId: 'lightning_rod' } }
+   ```
+6. **SELL_TURRET_ENGINE** - Sell a mounted engine in a specific slot
+   ```typescript
+   { action: 'SELL_TURRET_ENGINE', parameters: { slotIndex: 0 } }
    ```
 
 5. **WAIT** - Do nothing this tick
@@ -364,7 +372,7 @@ describe('PPO_AI Integration', () => {
     const decision = ai.decide(state, AI_PERSONALITIES.BALANCED);
     
     expect(decision.action).toBeDefined();
-    expect(['RECRUIT_UNIT', 'AGE_UP', 'UPGRADE_MANA', 'BUILD_TURRET', 'WAIT'])
+    expect(['RECRUIT_UNIT', 'AGE_UP', 'UPGRADE_MANA', 'UPGRADE_TURRET_SLOTS', 'BUY_TURRET_ENGINE', 'SELL_TURRET_ENGINE', 'WAIT'])
       .toContain(decision.action);
   });
   

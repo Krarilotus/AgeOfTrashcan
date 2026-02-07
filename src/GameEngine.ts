@@ -24,9 +24,17 @@ import {
   PROGRESSION_CONFIG,
   QUEUE_CONFIG,
 } from './config/gameBalance';
-import { 
-  getTurretUpgradeCost,
-} from './config/turretConfig';
+import {
+  MAX_TURRET_SLOTS,
+  TURRET_ENGINES,
+  calculateTurretDefenseStats,
+  getTurretEngineDef,
+  getTurretEnginesForAge,
+  getTurretSellRefundMultiplier,
+  getTurretSlotUnlockBuildMs,
+  getTurretSlotUnlockCost,
+  type MountedTurretSlotState,
+} from './config/turrets';
 import { AIController, AIControllerFactory } from './ai/AIController';
 import { BalancedAI } from './ai/behaviors';
 import type { GameStateSnapshot, AIDecision, RecruitUnitParams } from './ai/AIBehavior';
@@ -85,12 +93,48 @@ export interface Projectile {
   y: number; // Vertical position in battlefield units (0 = center)
   vx: number;
   vy: number; // Vertical velocity (for arcing shots)
+  curvature?: number; // Vertical acceleration applied each tick
   damage: number;
   lifeMs: number;
+  radiusPx?: number;
+  color?: string;
+  glowColor?: string;
+  trailAlpha?: number;
   manaLeech?: number; // Amount of mana to restore to owner on hit
   delayMs?: number; // Time before projectile becomes active/visible
   isFalling?: boolean; // If true, collisions only happen near ground (y approx 0)
   targetY?: number; // Y position to target for falling projectiles
+  splashRadius?: number; // Optional AOE splash radius for projectile impact
+  remainingPierces?: number; // Projectile can pass through additional targets
+  splitOnImpact?: {
+    childCount: number;
+    childDamage: number;
+    childSpeed: number;
+    childLifeMs: number;
+    spreadRadius: number;
+  };
+}
+
+export type BuildQueueItemKind = 'unit' | 'turret_slot' | 'turret_engine';
+
+export interface BuildQueueItem {
+  kind: BuildQueueItemKind;
+  remainingMs: number;
+  unitId?: string;
+  turretId?: string;
+  slotIndex?: number;
+  refundGold?: number;
+  label?: string;
+}
+
+export interface BaseState {
+  health: number;
+  maxHealth: number;
+  x: number;
+  turretSlotsUnlocked: number;
+  turretSlots: MountedTurretSlotState[];
+  turretLevel: number; // Legacy compatibility/debug field derived from engine strength
+  lastAttackTime: number; // Game time when base was last attacked
 }
 
 export interface GameState {
@@ -98,22 +142,8 @@ export interface GameState {
   nextEntityId: number;
   nextVfxId: number;
   entities: Map<number, Entity>;
-  playerBase: {
-    health: number;
-    maxHealth: number;
-    x: number;
-    turretLevel: number;
-    turretAbilityCooldown?: number; // Cooldown for special turret abilities (level 5+)
-    lastAttackTime: number; // Game time when base was last attacked
-  };
-  enemyBase: {
-    health: number;
-    maxHealth: number;
-    x: number;
-    turretLevel: number;
-    turretAbilityCooldown?: number;
-    lastAttackTime: number; // Game time when base was last attacked
-  };
+  playerBase: BaseState;
+  enemyBase: BaseState;
   economy: {
     player: {
       gold: number;
@@ -145,8 +175,8 @@ export interface GameState {
     playerHalfWidth: number; // Player's territory (left half)
     enemyHalfWidth: number; // Enemy's territory (right half)
   };
-  playerQueue: Array<{ unitId: string; remainingMs: number }>;
-  enemyQueue: Array<{ unitId: string; remainingMs: number }>;
+  playerQueue: BuildQueueItem[];
+  enemyQueue: BuildQueueItem[];
   projectiles: Projectile[];
   stats: { damageDealt: { player: number; enemy: number } };
   vfx: Array<{
@@ -213,29 +243,76 @@ export class GameEngine {
     );
   }
 
+  private createDefaultTurretSlots(): MountedTurretSlotState[] {
+    const slots: MountedTurretSlotState[] = [];
+    for (let i = 0; i < MAX_TURRET_SLOTS; i++) {
+      slots.push({
+        slotIndex: i,
+        turretId: null,
+        cooldownRemaining: 0,
+      });
+    }
+    return slots;
+  }
+
+  private createBaseState(health: number, x: number): BaseState {
+    const base: BaseState = {
+      health,
+      maxHealth: health,
+      x,
+      turretSlotsUnlocked: 1,
+      turretSlots: this.createDefaultTurretSlots(),
+      turretLevel: 0,
+      lastAttackTime: 0,
+    };
+    return this.recomputeBaseTurretLevel(base);
+  }
+
+  private ensureBaseTurretState(base: BaseState | undefined): BaseState {
+    if (!base) {
+      return this.createBaseState(BASE_CONFIG.baseHealth, 0);
+    }
+
+    if (!Array.isArray(base.turretSlots)) {
+      base.turretSlots = this.createDefaultTurretSlots();
+    }
+    if (typeof base.turretSlotsUnlocked !== 'number') {
+      base.turretSlotsUnlocked = 1;
+    }
+    while (base.turretSlots.length < MAX_TURRET_SLOTS) {
+      base.turretSlots.push({
+        slotIndex: base.turretSlots.length,
+        turretId: null,
+        cooldownRemaining: 0,
+      });
+    }
+    base.turretSlots = base.turretSlots.slice(0, MAX_TURRET_SLOTS).map((slot, idx) => ({
+      slotIndex: idx,
+      turretId: slot?.turretId ?? null,
+      cooldownRemaining: Math.max(0, slot?.cooldownRemaining ?? 0),
+    }));
+    base.turretSlotsUnlocked = Math.min(MAX_TURRET_SLOTS, Math.max(1, base.turretSlotsUnlocked));
+    return this.recomputeBaseTurretLevel(base);
+  }
+
+  private recomputeBaseTurretLevel(base: BaseState): BaseState {
+    const stats = calculateTurretDefenseStats(base);
+    base.turretLevel = stats.legacyLevelEstimate;
+    return base;
+  }
+
   private syncBasePositions(): void {
     // Always ensure bases exist with proper structure before syncing
     if (!this.state.playerBase) {
-      this.state.playerBase = {
-        x: 0,
-        health: BASE_CONFIG.baseHealth,
-        maxHealth: BASE_CONFIG.baseHealth,
-        turretLevel: 0,
-        turretAbilityCooldown: 0,
-        lastAttackTime: 0,
-      };
+      this.state.playerBase = this.createBaseState(BASE_CONFIG.baseHealth, 0);
     }
     
     if (!this.state.enemyBase) {
-      this.state.enemyBase = {
-        x: this.state.battlefield.width,
-        health: BASE_CONFIG.baseHealth,
-        maxHealth: BASE_CONFIG.baseHealth,
-        turretLevel: 0,
-        turretAbilityCooldown: 0,
-        lastAttackTime: 0,
-      };
+      this.state.enemyBase = this.createBaseState(BASE_CONFIG.baseHealth, this.state.battlefield.width);
     }
+
+    this.state.playerBase = this.ensureBaseTurretState(this.state.playerBase);
+    this.state.enemyBase = this.ensureBaseTurretState(this.state.enemyBase);
     
     // Keep bases anchored to the battlefield edges (width can change with age upgrades)
     this.state.playerBase.x = 0;
@@ -249,33 +326,19 @@ export class GameEngine {
   }
 
   private createInitialState(): GameState {
+    const playerBase = this.createBaseState(BASE_CONFIG.baseHealth, 0);
+    const enemyBaseHealth = this.config.difficulty === 'EASY' ? 300 :
+      this.config.difficulty === 'MEDIUM' ? 500 :
+      this.config.difficulty === 'HARD' ? 700 :
+      this.config.difficulty === 'CHEATER' ? 1000 : 500;
+    const enemyBase = this.createBaseState(enemyBaseHealth, 50);
     return {
       tick: 0,
       nextEntityId: 1000,
       nextVfxId: 1,
       entities: new Map(),
-      playerBase: {
-        health: BASE_CONFIG.baseHealth,
-        maxHealth: BASE_CONFIG.baseHealth,
-        x: 0, // Player base always at left edge
-        turretLevel: 0,
-        turretAbilityCooldown: 0,
-        lastAttackTime: 0,
-      },
-      enemyBase: {
-        health: this.config.difficulty === 'EASY' ? 300 :
-                this.config.difficulty === 'MEDIUM' ? 500 :
-                this.config.difficulty === 'HARD' ? 700 :
-                this.config.difficulty === 'CHEATER' ? 1000 : 500,
-        maxHealth: this.config.difficulty === 'EASY' ? 300 :
-                   this.config.difficulty === 'MEDIUM' ? 500 :
-                   this.config.difficulty === 'HARD' ? 700 :
-                   this.config.difficulty === 'CHEATER' ? 1000 : 500,
-        x: 50, // Enemy base starts at right edge (will be updated dynamically)
-        turretLevel: 0,
-        turretAbilityCooldown: 0,
-        lastAttackTime: 0,
-      },
+      playerBase,
+      enemyBase,
       economy: {
         player: {
           gold: this.config.startingGold,
@@ -484,25 +547,34 @@ export class GameEngine {
   }
 
   private updateTrainingQueues(): void {
-    // Update player queue - units already have reduced training time from queueUnit()
-    if (this.state.playerQueue.length > 0) {
-      const unit = this.state.playerQueue[0];
-      unit.remainingMs -= FIXED_TIMESTEP;
-      if (unit.remainingMs <= 0) {
-        const finished = this.state.playerQueue.shift();
-        if (finished) this.spawnTestUnit('PLAYER', finished.unitId);
-      }
-    }
+    const updateQueueForOwner = (owner: 'PLAYER' | 'ENEMY') => {
+      const queue = owner === 'PLAYER' ? this.state.playerQueue : this.state.enemyQueue;
+      if (queue.length === 0) return;
 
-    // Update enemy queue
-    if (this.state.enemyQueue.length > 0) {
-      const unit = this.state.enemyQueue[0];
-      unit.remainingMs -= FIXED_TIMESTEP;
-      if (unit.remainingMs <= 0) {
-        const finished = this.state.enemyQueue.shift();
-        if (finished) this.spawnTestUnit('ENEMY', finished.unitId);
+      const item = queue[0];
+      item.remainingMs -= FIXED_TIMESTEP;
+      if (item.remainingMs > 0) return;
+
+      const finished = queue.shift();
+      if (!finished) return;
+
+      if (finished.kind === 'unit' && finished.unitId) {
+        this.spawnTestUnit(owner, finished.unitId);
+        return;
       }
-    }
+
+      if (finished.kind === 'turret_slot') {
+        this.completeTurretSlotUnlock(owner);
+        return;
+      }
+
+      if (finished.kind === 'turret_engine' && typeof finished.slotIndex === 'number' && finished.turretId) {
+        this.completeTurretEngineBuild(owner, finished.slotIndex, finished.turretId);
+      }
+    };
+
+    updateQueueForOwner('PLAYER');
+    updateQueueForOwner('ENEMY');
   }
 
   private spawnTestUnit(owner: 'PLAYER' | 'ENEMY', unitId?: string): void {
@@ -590,6 +662,18 @@ export class GameEngine {
   private extractGameStateForAI(): GameStateSnapshot {
     const playerUnits = Array.from(this.state.entities.values()).filter(e => e.owner === 'PLAYER');
     const enemyUnits = Array.from(this.state.entities.values()).filter(e => e.owner === 'ENEMY');
+    const playerTurretStats = calculateTurretDefenseStats(this.state.playerBase);
+    const enemyTurretStats = calculateTurretDefenseStats(this.state.enemyBase);
+    const playerTurretSummary = this.state.playerBase.turretSlots.map((slot) => ({
+      slotIndex: slot.slotIndex,
+      turretId: slot.turretId,
+      cooldownRemaining: slot.cooldownRemaining,
+    }));
+    const enemyTurretSummary = this.state.enemyBase.turretSlots.map((slot) => ({
+      slotIndex: slot.slotIndex,
+      turretId: slot.turretId,
+      cooldownRemaining: slot.cooldownRemaining,
+    }));
     
     return {
       tick: this.state.tick,
@@ -618,8 +702,22 @@ export class GameEngine {
       playerBaseMaxHealth: this.state.playerBase.maxHealth,
       enemyBaseHealth: this.state.enemyBase.health,
       enemyBaseMaxHealth: this.state.enemyBase.maxHealth,
-      playerTurretLevel: this.state.playerBase.turretLevel,
-      enemyTurretLevel: this.state.enemyBase.turretLevel,
+      playerTurretLevel: playerTurretStats.legacyLevelEstimate,
+      enemyTurretLevel: enemyTurretStats.legacyLevelEstimate,
+      playerTurretDps: playerTurretStats.totalDps,
+      enemyTurretDps: enemyTurretStats.totalDps,
+      playerTurretMaxRange: playerTurretStats.maxRange,
+      enemyTurretMaxRange: enemyTurretStats.maxRange,
+      playerTurretAvgRange: playerTurretStats.avgRange,
+      enemyTurretAvgRange: enemyTurretStats.avgRange,
+      playerTurretProtectionMultiplier: playerTurretStats.strongestProtectionMultiplier,
+      enemyTurretProtectionMultiplier: enemyTurretStats.strongestProtectionMultiplier,
+      playerTurretSlotsUnlocked: this.state.playerBase.turretSlotsUnlocked,
+      enemyTurretSlotsUnlocked: this.state.enemyBase.turretSlotsUnlocked,
+      playerTurretInstalledCount: playerTurretStats.installedCount,
+      enemyTurretInstalledCount: enemyTurretStats.installedCount,
+      playerTurretSlots: playerTurretSummary,
+      enemyTurretSlots: enemyTurretSummary,
       
       // Units
       playerUnitCount: playerUnits.length,
@@ -644,6 +742,8 @@ export class GameEngine {
       // Queues
       playerQueueSize: this.state.playerQueue.length,
       enemyQueueSize: this.state.enemyQueue.length,
+      playerTurretQueueCount: this.state.playerQueue.filter((q) => q.kind !== 'unit').length,
+      enemyTurretQueueCount: this.state.enemyQueue.filter((q) => q.kind !== 'unit').length,
       
       // Battlefield
       battlefieldWidth: this.state.battlefield.width,
@@ -692,9 +792,28 @@ export class GameEngine {
         this.upgradeManaGeneration('ENEMY');
         break;
         
-      case 'BUILD_TURRET':
-        this.upgradeTurret('ENEMY');
+      case 'UPGRADE_TURRET_SLOTS':
+        this.queueTurretSlotUpgrade('ENEMY');
         break;
+
+      case 'BUY_TURRET_ENGINE': {
+        const slotIndex = (decision.parameters as any)?.slotIndex;
+        const turretId = (decision.parameters as any)?.turretId;
+        if (typeof slotIndex === 'number' && typeof turretId === 'string') {
+          this.queueTurretEngine('ENEMY', slotIndex, turretId);
+        } else {
+          this.autoManageEnemyTurrets();
+        }
+        break;
+      }
+
+      case 'SELL_TURRET_ENGINE': {
+        const slotIndex = (decision.parameters as any)?.slotIndex;
+        if (typeof slotIndex === 'number') {
+          this.sellTurretEngine('ENEMY', slotIndex);
+        }
+        break;
+      }
         
       case 'EXECUTE_ATTACK_GROUP':
         // Attack group execution - recruit all units in the group (legacy support)
@@ -756,7 +875,7 @@ export class GameEngine {
 
 
   private updateTurrets(deltaSeconds: number): void {
-      this.turretSystem.update(this.state, deltaSeconds, this.projectileSystem);
+      this.turretSystem.update(this.state, deltaSeconds);
   }
 
 
@@ -766,6 +885,173 @@ export class GameEngine {
     }
   }
 
+  private completeTurretSlotUnlock(owner: 'PLAYER' | 'ENEMY'): void {
+    const base = owner === 'PLAYER' ? this.state.playerBase : this.state.enemyBase;
+    if (base.turretSlotsUnlocked >= MAX_TURRET_SLOTS) return;
+    base.turretSlotsUnlocked += 1;
+    this.recomputeBaseTurretLevel(base);
+    console.log(`${owner} unlocked turret slot ${base.turretSlotsUnlocked}/${MAX_TURRET_SLOTS}`);
+  }
+
+  private completeTurretEngineBuild(owner: 'PLAYER' | 'ENEMY', slotIndex: number, turretId: string): void {
+    const base = owner === 'PLAYER' ? this.state.playerBase : this.state.enemyBase;
+    if (slotIndex < 0 || slotIndex >= base.turretSlotsUnlocked) return;
+    const slot = base.turretSlots[slotIndex];
+    if (!slot) return;
+    slot.turretId = turretId;
+    slot.cooldownRemaining = 0;
+    this.recomputeBaseTurretLevel(base);
+    console.log(`${owner} mounted turret engine ${turretId} on slot ${slotIndex + 1}`);
+  }
+
+  private getBaseForOwner(owner: 'PLAYER' | 'ENEMY'): BaseState {
+    return owner === 'PLAYER' ? this.state.playerBase : this.state.enemyBase;
+  }
+
+  private getQueueForOwner(owner: 'PLAYER' | 'ENEMY'): BuildQueueItem[] {
+    return owner === 'PLAYER' ? this.state.playerQueue : this.state.enemyQueue;
+  }
+
+  private getEconomyForOwner(owner: 'PLAYER' | 'ENEMY') {
+    return owner === 'PLAYER' ? this.state.economy.player : this.state.economy.enemy;
+  }
+
+  private getProgressionForOwner(owner: 'PLAYER' | 'ENEMY') {
+    return owner === 'PLAYER' ? this.state.progression.player : this.state.progression.enemy;
+  }
+
+  queueTurretSlotUpgrade(owner: 'PLAYER' | 'ENEMY' = 'PLAYER'): boolean {
+    const base = this.getBaseForOwner(owner);
+    const econ = this.getEconomyForOwner(owner);
+    const queue = this.getQueueForOwner(owner);
+    if (queue.length >= QUEUE_CONFIG.maxQueueSize) return false;
+    if (base.turretSlotsUnlocked >= MAX_TURRET_SLOTS) return false;
+    if (queue.some((item) => item.kind === 'turret_slot')) return false;
+
+    const cost = getTurretSlotUnlockCost(base.turretSlotsUnlocked);
+    if (econ.gold < cost) return false;
+    econ.gold -= cost;
+
+    queue.push({
+      kind: 'turret_slot',
+      remainingMs: getTurretSlotUnlockBuildMs(base.turretSlotsUnlocked),
+      refundGold: cost,
+      label: `Unlock Slot ${base.turretSlotsUnlocked + 1}`,
+    });
+    return true;
+  }
+
+  queueTurretEngine(
+    owner: 'PLAYER' | 'ENEMY',
+    slotIndex: number,
+    turretId: string,
+    skipQueueLimit = false
+  ): boolean {
+    const base = this.getBaseForOwner(owner);
+    const econ = this.getEconomyForOwner(owner);
+    const prog = this.getProgressionForOwner(owner);
+    const queue = this.getQueueForOwner(owner);
+
+    if (!skipQueueLimit && queue.length >= QUEUE_CONFIG.maxQueueSize) return false;
+    if (slotIndex < 0 || slotIndex >= base.turretSlotsUnlocked) return false;
+
+    const slot = base.turretSlots[slotIndex];
+    if (!slot) return false;
+    if (slot.turretId) return false;
+    if (queue.some((item) => item.kind === 'turret_engine' && item.slotIndex === slotIndex)) return false;
+
+    const engine = getTurretEngineDef(turretId);
+    if (!engine) return false;
+    if (engine.age > prog.age) return false;
+
+    let finalCost = engine.cost;
+    if (owner === 'ENEMY') {
+      if (this.config.difficulty === 'MEDIUM') finalCost *= 0.8;
+      else if (this.config.difficulty === 'HARD') finalCost *= 0.65;
+      else if (this.config.difficulty === 'CHEATER') finalCost *= 0.5;
+      finalCost = Math.floor(finalCost);
+    }
+
+    if (econ.gold < finalCost) return false;
+    econ.gold -= finalCost;
+
+    queue.push({
+      kind: 'turret_engine',
+      turretId,
+      slotIndex,
+      remainingMs: engine.buildMs,
+      refundGold: finalCost,
+      label: `${engine.name} -> S${slotIndex + 1}`,
+    });
+
+    return true;
+  }
+
+  sellTurretEngine(owner: 'PLAYER' | 'ENEMY', slotIndex: number): boolean {
+    const base = this.getBaseForOwner(owner);
+    const econ = this.getEconomyForOwner(owner);
+    if (slotIndex < 0 || slotIndex >= base.turretSlotsUnlocked) return false;
+    const slot = base.turretSlots[slotIndex];
+    if (!slot?.turretId) return false;
+
+    const engine = getTurretEngineDef(slot.turretId);
+    if (!engine) return false;
+
+    const refund = Math.floor(engine.cost * getTurretSellRefundMultiplier(owner === 'PLAYER', this.config.difficulty));
+    econ.gold += refund;
+    slot.turretId = null;
+    slot.cooldownRemaining = 0;
+    this.recomputeBaseTurretLevel(base);
+    return true;
+  }
+
+  private autoManageEnemyTurrets(): boolean {
+    const base = this.state.enemyBase;
+    const enemyAge = this.state.progression.enemy.age;
+    const gameTime = (this.state.tick * FIXED_TIMESTEP) / 1000;
+
+    const desiredSlotsByAge = enemyAge >= 6 ? (gameTime >= 90 ? 4 : 3) : enemyAge >= 5 ? 3 : enemyAge >= 3 ? 2 : 1;
+
+    const availableEngines = Object.values(getTurretEnginesForAge(enemyAge))
+      .sort((a, b) => (b.cost + b.range * 20) - (a.cost + a.range * 20));
+
+    if (availableEngines.length === 0) return false;
+
+    for (let i = 0; i < base.turretSlotsUnlocked; i++) {
+      if (!base.turretSlots[i]?.turretId) {
+        const target = availableEngines[0];
+        return this.queueTurretEngine('ENEMY', i, target.id);
+      }
+    }
+
+    if (base.turretSlotsUnlocked < desiredSlotsByAge) {
+      return this.queueTurretSlotUpgrade('ENEMY');
+    }
+
+    if (enemyAge >= 6 && this.state.enemyBase.health < this.state.enemyBase.maxHealth * 0.35) {
+      let weakestSlot = -1;
+      let weakestCost = Infinity;
+      for (let i = 0; i < base.turretSlotsUnlocked; i++) {
+        const turretId = base.turretSlots[i]?.turretId;
+        if (!turretId) continue;
+        const def = getTurretEngineDef(turretId);
+        if (!def) continue;
+        if (def.cost < weakestCost) {
+          weakestCost = def.cost;
+          weakestSlot = i;
+        }
+      }
+      const strongestEngine = availableEngines[0];
+      if (weakestSlot >= 0 && strongestEngine.cost > weakestCost * 1.4) {
+        const sold = this.sellTurretEngine('ENEMY', weakestSlot);
+        if (sold) {
+          return this.queueTurretEngine('ENEMY', weakestSlot, strongestEngine.id);
+        }
+      }
+    }
+
+    return false;
+  }
 
 
 
@@ -777,12 +1063,12 @@ export class GameEngine {
   // Unified queueing logic for player and enemy so costs, training times, and queue rules match
   queueUnit(owner: 'PLAYER' | 'ENEMY', unitId: string, emergency: boolean = false): boolean {
     const unitDef = UNIT_DEFS[unitId] || UNIT_DEFS.stone_clubman;
-    const econ = owner === 'PLAYER' ? this.state.economy.player : this.state.economy.enemy;
-    const queue = owner === 'PLAYER' ? this.state.playerQueue : this.state.enemyQueue;
+    const econ = this.getEconomyForOwner(owner);
+    const queue = this.getQueueForOwner(owner);
     const maxQueue = QUEUE_CONFIG.maxQueueSize;
     if (queue.length >= maxQueue) return false;
     // enforce age availability
-    const ownerAge = owner === 'PLAYER' ? this.state.progression.player.age : this.state.progression.enemy.age;
+    const ownerAge = this.getProgressionForOwner(owner).age;
     if ((unitDef.age ?? 1) > ownerAge) return false; // cannot queue unit beyond current age
     
     // Apply Difficulty Discount for AI
@@ -811,7 +1097,7 @@ export class GameEngine {
     const buildTimeMultiplier = Math.max(0.4, 1 - (ownerAge - 1) * 0.1);
     const adjustedTrainingMs = (unitDef.trainingMs ?? 2000) * buildTimeMultiplier;
     
-    queue.push({ unitId, remainingMs: adjustedTrainingMs });
+    queue.push({ kind: 'unit', unitId, remainingMs: adjustedTrainingMs, refundGold: finalCost, label: unitId });
     console.log(`${owner} queued ${unitId} (cost ${finalCost}g, training ${Math.round(adjustedTrainingMs)}ms). Queue now ${queue.length}`);
     return true;
   }
@@ -926,43 +1212,31 @@ export class GameEngine {
     return true;
   }
 
-  upgradeTurret(owner: 'PLAYER' | 'ENEMY' = 'PLAYER'): void {
-    const econ = owner === 'PLAYER' ? this.state.economy.player : this.state.economy.enemy;
-    const baseObj = owner === 'PLAYER' ? this.state.playerBase : this.state.enemyBase;
-    
-    // Cap at level 10
-    if (baseObj.turretLevel >= 10) {
-      console.log(`${owner} turret already at max level (10)`);
-      return;
-    }
-    
-    const cost = getTurretUpgradeCost(baseObj.turretLevel);
-    
-    if (econ.gold >= cost) {
-      econ.gold -= cost;
-      baseObj.turretLevel += 1;
-      console.log(`${owner} turret upgraded to level ${baseObj.turretLevel}, cost was ${cost}g`);
-    }
-  }
-
   cancelQueueItem(index: number): void {
     if (index >= 0 && index < this.state.playerQueue.length) {
-      const queuedUnit = this.state.playerQueue[index];
-      const unitDef = UNIT_DEFS[queuedUnit.unitId] || UNIT_DEFS.stone_clubman;
-      // Refund the cost
-      this.state.economy.player.gold += unitDef.cost;
+      const queuedItem = this.state.playerQueue[index];
+      const refund = queuedItem.refundGold ?? 0;
+      this.state.economy.player.gold += refund;
       // Remove from queue
       this.state.playerQueue.splice(index, 1);
-      console.log(`Cancelled queued ${queuedUnit.unitId}, refunded ${unitDef.cost}g`);
+      console.log(`Cancelled queued ${queuedItem.kind}, refunded ${refund}g`);
     }
   }
 
   getState(): GameState {
     // Return a snapshot copy and include derived UI-friendly values like turret upgrade cost
-    const snapshot = createSnapshot(this.state) as GameState & { playerBase?: any };
+    const snapshot = createSnapshot(this.state) as GameState & { playerBase?: any; enemyBase?: any };
     if (snapshot.playerBase) {
-      snapshot.playerBase.turretUpgradeCost = getTurretUpgradeCost(snapshot.playerBase.turretLevel);
+      snapshot.playerBase.nextTurretSlotCost = getTurretSlotUnlockCost(snapshot.playerBase.turretSlotsUnlocked);
+      snapshot.playerBase.maxTurretSlots = MAX_TURRET_SLOTS;
+      snapshot.playerBase.turretDefenseStats = calculateTurretDefenseStats(snapshot.playerBase);
     }
+    if (snapshot.enemyBase) {
+      snapshot.enemyBase.nextTurretSlotCost = getTurretSlotUnlockCost(snapshot.enemyBase.turretSlotsUnlocked);
+      snapshot.enemyBase.maxTurretSlots = MAX_TURRET_SLOTS;
+      snapshot.enemyBase.turretDefenseStats = calculateTurretDefenseStats(snapshot.enemyBase);
+    }
+    (snapshot as any).turretCatalog = TURRET_ENGINES;
     // also include available units for UI convenience
     (snapshot as any).unitCatalog = UNIT_DEFS;
     // telemetry
@@ -991,7 +1265,7 @@ export class GameEngine {
       const entitiesArray = Array.from(this.state.entities.values());
       
       const saveData = {
-        version: 1, // For future migration support
+        version: 2, // Turret slot + engine system
         state: {
           ...this.state,
           entities: entitiesArray, // Serialize as array
@@ -1075,6 +1349,28 @@ export class GameEngine {
       
       // Restore complete state
       this.state = loadedState;
+      this.state.playerBase = this.ensureBaseTurretState(this.state.playerBase as BaseState);
+      this.state.enemyBase = this.ensureBaseTurretState(this.state.enemyBase as BaseState);
+      this.state.playerQueue = (this.state.playerQueue ?? []).map((item: any) => {
+        if (item && item.kind) return item as BuildQueueItem;
+        return {
+          kind: 'unit',
+          unitId: item?.unitId,
+          remainingMs: item?.remainingMs ?? 0,
+          refundGold: UNIT_DEFS[item?.unitId || 'stone_clubman']?.cost ?? 0,
+          label: item?.unitId,
+        } as BuildQueueItem;
+      });
+      this.state.enemyQueue = (this.state.enemyQueue ?? []).map((item: any) => {
+        if (item && item.kind) return item as BuildQueueItem;
+        return {
+          kind: 'unit',
+          unitId: item?.unitId,
+          remainingMs: item?.remainingMs ?? 0,
+          refundGold: UNIT_DEFS[item?.unitId || 'stone_clubman']?.cost ?? 0,
+          label: item?.unitId,
+        } as BuildQueueItem;
+      });
       this.aiAccumulatorMs = saveData.runtime?.aiAccumulatorMs ?? 0;
       this.lastUpdateTime = saveData.runtime?.lastUpdateTime ?? 0;
       this.enemyCyberAssassin6kBonusUsed = saveData.runtime?.enemyCyberAssassin6kBonusUsed ?? false;

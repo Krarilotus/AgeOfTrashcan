@@ -16,7 +16,13 @@ import {
 } from '../AIBehavior';
 import { AIPersonality, AI_TUNING, ATTACK_GROUPS } from '../../config/aiConfig';
 import { UNIT_DEFS, getUnitsForAge, UnitDef } from '../../config/units';
-import { getManaCost, getTurretCost } from '../../config/gameBalance';
+import { getManaCost } from '../../config/gameBalance';
+import {
+  getTurretEngineDef,
+  getTurretEnginesForAge,
+  getTurretSlotUnlockCost,
+  type TurretEngineDef,
+} from '../../config/turrets';
 
 /**
  * Balanced AI - intelligent, adaptive strategy with warchest system
@@ -33,6 +39,7 @@ export class BalancedAI implements IAIBehavior {
   private debugMetrics: any = {}; // Store calculation details for debug UI
   private lastRecruitmentDecision: string = ""; // DEBUG: Store detailed reasoning
   private lastRejectedUnits: string = ""; // DEBUG: Store rejection reasons
+  private pendingTurretReplacement: { slotIndex: number; turretId: string } | null = null;
 
   getName(): string {
     return this.name;
@@ -57,6 +64,7 @@ export class BalancedAI implements IAIBehavior {
           currentGroupPlan: this.currentGroupPlan, // Expose raw plan for Debug UI
           ...this.debugMetrics,
           lastAgeUp: this.lastAgeUpTime.toFixed(1),
+          pendingTurretReplacement: this.pendingTurretReplacement,
           // Persistable State (Raw Values)
           _lastAgeUpTime: this.lastAgeUpTime,
           _lastStrategySwitch: this.lastStrategySwitch,
@@ -84,12 +92,134 @@ export class BalancedAI implements IAIBehavior {
       if (params.currentGroupPlan) {
           this.currentGroupPlan = params.currentGroupPlan;
       }
+      if (params.pendingTurretReplacement) {
+          this.pendingTurretReplacement = params.pendingTurretReplacement;
+      }
   }
   
   // Method to manually update lastAgeUpTime when loaded from save
   // This ensures warchest calculation is correct after reload
   public setLastAgeUpTime(time: number): void {
     this.lastAgeUpTime = time; 
+  }
+
+  private scoreTurretEngine(engine: TurretEngineDef, threat: ThreatLevel): number {
+    const dpsWeight = threat >= ThreatLevel.HIGH ? 1.6 : 1.2;
+    const protectionWeight = threat >= ThreatLevel.HIGH ? 1800 : 1200;
+    const rangeWeight = threat >= ThreatLevel.LOW ? 14 : 10;
+    const protectionValue = (1 - engine.protectionMultiplier) * protectionWeight;
+    const rawDps =
+      engine.attackType === 'projectile' && engine.projectile
+        ? engine.projectile.damage / Math.max(engine.fireIntervalSec, 0.1)
+        : engine.attackType === 'chain_lightning' && engine.chainLightning
+          ? (engine.chainLightning.initialDamage * engine.chainLightning.maxTargets * 0.65) / Math.max(engine.chainLightning.cooldownSeconds, 0.1)
+          : engine.attackType === 'artillery_barrage' && engine.artillery
+            ? (engine.artillery.barrageCount * engine.artillery.shellDamage * 0.35) / Math.max(engine.artillery.cooldownSeconds, 0.1)
+            : engine.attackType === 'oil_pour' && engine.oil
+              ? engine.oil.damage / Math.max(engine.oil.cooldownSeconds, 0.1)
+              : engine.attackType === 'drone_swarm' && engine.drones
+                ? (engine.drones.droneCount * engine.drones.droneDamage) / Math.max(engine.drones.cooldownSeconds, 0.1)
+                : 0;
+    return rawDps * dpsWeight + engine.range * rangeWeight + protectionValue;
+  }
+
+  private getTargetSlotsByAge(age: number, gameTime: number): number {
+    if (age <= 2) return 1;
+    if (age <= 4) return 2;
+    if (age === 5) return 3;
+    if (gameTime < 90) return 3;
+    return 4;
+  }
+
+  private considerTurretSlotsAndEngines(
+    state: GameStateSnapshot,
+    threat: ThreatLevel,
+    spendableGold: number
+  ): AIDecision | null {
+    const unlocked = state.enemyTurretSlotsUnlocked ?? 1;
+    const slots = state.enemyTurretSlots ?? [];
+    const available = Object.values(getTurretEnginesForAge(state.enemyAge));
+    if (available.length === 0) return null;
+
+    const sortedByPower = [...available].sort((a, b) => this.scoreTurretEngine(b, threat) - this.scoreTurretEngine(a, threat));
+
+    if (this.pendingTurretReplacement) {
+      const slot = slots.find((s) => s.slotIndex === this.pendingTurretReplacement!.slotIndex);
+      if (slot && !slot.turretId) {
+        const target = getTurretEngineDef(this.pendingTurretReplacement.turretId);
+        if (target && target.cost <= spendableGold) {
+          return {
+            action: 'BUY_TURRET_ENGINE',
+            parameters: { slotIndex: slot.slotIndex, turretId: target.id },
+            reasoning: `Rebuild turret ${target.name} on slot ${slot.slotIndex + 1}`,
+          };
+        }
+      }
+      this.pendingTurretReplacement = null;
+    }
+
+    // Fill empty slots first with strongest affordable engine.
+    for (let i = 0; i < unlocked; i++) {
+      const slot = slots.find((s) => s.slotIndex === i);
+      if (!slot || slot.turretId) continue;
+      const pick = sortedByPower.find((def) => def.cost <= spendableGold);
+      if (pick) {
+        return {
+          action: 'BUY_TURRET_ENGINE',
+          parameters: { slotIndex: i, turretId: pick.id },
+          reasoning: `Mount ${pick.name} on empty slot ${i + 1}`,
+        };
+      }
+      return null;
+    }
+
+    // Replace weak engines only in late game or under heavy threat.
+    const canReplace = state.enemyAge >= 5 && (threat >= ThreatLevel.HIGH || state.enemyAge === 6);
+    if (canReplace) {
+      let weakestSlotIndex = -1;
+      let weakestScore = Infinity;
+      let weakestTurretId: string | null = null;
+
+      for (let i = 0; i < unlocked; i++) {
+        const slot = slots.find((s) => s.slotIndex === i);
+        if (!slot?.turretId) continue;
+        const def = getTurretEngineDef(slot.turretId);
+        if (!def) continue;
+        const score = this.scoreTurretEngine(def, threat);
+        if (score < weakestScore) {
+          weakestScore = score;
+          weakestSlotIndex = i;
+          weakestTurretId = def.id;
+        }
+      }
+
+      const betterOption = sortedByPower.find((def) => def.cost <= spendableGold && this.scoreTurretEngine(def, threat) > weakestScore * 1.45 && def.id !== weakestTurretId);
+      if (weakestSlotIndex >= 0 && betterOption) {
+        this.pendingTurretReplacement = { slotIndex: weakestSlotIndex, turretId: betterOption.id };
+        return {
+          action: 'SELL_TURRET_ENGINE',
+          parameters: { slotIndex: weakestSlotIndex },
+          reasoning: `Sell weak slot ${weakestSlotIndex + 1} turret for ${betterOption.name}`,
+        };
+      }
+    }
+
+    // Unlock next slot once existing slots are meaningfully equipped.
+    const targetSlots = this.getTargetSlotsByAge(state.enemyAge, state.gameTime);
+    if (unlocked < targetSlots) {
+      const filledUnlocked = slots.filter((slot) => slot.slotIndex < unlocked && !!slot.turretId).length;
+      if (filledUnlocked >= Math.max(1, unlocked)) {
+        const nextCost = getTurretSlotUnlockCost(unlocked);
+        if (spendableGold >= nextCost) {
+          return {
+            action: 'UPGRADE_TURRET_SLOTS',
+            reasoning: `Unlock turret slot ${unlocked + 1}`,
+          };
+        }
+      }
+    }
+
+    return null;
   }
 
   decide(state: GameStateSnapshot, personality: AIPersonality): AIDecision {
@@ -197,45 +327,15 @@ export class BalancedAI implements IAIBehavior {
     const emergencyGold = state.enemyGold;
     const recruitmentGold = spendableGold;
     const ageUpgradeGold = state.enemyGold; // Age up can always use full gold
+
+    const turretPlanDecision = this.considerTurretSlotsAndEngines(state, threat, recruitmentGold);
+    if (turretPlanDecision) {
+      this.lastRecruitmentDecision = turretPlanDecision.reasoning || turretPlanDecision.action;
+      return turretPlanDecision;
+    }
     
     // CONCURRENT DECISION-MAKING: Can do multiple actions per decision with randomization
     const urgentActions: AIDecision[] = [];
-
-    // Priority 0.0: BASELINE DEFENSE (Level 1 Turret)
-    // If we have no turret upgrade yet, and we aren't starving, get it.
-    // This serves as an early game stabilizer and visual feedback.
-    if (state.enemyTurretLevel === 0 && recruitmentGold > 340) {
-        const reason = "Establishing baseline defenses (Turret Lv 1)";
-        // Only if we aren't saving for Age 2 desperately
-        if (state.enemyAge === 1 && state.enemyGold < 400 && recruitmentGold < 400) {
-            // delay
-        } else {
-             this.lastRecruitmentDecision = reason;
-             return {
-                 action: 'BUILD_TURRET',
-                 reasoning: reason
-             };
-        }
-    }
-    
-    // Priority 0: CRITICAL DEFENSE - if Player units at AI base AND turret can help
-    if (state.playerUnitsNearEnemyBase > 2 && state.enemyTurretLevel < 5) {
-      const turretCost = getTurretCost(state.enemyTurretLevel);
-      // FIX: Use 'recruitmentGold' (spendable) not emergencyGold.
-      // User Request: "AI should also not use emergency budget for tower construction"
-      // We only build if we have SPENDABLE gold, meaning our reserves/emergency funds stay intact.
-      if (recruitmentGold >= turretCost) {
-        // Reduced chance (was 70%) to prioritize turret, to allow unit production to compete
-        if (Math.random() < 0.5) {
-          const reason = `CRITICAL: ${state.playerUnitsNearEnemyBase} player units at base - defensive turret upgrade!`;
-          this.lastRecruitmentDecision = reason;
-          return {
-            action: 'BUILD_TURRET',
-            reasoning: reason,
-          };
-        }
-      }
-    }
     
     // Priority 1: Desperate defense (use all gold, but ONLY when truly desperate)
     // Must have LOW health AND recent attack, or severely outnumbered
@@ -364,10 +464,6 @@ export class BalancedAI implements IAIBehavior {
     const projectedManaNeed = AIBehaviorUtils.calculateProjectedManaNeed(state, biasedPersonality);
     const manaDecision = this.considerManaUpgrade(state, biasedPersonality, threat, recruitmentGold, projectedManaNeed);
     if (manaDecision) urgentActions.push(manaDecision);
-    
-    // Turret building (use flexible gold - strict budget)
-    const turretDecision = this.considerTurret(state, biasedPersonality, threat, recruitmentGold);
-    if (turretDecision) urgentActions.push(turretDecision);
     
     // If we have multiple urgent actions, pick one based on priority and randomness
     if (urgentActions.length > 0) {
@@ -730,103 +826,6 @@ export class BalancedAI implements IAIBehavior {
       };
     }
     
-    return null;
-  }
-  
-  /**
-   * Consider building turret - smart decision based on threat and army comparison
-   */
-  private considerTurret(
-    state: GameStateSnapshot,
-    personality: AIPersonality,
-    threat: ThreatLevel,
-    spendableGold: number
-  ): AIDecision | null {
-    // --- DYNAMIC EVALUATION (User Requested: Use GameState over Static Limits) ---
-    // We ignore the hard 'maxTurrets' cap if the situation demands it.
-    
-    const turretCost = getTurretCost(state.enemyTurretLevel);
-    if (spendableGold < turretCost) return null;
-    if (state.enemyTurretLevel >= 10) return null; // Max level check
-    
-    // Context: Are we in danger?
-    const isEmergency = threat === ThreatLevel.HIGH || threat === ThreatLevel.CRITICAL;
-    const enemyNearBase = state.playerUnitsNearEnemyBase > 0;
-    
-    // Context: Are we rich? (Dynamic Economic check)
-    const isRich = spendableGold > (turretCost * 2.5);
-    
-    // Soft Cap Check: only apply static max limit if we are SAFE and NOT RICH
-    // This allows the AI to break the rules when necessary.
-    if (!isEmergency && !isRich && !enemyNearBase) {
-       if (state.enemyTurretLevel >= AI_TUNING.turret.maxTurrets) return null;
-    }
-    
-    // Calculate relative turret strength vs enemy turrets
-    const turretGap = state.playerTurretLevel - state.enemyTurretLevel;
-    
-    // Calculate relative army strength
-    let ourArmyStrength = 0;
-    let theirArmyStrength = 0;
-    for (const unit of state.enemyUnits) {
-      ourArmyStrength += unit.health + (unit.damage * 10);
-    }
-    for (const unit of state.playerUnits) {
-      theirArmyStrength += unit.health + (unit.damage * 10);
-    }
-    const armyRatio = ourArmyStrength / Math.max(theirArmyStrength, 1);
-    
-    // Decision logic: Build turret if...
-    // 1. Enemy turret is 2+ levels ahead (catching up)
-    if (turretGap >= 2) {
-      const reason = `Catching up on turret level (${state.enemyTurretLevel} vs enemy ${state.playerTurretLevel})`;
-      return {
-        action: 'BUILD_TURRET',
-        reasoning: reason,
-      };
-    }
-    
-    // 2. Under high/critical threat AND we're outnumbered (defensive necessity)
-    if ((isEmergency || enemyNearBase) && armyRatio < 1.1) {
-      const reason = `Defensive turret upgrade - Under Threat (threat: ${threat}, nearBase: ${enemyNearBase})`;
-      return {
-        action: 'BUILD_TURRET',
-        reasoning: reason,
-      };
-    }
-    
-    // 3. We are rich and just want to secure our lead... BUT 
-    // IF we are completely dominating (Army > 3x), DO NOT BUILD TURRET - KILL THEM INSTEAD!
-    if (isRich && state.enemyTurretLevel < 5) {
-       if (armyRatio > 3.0) {
-          // Skip turret, we are crushing them.
-       } else {
-          const reason = `Economic Advantage: Investing excess gold in Turret`;
-          return {
-            action: 'BUILD_TURRET',
-            reasoning: reason,
-          };
-       }
-    }
-
-    // 4. Low threat + we're stronger + enemy turret is ahead (offensive advantage)
-    // FIX: Only do this if we are ridiculously rich or maxed out or it's vital.
-    // DOMINATION CHECK: If Army Ratio > 2.0, we prefer UNITS over turrets unless we are maxed on units.
-    if (threat === ThreatLevel.MINIMAL && armyRatio > 2.5 && turretGap >= 2) {
-      // Actually, if we are dominating that hard, screw the turret, win the game.
-      // return null; 
-    }
-    
-    // 5. Base defense needed - Player units approaching
-    if (state.playerUnitsNearEnemyBase > 2 && state.enemyTurretLevel < 3) {
-      const reason = `Base defense needed - ${state.playerUnitsNearEnemyBase} player units approaching`;
-      return {
-        action: 'BUILD_TURRET',
-        reasoning: reason,
-      };
-    }
-    
-    // Otherwise, don't build turret yet
     return null;
   }
   
@@ -1637,5 +1636,6 @@ export class BalancedAI implements IAIBehavior {
     this.lastStrategySwitch = 0;
     this.currentStrategy = 'BALANCED';
     this.consecutiveDefenseFrames = 0;
+    this.pendingTurretReplacement = null;
   }
 }

@@ -1,5 +1,5 @@
 import { Entity, GameState } from '../GameEngine';
-import { UNIT_DEFS } from '../config/units';
+import { UNIT_DEFS, type UnitDef } from '../config/units';
 import { getGoldToManaConversionRate } from '../config/gameBalance';
 import { SkillSystem } from './SkillSystem';
 import { CombatUtils } from './CombatUtils';
@@ -178,7 +178,7 @@ export class EntitySystem {
          
          ownerEcon.mana -= unitDef.teleporter.manaPerAttack;
          
-         const aoeRadius = unitDef.skill?.power ?? 1; // Default to 1 if not defined (though we defined it now)
+         const aoeRadius = unitDef.skill?.radius ?? unitDef.skill?.power ?? 1;
          
          // Damage loop
          const toKill: number[] = [];
@@ -203,7 +203,50 @@ export class EntitySystem {
       }
   }
 
-  private static performUnitAttack(entity: Entity, target: Entity, unitDef: any, state: GameState, deltaSeconds: number) {
+  private static getProjectileSpeed(unitDef: UnitDef, isBurstShot: boolean): number {
+    if (unitDef.projectile?.speed && unitDef.projectile.speed > 0) {
+      return unitDef.projectile.speed;
+    }
+    return isBurstShot ? 40 : 30;
+  }
+
+  private static getProjectileLifeMs(unitDef: UnitDef, projectileSpeed: number): number {
+    const unitRange = unitDef.range ?? 1;
+    return ((unitRange * 1.5) / Math.max(0.1, projectileSpeed)) * 1000;
+  }
+
+  private static spawnUnitProjectile(
+    state: GameState,
+    entity: Entity,
+    targetX: number,
+    damage: number,
+    unitDef: UnitDef,
+    isBurstShot: boolean
+  ): void {
+    const dir = targetX > entity.transform.x ? 1 : -1;
+    const speed = EntitySystem.getProjectileSpeed(unitDef, isBurstShot);
+    const lifeMs = EntitySystem.getProjectileLifeMs(unitDef, speed);
+    const projectileStyle = unitDef.projectile;
+
+    state.projectiles.push({
+      id: state.nextEntityId++ + 100000,
+      owner: entity.owner,
+      x: entity.transform.x + dir * 0.2,
+      y: entity.transform.laneY,
+      vx: dir * speed,
+      vy: 0,
+      curvature: projectileStyle?.curvature ?? 0,
+      damage,
+      lifeMs,
+      manaLeech: unitDef.manaLeech,
+      radiusPx: projectileStyle?.radiusPx,
+      color: projectileStyle?.color,
+      glowColor: projectileStyle?.glowColor,
+      trailAlpha: projectileStyle?.trailAlpha,
+    });
+  }
+
+  private static performUnitAttack(entity: Entity, target: Entity, unitDef: UnitDef, state: GameState, deltaSeconds: number) {
      entity.animationState = 'ATTACK';
      const isRanged = (entity.attack.range ?? 1) > 1.5;
      
@@ -214,19 +257,14 @@ export class EntitySystem {
          if (entity.burstState.shotsRemaining > 0) {
              entity.attack.cooldownRemaining -= deltaSeconds;
              if (entity.attack.cooldownRemaining <= 0) {
-                 const dir = target.transform.x > entity.transform.x ? 1 : -1;
-                 const projVx = dir * 40;
-                 const projId = state.nextEntityId++ + 100000;
-                 const unitRange = unitDef.range ?? 1;
-                 const lifeMs = ((unitRange * 1.5) / Math.abs(projVx)) * 1000;
-                 
-                 state.projectiles.push({
-                     id: projId, owner: entity.owner,
-                     x: entity.transform.x + dir * 0.2, y: entity.transform.laneY,
-                     vx: projVx, vy: 0,
-                     damage: entity.attack.damage, lifeMs,
-                     manaLeech: unitDef.manaLeech
-                 });
+                 EntitySystem.spawnUnitProjectile(
+                   state,
+                   entity,
+                   target.transform.x,
+                   entity.attack.damage,
+                   unitDef,
+                   true
+                 );
                  
                  entity.burstState.shotsRemaining--;
                  entity.attack.cooldownRemaining = 0.05;
@@ -248,19 +286,14 @@ export class EntitySystem {
      } else if (isRanged) {
         entity.attack.cooldownRemaining -= deltaSeconds;
         if (entity.attack.cooldownRemaining <= 0) {
-            const dir = target.transform.x > entity.transform.x ? 1 : -1;
-            const projVx = dir * 30;
-            const projId = state.nextEntityId++ + 100000;
-            const unitRange = unitDef.range ?? 1;
-            const lifeMs = ((unitRange * 1.5) / Math.abs(projVx)) * 1000;
-            
-            state.projectiles.push({
-                id: projId, owner: entity.owner,
-                x: entity.transform.x + dir * 0.2, y: entity.transform.laneY,
-                vx: projVx, vy: 0,
-                damage: entity.attack.damage, lifeMs,
-                manaLeech: unitDef.manaLeech
-            });
+            EntitySystem.spawnUnitProjectile(
+              state,
+              entity,
+              target.transform.x,
+              entity.attack.damage,
+              unitDef,
+              false
+            );
             entity.attack.cooldownRemaining = 1 / Math.max(0.1, entity.attack.speed);
         }
      } else {
@@ -308,7 +341,7 @@ export class EntitySystem {
      }
   }
 
-  private static checkBaseAttack(entity: Entity, unitDef: any, state: GameState, deltaSeconds: number) {
+  private static checkBaseAttack(entity: Entity, unitDef: UnitDef, state: GameState, deltaSeconds: number) {
       if (unitDef.teleporter && unitDef.teleporter.canAttackBase === false) return;
 
       const isRangedUnit = (entity.attack.range ?? 1) > 1.5;
@@ -336,17 +369,15 @@ export class EntitySystem {
           if (isRangedUnit) {
               entity.attack.cooldownRemaining -= deltaSeconds;
               if (entity.attack.cooldownRemaining <= 0) {
-                const projVx = dir * 30;
-                const projId = state.nextEntityId++ + 100000;
-                const unitRange = unitDef.range ?? 1;
-                const lifeMs = ((unitRange * 1.5) / Math.abs(projVx)) * 1000;
-                
-                state.projectiles.push({
-                    id: projId, owner: entity.owner,
-                    x: entity.transform.x + dir * 0.2, y: entity.transform.laneY,
-                    vx: projVx, vy: 0,
-                    damage: entity.attack.damage, lifeMs
-                });
+                const targetX = entity.owner === 'PLAYER' ? state.battlefield.width : 0;
+                EntitySystem.spawnUnitProjectile(
+                  state,
+                  entity,
+                  targetX,
+                  entity.attack.damage,
+                  unitDef,
+                  false
+                );
                 entity.attack.cooldownRemaining = 1 / Math.max(0.1, entity.attack.speed);
               }
           } else {

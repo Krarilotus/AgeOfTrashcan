@@ -1,7 +1,11 @@
 import { GameState, Entity, Projectile } from '../GameEngine';
 import { MANA_POOL_VISUALS, TURRET_VISUALS, pixelsToUnits, unitsToPixels } from '../config/renderConfig';
-import { TURRET_ABILITY_CONFIG } from '../config/turretConfig';
 import { UNIT_DEFS } from '../config/units';
+import {
+  MAX_TURRET_SLOTS,
+  getSlotMountYOffsetUnits,
+  getTurretEngineDef,
+} from '../config/turrets';
 
 export class RenderSystem {
   private ctx: CanvasRenderingContext2D;
@@ -9,10 +13,8 @@ export class RenderSystem {
   private unitSprites: Map<string, HTMLImageElement | HTMLCanvasElement>;
   private manaPoolSprites: Map<number, HTMLImageElement> = new Map();
   private missingManaPoolWarnings: Set<number> = new Set();
-  private baseSprites: Map<string, HTMLImageElement> = new Map();
-  private turretSprites: Map<string, HTMLImageElement> = new Map();
-  // Keep original procedural visuals as source-of-truth during refactor.
-  private readonly useStructureSprites = false;
+  private turretEngineSprites: Map<string, HTMLImageElement> = new Map();
+  private baseSlotExtensionSprites: Map<number, HTMLImageElement> = new Map();
 
   constructor(
     ctx: CanvasRenderingContext2D, 
@@ -23,8 +25,35 @@ export class RenderSystem {
     this.canvas = canvas;
     this.unitSprites = unitSprites;
     this.loadManaPoolSprites();
-    if (this.useStructureSprites) {
-      this.loadStructureSprites();
+    this.loadTurretEngineSprites();
+    this.loadBaseSlotExtensionSprites();
+  }
+
+  private loadTurretEngineSprites(): void {
+    const turretIds = [
+      'chicken_eggomat', 'flame_catapult', 'sunspike_ballista', 'shrapnel_urn_launcher',
+      'boiling_pot', 'repeater_crossbow', 'thunder_javelin', 'piercing_sniper',
+      'shock_mortar', 'suppressor_nest', 'kamikaze_drone_hub', 'lightning_rod',
+      'artillery_barrage_platform', 'flak_array', 'plasma_lance', 'quantum_laser',
+      'tesla_obelisk_mk2', 'orbital_barrage_mk2',
+    ];
+
+    for (const turretId of turretIds) {
+      const img = new Image();
+      img.onload = () => {
+        this.turretEngineSprites.set(turretId, img);
+      };
+      img.src = `/turret_engines/${turretId}.svg`;
+    }
+  }
+
+  private loadBaseSlotExtensionSprites(): void {
+    for (let slots = 1; slots <= MAX_TURRET_SLOTS; slots++) {
+      const img = new Image();
+      img.onload = () => {
+        this.baseSlotExtensionSprites.set(slots, img);
+      };
+      img.src = `/base_slots/slots_${slots}.svg`;
     }
   }
 
@@ -39,31 +68,6 @@ export class RenderSystem {
         console.warn(`Mana pool sprite failed to load for tier ${tier}: ${src}`);
       };
       img.src = src;
-    }
-  }
-
-  private loadStructureSprites(): void {
-    const sides: Array<'player' | 'enemy'> = ['player', 'enemy'];
-    for (const side of sides) {
-      for (let age = 1; age <= 7; age++) {
-        const img = new Image();
-        const key = `${side}_age_${age}`;
-        img.onload = () => {
-          this.baseSprites.set(key, img);
-        };
-        img.src = `/base/${side}_age_${age}.svg`;
-      }
-    }
-
-    for (const side of sides) {
-      for (let level = 1; level <= 10; level++) {
-        const img = new Image();
-        const key = `${side}_level_${level}`;
-        img.onload = () => {
-          this.turretSprites.set(key, img);
-        };
-        img.src = `/tower/${side}_level_${level}.svg`;
-      }
     }
   }
 
@@ -117,24 +121,16 @@ export class RenderSystem {
     this.drawHUD(state);
   }
 
-  // Helper to match GameEngine static methods
-  // We can import these from config/renderConfig directly if they match
-  // The GameEngine ones just wrapped the config ones.
-  // GameEngine.getTurretSize was: TURRET_VISUALS.BASE_SIZE + turretLevel * TURRET_VISUALS.SIZE_PER_LEVEL
-  private getTurretSize(turretLevel: number): number {
-    return TURRET_VISUALS.BASE_SIZE + turretLevel * TURRET_VISUALS.SIZE_PER_LEVEL;
-  }
-  
-  private getCannonOffsetRatio(turretLevel: number): number {
-    if (turretLevel >= 7) return 0.6;
-    if (turretLevel >= 4) return 0.5;
-    return 0.4;
-  }
-
   private getTurretScreenPosition(baseX: number, baseY: number, age: number): { x: number; y: number } {
     const dims = TURRET_VISUALS.BASE_DIMENSIONS[age - 1] || TURRET_VISUALS.BASE_DIMENSIONS[0];
     const turretY = baseY - dims.height - 5; 
     return { x: baseX, y: turretY };
+  }
+
+  private getTurretScreenPositionForSlot(baseX: number, baseY: number, age: number, slotIndex: number): { x: number; y: number } {
+    const top = this.getTurretScreenPosition(baseX, baseY, age);
+    const slotYOffset = unitsToPixels(getSlotMountYOffsetUnits(slotIndex));
+    return { x: top.x, y: top.y - slotYOffset };
   }
 
   private drawBase(
@@ -148,7 +144,7 @@ export class RenderSystem {
     const x = (base.x / battlefieldWidth) * this.canvas.width;
     const y = this.canvas.height / 2;
     
-    const turretLevel = base.turretLevel;
+    const turretSlotsUnlocked = Math.max(1, Math.min(MAX_TURRET_SLOTS, base.turretSlotsUnlocked ?? 1));
     const color1 = isPlayer ? '#3b82f6' : '#ef4444';
     const color2 = isPlayer ? '#1e40af' : '#991b1b';
     const color3 = isPlayer ? '#60a5fa' : '#f87171';
@@ -156,9 +152,8 @@ export class RenderSystem {
     // Draw cellar/well first so base geometry sits naturally above it.
     this.drawManaPool(x, y, age, manaLevel, isPlayer);
 
-    // Age-progressive designs
-    const drewBaseSprite = this.useStructureSprites && this.drawBaseStructureSprite(x, y, age, isPlayer);
-    if (!drewBaseSprite && age === 1) { // Stone Age
+    // Age-progressive procedural designs
+    if (age === 1) { // Stone Age
       const tentWidth = 35;
       const tentHeight = 30;
       this.ctx.fillStyle = '#8b7355';
@@ -173,7 +168,7 @@ export class RenderSystem {
       this.ctx.stroke();
       this.ctx.fillStyle = '#3d2817';
       this.ctx.fillRect(x - 8, y - 15, 16, 15);
-    } else if (!drewBaseSprite && age === 2) { // Tool Age
+    } else if (age === 2) { // Tool Age
       const tentWidth = 38;
       const tentHeight = 32;
       this.ctx.fillStyle = '#a0826d';
@@ -191,7 +186,7 @@ export class RenderSystem {
       this.ctx.moveTo(x + tentWidth/3, y);
       this.ctx.lineTo(x, y - tentHeight);
       this.ctx.stroke();
-    } else if (!drewBaseSprite && age === 3) { // Bronze Age
+    } else if (age === 3) { // Bronze Age
       const hutWidth = 35;
       const hutHeight = 35;
       this.ctx.fillStyle = color2;
@@ -205,7 +200,7 @@ export class RenderSystem {
       this.ctx.fill();
       this.ctx.fillStyle = '#fcd34d';
       this.ctx.fillRect(x - 6, y - 20, 12, 10);
-    } else if (!drewBaseSprite && age === 4) { // Iron Age
+    } else if (age === 4) { // Iron Age
       const towerWidth = 36;
       const towerHeight = 40;
       this.ctx.fillStyle = '#71717a';
@@ -219,7 +214,7 @@ export class RenderSystem {
       for (let i = 0; i < 3; i++) {
         this.ctx.fillRect(x - towerWidth/2 + i * 12, y - towerHeight - 5, 8, 5);
       }
-    } else if (!drewBaseSprite && age === 5) { // Castle Age
+    } else if (age === 5) { // Castle Age
       const keepWidth = 40;
       const keepHeight = 42;
       const gradient = this.ctx.createLinearGradient(x, y - keepHeight, x, y);
@@ -239,7 +234,7 @@ export class RenderSystem {
         this.ctx.fillRect(x - 12, y - keepHeight + 15 + i * 15, 3, 10);
         this.ctx.fillRect(x + 9, y - keepHeight + 15 + i * 15, 3, 10);
       }
-    } else if (!drewBaseSprite && age === 6) { // Renaissance
+    } else if (age === 6) { // Renaissance
       const citadelWidth = 42;
       const citadelHeight = 45;
       this.ctx.fillStyle = color2;
@@ -252,7 +247,7 @@ export class RenderSystem {
         this.ctx.fillRect(x - 15, y - citadelHeight + 15 + i * 15, 10, 10);
         this.ctx.fillRect(x + 5, y - citadelHeight + 15 + i * 15, 10, 10);
       }
-    } else if (!drewBaseSprite) { // Modern Age (7)
+    } else { // Modern Age (7)
       const bunkerWidth = 45;
       const bunkerHeight = 48;
       const metalGradient = this.ctx.createLinearGradient(x - bunkerWidth/2, y - bunkerHeight, x + bunkerWidth/2, y);
@@ -275,224 +270,54 @@ export class RenderSystem {
       this.ctx.strokeRect(x - bunkerWidth/2, y - bunkerHeight, bunkerWidth, bunkerHeight);
     }
 
-    // Check for Active Barrage Effect
-    const isBarrageActive = (vfx || []).some(v => 
-        v.type === 'ability_cast' && 
-        v.data?.turretAbility === 'artillery_barrage' && 
-        Math.abs(v.x - base.x) < 5 // Check if this effect belongs to this base
-    );
-
-    // TURRET (Level 0 stays clean: no turret rendered)
-    if (turretLevel > 0) {
-      const drewTurretSprite = this.useStructureSprites && this.drawTurretStructureSprite(x, y, age, turretLevel, isPlayer, isBarrageActive);
-      if (!drewTurretSprite) {
-        const turretScreenPos = this.getTurretScreenPosition(x, y, age);
-        const turretSize = this.getTurretSize(turretLevel);
-        const piercingLv = TURRET_ABILITY_CONFIG.PIERCING_SHOT.requiredLevel;
-        const chainLv = TURRET_ABILITY_CONFIG.CHAIN_LIGHTNING.requiredLevel;
-        const barrageLv = TURRET_ABILITY_CONFIG.ARTILLERY_BARRAGE.requiredLevel;
-      
-        // Draw reinforced platform and support collar.
-        const platformW = turretSize * 2 + 8 + turretLevel;
-        const platformH = 9;
-        this.ctx.fillStyle = color2;
-        this.ctx.beginPath();
-        this.ctx.roundRect(
-          turretScreenPos.x - platformW / 2,
-          turretScreenPos.y,
-          platformW,
-          platformH,
-          4
-        );
-        this.ctx.fill();
-        this.ctx.strokeStyle = '#000';
-        this.ctx.lineWidth = 1;
-        this.ctx.stroke();
-      
-        this.ctx.fillStyle = isPlayer ? '#93c5fd' : '#fca5a5';
-        this.ctx.globalAlpha = 0.2;
-        this.ctx.beginPath();
-        this.ctx.arc(turretScreenPos.x, turretScreenPos.y + 4, 5 + turretLevel * 0.5, 0, Math.PI * 2);
-        this.ctx.fill();
-        this.ctx.globalAlpha = 1.0;
-
-        // Side braces and per-level rivets to show progression at every level.
-        if (turretLevel >= 2) {
-          this.ctx.fillStyle = '#334155';
-          this.ctx.fillRect(turretScreenPos.x - platformW / 2 + 2, turretScreenPos.y + 1, 4, platformH - 2);
-          this.ctx.fillRect(turretScreenPos.x + platformW / 2 - 6, turretScreenPos.y + 1, 4, platformH - 2);
-        }
-        this.ctx.fillStyle = '#0f172a';
-        for (let i = 0; i < turretLevel; i++) {
-          const px = turretScreenPos.x - platformW / 2 + 8 + i * ((platformW - 16) / Math.max(1, turretLevel - 1));
-          this.ctx.fillRect(px, turretScreenPos.y + platformH - 2, 2, 2);
-        }
-
-        this.ctx.save();
-      
-        // Determine Cannon Rotation
-        let rotation = 0;
-        if (isBarrageActive) {
-            // Point UP with recoil jitter (UP is -PI/2 for both sides)
-            const jitter = (Math.random() - 0.5) * 0.1;
-            rotation = -Math.PI / 2 + jitter; 
-        } else {
-            // Standard angle (slightly up towards enemy)
-            // Player: Face Right (-0.1 rad)
-            // Enemy: Face Left (PI + 0.1 rad)
-            rotation = isPlayer ? -0.1 : Math.PI + 0.1;
-        }
-      
-        // Translate to pivot point
-        this.ctx.translate(turretScreenPos.x, turretScreenPos.y + 4);
-        this.ctx.rotate(rotation);
-
-        const barrelLen = 14 + turretLevel * 1.7;
-        const barrelHalfH = Math.max(4.5, 4 + turretLevel * 0.3);
-
-      // Main cannon body.
-      this.ctx.fillStyle = turretLevel >= 7 ? (isPlayer ? '#cbd5e1' : '#fda4af') : isPlayer ? '#60a5fa' : '#f87171';
-      this.ctx.beginPath();
-      this.ctx.moveTo(-8, -barrelHalfH);
-      this.ctx.lineTo(barrelLen, -barrelHalfH + 1);
-      this.ctx.lineTo(barrelLen, barrelHalfH - 1);
-      this.ctx.lineTo(-8, barrelHalfH);
-      this.ctx.lineTo(-12, 0);
-      this.ctx.closePath();
-      this.ctx.fill();
-      this.ctx.strokeStyle = '#111827';
-      this.ctx.lineWidth = 1;
-      this.ctx.stroke();
-
-      // Extra sleeves by level to show continuous upgrades.
-      if (turretLevel >= 3) {
-        this.ctx.fillStyle = '#334155';
-        this.ctx.fillRect(4, -barrelHalfH - 1, 6 + turretLevel * 0.4, (barrelHalfH + 1) * 2);
-      }
-      if (turretLevel >= 6) {
-        this.ctx.fillStyle = '#0f172a';
-        this.ctx.fillRect(10, -2, barrelLen - 14, 4);
-      }
-
-      // Every level adds an accent stripe on top of the cannon.
-      this.ctx.strokeStyle = isPlayer ? 'rgba(186,230,253,0.45)' : 'rgba(254,205,211,0.45)';
-      for (let i = 0; i < turretLevel; i++) {
-        const sx = -2 + i * ((barrelLen - 2) / Math.max(1, turretLevel));
-        this.ctx.beginPath();
-        this.ctx.moveTo(sx, -barrelHalfH - 0.5);
-        this.ctx.lineTo(Math.min(sx + 2, barrelLen), -barrelHalfH - 0.5);
-        this.ctx.stroke();
-      }
-
-      // Ability attachments.
-      if (turretLevel >= piercingLv) {
-        // Piercing attachment: hardened spear-tip muzzle.
-        this.ctx.fillStyle = '#f8fafc';
-        this.ctx.beginPath();
-        this.ctx.moveTo(barrelLen, -3);
-        this.ctx.lineTo(barrelLen + 9, 0);
-        this.ctx.lineTo(barrelLen, 3);
-        this.ctx.closePath();
-        this.ctx.fill();
-      }
-      if (turretLevel >= chainLv) {
-        // Chain attachment: lightning rod and capacitor orb.
-        this.ctx.strokeStyle = '#67e8f9';
-        this.ctx.lineWidth = 1.5;
-        this.ctx.beginPath();
-        this.ctx.moveTo(2, -barrelHalfH - 1);
-        this.ctx.lineTo(2, -barrelHalfH - 10);
-        this.ctx.stroke();
-        this.ctx.fillStyle = '#22d3ee';
-        this.ctx.beginPath();
-        this.ctx.arc(2, -barrelHalfH - 11, 2.5, 0, Math.PI * 2);
-        this.ctx.fill();
-      }
-      if (turretLevel >= barrageLv) {
-        // Artillery attachment: triple micro-launch pods.
-        this.ctx.fillStyle = '#9ca3af';
-        for (let i = 0; i < 3; i++) {
-          const px = 6 + i * 5;
-          this.ctx.fillRect(px, -barrelHalfH - 6, 3, 5);
-          this.ctx.fillStyle = '#111827';
-          this.ctx.fillRect(px + 0.5, -barrelHalfH - 6, 2, 2);
-          this.ctx.fillStyle = '#9ca3af';
-        }
-      }
-      
-        this.ctx.restore();
+    const slotExtensionSprite = this.baseSlotExtensionSprites.get(turretSlotsUnlocked);
+    if (slotExtensionSprite && slotExtensionSprite.complete && slotExtensionSprite.naturalHeight > 0) {
+      const extWidth = 28;
+      const extHeight = 26 + turretSlotsUnlocked * 8;
+      this.ctx.drawImage(slotExtensionSprite, x - extWidth / 2, y - extHeight - 2, extWidth, extHeight);
+    } else {
+      this.ctx.fillStyle = isPlayer ? 'rgba(59,130,246,0.30)' : 'rgba(239,68,68,0.30)';
+      for (let i = 0; i < turretSlotsUnlocked; i++) {
+        const pos = this.getTurretScreenPositionForSlot(x, y, age, i);
+        this.ctx.fillRect(pos.x - 8, pos.y + 3, 16, 5);
       }
     }
 
-    // RANGE CIRCLE
-    if (turretLevel > 0) {
-      const baseRange = 10;
-      const rangeBonus = turretLevel <= 3 ? turretLevel * 4 : 
-                         turretLevel <= 6 ? 12 + (turretLevel - 3) * 2 :
-                         18 + (turretLevel - 6) * 1;
-      const maxRange = battlefieldWidth / 2;
-      const turretRange = Math.min(baseRange + rangeBonus, maxRange);
-      const rangePixels = (turretRange / battlefieldWidth) * this.canvas.width;
-      
-      this.ctx.strokeStyle = isPlayer ? 'rgba(96, 165, 250, 0.3)' : 'rgba(248, 113, 113, 0.3)';
-      this.ctx.lineWidth = 2;
-      this.ctx.setLineDash([5, 5]);
+    for (let slotIndex = 0; slotIndex < turretSlotsUnlocked; slotIndex++) {
+      const slot = base.turretSlots?.[slotIndex];
+      const pos = this.getTurretScreenPositionForSlot(x, y, age, slotIndex);
+      this.ctx.fillStyle = isPlayer ? '#1d4ed8' : '#b91c1c';
+      this.ctx.fillRect(pos.x - 10, pos.y + 2, 20, 4);
+
+      if (!slot?.turretId) {
+        this.ctx.strokeStyle = 'rgba(148,163,184,0.35)';
+        this.ctx.lineWidth = 1;
+        this.ctx.strokeRect(pos.x - 9, pos.y - 12, 18, 12);
+        continue;
+      }
+
+      const engineDef = getTurretEngineDef(slot.turretId);
+      if (!engineDef) continue;
+
+      const sprite = this.turretEngineSprites.get(slot.turretId);
+      if (sprite && sprite.complete && sprite.naturalHeight > 0) {
+        this.ctx.drawImage(sprite, pos.x - 14, pos.y - 22, 28, 22);
+      } else {
+        this.ctx.fillStyle = isPlayer ? '#60a5fa' : '#f87171';
+        this.ctx.beginPath();
+        this.ctx.arc(pos.x, pos.y - 8, 8, 0, Math.PI * 2);
+        this.ctx.fill();
+      }
+
+      const rangePixels = (engineDef.range / battlefieldWidth) * this.canvas.width;
+      this.ctx.strokeStyle = isPlayer ? 'rgba(96, 165, 250, 0.18)' : 'rgba(248, 113, 113, 0.18)';
+      this.ctx.lineWidth = 1.5;
+      this.ctx.setLineDash([4, 4]);
       this.ctx.beginPath();
-      this.ctx.arc(x, y, rangePixels, 0, Math.PI * 2);
+      this.ctx.arc(pos.x, y, rangePixels, 0, Math.PI * 2);
       this.ctx.stroke();
       this.ctx.setLineDash([]);
     }
-  }
-
-  private drawBaseStructureSprite(baseX: number, baseY: number, age: number, isPlayer: boolean): boolean {
-    const side = isPlayer ? 'player' : 'enemy';
-    const sprite = this.baseSprites.get(`${side}_age_${age}`);
-    if (!sprite || !sprite.complete || sprite.naturalHeight <= 0) return false;
-
-    const dims = TURRET_VISUALS.BASE_DIMENSIONS[age - 1] || TURRET_VISUALS.BASE_DIMENSIONS[0];
-    const drawWidth = dims.width;
-    const drawHeight = dims.height;
-    this.ctx.drawImage(sprite, baseX - drawWidth / 2, baseY - drawHeight, drawWidth, drawHeight);
-    return true;
-  }
-
-  private drawTurretStructureSprite(
-    baseX: number,
-    baseY: number,
-    age: number,
-    turretLevel: number,
-    isPlayer: boolean,
-    isBarrageActive: boolean
-  ): boolean {
-    // Keep original barrage pointing behavior from procedural path for parity.
-    if (isBarrageActive) return false;
-
-    const side = isPlayer ? 'player' : 'enemy';
-    const normalizedLevel = Math.min(Math.max(turretLevel, 1), 10);
-    const sprite = this.turretSprites.get(`${side}_level_${normalizedLevel}`);
-    if (!sprite || !sprite.complete || sprite.naturalHeight <= 0) return false;
-
-    const turretScreenPos = this.getTurretScreenPosition(baseX, baseY, age);
-    const turretSize = this.getTurretSize(turretLevel);
-    const drawWidth = turretSize * 2.5;
-    const drawHeight = turretSize * 1.9;
-    const drawX = turretScreenPos.x - drawWidth / 2;
-    const drawY = turretScreenPos.y - drawHeight + 14;
-
-    this.ctx.save();
-    this.ctx.globalAlpha = 0.98;
-    this.ctx.drawImage(sprite, drawX, drawY, drawWidth, drawHeight);
-    this.ctx.globalAlpha = 1.0;
-
-    if (isBarrageActive) {
-      const pulse = 0.35 + Math.random() * 0.25;
-      this.ctx.fillStyle = isPlayer ? `rgba(96,165,250,${pulse})` : `rgba(248,113,113,${pulse})`;
-      this.ctx.beginPath();
-      this.ctx.ellipse(turretScreenPos.x, turretScreenPos.y + 1, 9, 4, 0, 0, Math.PI * 2);
-      this.ctx.fill();
-    }
-    this.ctx.restore();
-    return true;
   }
 
   private getManaPoolTier(manaLevel: number): number {
@@ -587,43 +412,49 @@ export class RenderSystem {
 
       if (p.isFalling) {
         // Falling Artillery Shell (Vertical Oval/Teardrop)
-        this.ctx.fillStyle = '#ff4400';
+        this.ctx.fillStyle = p.color ?? '#ff4400';
         this.ctx.beginPath();
         // Smaller than normal (Radius 2x5)
         this.ctx.ellipse(x, y, 2, 5, 0, 0, Math.PI * 2);
         this.ctx.fill();
         
         // Trail
-        this.ctx.fillStyle = 'rgba(255, 100, 0, 0.4)';
+        this.ctx.fillStyle = p.glowColor ?? 'rgba(255, 100, 0, 0.4)';
         this.ctx.beginPath();
         this.ctx.ellipse(x, y - 6, 1.5, 4, 0, 0, Math.PI * 2);
         this.ctx.fill();
         continue;
       }
 
-      if (p.id > 200000) {
-        // Turret
-        this.ctx.fillStyle = p.owner === 'PLAYER' ? '#fbbf24' : '#f87171';
-        this.ctx.beginPath();
-        this.ctx.arc(x, y, 6, 0, Math.PI * 2);
-        this.ctx.fill();
-        this.ctx.strokeStyle = p.owner === 'PLAYER' ? 'rgba(251, 191, 36, 0.8)' : 'rgba(248, 113, 113, 0.8)';
-        this.ctx.lineWidth = 3;
-        this.ctx.stroke();
-        
-        this.ctx.globalAlpha = 0.5;
-        this.ctx.fillStyle = p.owner === 'PLAYER' ? '#fbbf24' : '#f87171';
-        this.ctx.beginPath();
-        this.ctx.arc(x - p.vx * 0.05, y - p.vy * 0.05, 4, 0, Math.PI * 2);
-        this.ctx.fill();
-        this.ctx.globalAlpha = 1.0;
-      } else {
-        // Unit
-        this.ctx.fillStyle = p.owner === 'PLAYER' ? '#fef08a' : '#fca5a5';
-        this.ctx.beginPath();
-        this.ctx.arc(x, y, 4, 0, Math.PI * 2);
-        this.ctx.fill();
-      }
+      const baseRadius = p.radiusPx ?? (Math.abs(p.damage) >= 40 ? 6 : Math.abs(p.damage) >= 18 ? 5 : 4);
+      const fill = p.color ?? (p.owner === 'PLAYER' ? '#fef08a' : '#fca5a5');
+      const glow = p.glowColor ?? (p.owner === 'PLAYER' ? 'rgba(251,191,36,0.78)' : 'rgba(248,113,113,0.78)');
+      const trailAlpha = p.trailAlpha ?? (baseRadius >= 6 ? 0.45 : 0.30);
+      const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+      const tail = Math.min(20, Math.max(6, speed * 0.18));
+      const nx = speed > 0.1 ? p.vx / speed : 0;
+      const ny = speed > 0.1 ? p.vy / speed : 0;
+
+      this.ctx.globalAlpha = trailAlpha;
+      this.ctx.strokeStyle = glow;
+      this.ctx.lineWidth = Math.max(1.5, baseRadius * 0.65);
+      this.ctx.lineCap = 'round';
+      this.ctx.beginPath();
+      this.ctx.moveTo(x - nx * tail, y + ny * tail);
+      this.ctx.lineTo(x, y);
+      this.ctx.stroke();
+
+      this.ctx.globalAlpha = 1.0;
+      this.ctx.fillStyle = fill;
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, baseRadius, 0, Math.PI * 2);
+      this.ctx.fill();
+
+      this.ctx.strokeStyle = glow;
+      this.ctx.lineWidth = Math.max(1, baseRadius * 0.25);
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, baseRadius + 0.5, 0, Math.PI * 2);
+      this.ctx.stroke();
     }
   }
 
@@ -752,6 +583,42 @@ export class RenderSystem {
                 this.ctx.lineWidth = 1;
                 this.ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.30})`;
                 this.ctx.stroke();
+            }
+
+        } else if (vfx.data?.turretAbility === 'oil_pour') {
+            const oilRadiusUnits = Math.max(1, vfx.data?.radius ?? 2.5);
+            const oilRadiusPx = (oilRadiusUnits / battlefieldWidth) * this.canvas.width;
+            const phase = 1 - Math.max(0, vfx.lifeMs) / 900;
+            const splashCount = 10;
+
+            // Ground pool
+            const poolGradient = this.ctx.createRadialGradient(
+              x,
+              y + 3,
+              oilRadiusPx * 0.2,
+              x,
+              y + 3,
+              oilRadiusPx
+            );
+            poolGradient.addColorStop(0, `rgba(255, 180, 70, ${0.5 * alpha})`);
+            poolGradient.addColorStop(0.45, `rgba(180, 70, 15, ${0.55 * alpha})`);
+            poolGradient.addColorStop(1, `rgba(35, 12, 4, ${0.38 * alpha})`);
+            this.ctx.fillStyle = poolGradient;
+            this.ctx.beginPath();
+            this.ctx.ellipse(x, y + 4, oilRadiusPx, Math.max(8, oilRadiusPx * 0.45), 0, 0, Math.PI * 2);
+            this.ctx.fill();
+
+            // Boiling splashes
+            for (let i = 0; i < splashCount; i++) {
+              const t = (i / splashCount) * Math.PI * 2 + phase * 5;
+              const r = oilRadiusPx * (0.25 + (i % 4) * 0.15);
+              const sx = x + Math.cos(t) * r;
+              const sy = y + 2 - Math.abs(Math.sin(phase * 8 + i)) * (6 + i * 0.3);
+              const sr = 1.5 + (i % 3);
+              this.ctx.fillStyle = `rgba(255, 210, 120, ${0.35 * alpha})`;
+              this.ctx.beginPath();
+              this.ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+              this.ctx.fill();
             }
 
         } else if (vfx.data?.turretAbility === 'artillery_barrage') {
