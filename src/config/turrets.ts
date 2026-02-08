@@ -56,6 +56,14 @@ export interface TurretOilConfig {
   radius: number;
   damage: number;
   cooldownSeconds: number;
+  pourOffsetUnits?: number;
+  forwardReachUnits?: number;
+  backReachUnits?: number;
+  groundDurationSeconds?: number;
+  ticksPerSecond?: number;
+  dotTickMultiplier?: number;
+  initialDamage?: number;
+  dotDamagePerTick?: number;
 }
 
 export interface TurretDroneConfig {
@@ -70,6 +78,7 @@ export interface TurretEngineDef {
   name: string;
   age: number;
   cost: number;
+  manaCost?: number;
   buildMs: number;
   range: number;
   protectionMultiplier: number;
@@ -194,14 +203,14 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 2,
     cost: 420,
     buildMs: 1800,
-    range: 16,
+    range: 18,
     protectionMultiplier: 0.99,
     targeting: 'highest_dps',
     attackType: 'projectile',
-    fireIntervalSec: 1.4,
+    fireIntervalSec: 1.2,
     projectile: {
       speed: 58,
-      damage: 18,
+      damage: 24,
       lifeMs: 1800,
       pierceCount: 1,
       radiusPx: 4,
@@ -218,7 +227,7 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 2,
     cost: 650,
     buildMs: 2500,
-    range: 13,
+    range: 14,
     protectionMultiplier: 0.95,
     targeting: 'healthiest',
     attackType: 'projectile',
@@ -249,29 +258,42 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'boiling_pot',
     name: 'Boiling Pot',
     age: 3,
-    cost: 900,
+    cost: 750,
+    manaCost: 100,
     buildMs: 2300,
-    range: 6,
+    range: 14,
     protectionMultiplier: 0.75,
     targeting: 'nearest',
     attackType: 'oil_pour',
-    fireIntervalSec: 5.5,
-    oil: { radius: 3, damage: 45, cooldownSeconds: 5.5 },
+    fireIntervalSec: 5.0,
+    oil: {
+      radius: 3,
+      damage: 80,
+      cooldownSeconds: 5.0,
+      pourOffsetUnits: 8.5,
+      forwardReachUnits: 5.5,
+      backReachUnits: 1.2,
+      groundDurationSeconds: 2.0,
+      ticksPerSecond: 3,
+      dotTickMultiplier: 0.25,
+      initialDamage: 80,
+      dotDamagePerTick: 20,
+    },
     spritePath: '/turret_engines/boiling_pot.svg',
-    description: 'Pours burning oil onto enemies close to the base, huge defensive aura.',
+    description: 'Pours burning oil in front of the base, then leaves a damaging slick for a short duration.',
   },
   repeater_crossbow: {
     id: 'repeater_crossbow',
     name: 'Repeater Crossbow',
     age: 3,
-    cost: 700,
+    cost: 500,
     buildMs: 1700,
-    range: 14,
+    range: 21,
     protectionMultiplier: 0.93,
     targeting: 'lowest_health',
     attackType: 'projectile',
-    fireIntervalSec: 0.75,
-    projectile: { speed: 54, damage: 14, lifeMs: 1700, radiusPx: 4, color: '#e2e8f0', glowColor: 'rgba(226,232,240,0.85)', trailAlpha: 0.3 },
+    fireIntervalSec: 0.58,
+    projectile: { speed: 54, damage: 19, lifeMs: 1700, radiusPx: 4, color: '#e2e8f0', glowColor: 'rgba(226,232,240,0.85)', trailAlpha: 0.3 },
     spritePath: '/turret_engines/repeater_crossbow.svg',
     description: 'Rapid precision bolts for finishing low-health enemies.',
   },
@@ -279,14 +301,14 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'thunder_javelin',
     name: 'Thunder Javelin',
     age: 3,
-    cost: 1050,
+    cost: 900,
     buildMs: 2600,
-    range: 15,
+    range: 24,
     protectionMultiplier: 0.96,
     targeting: 'strongest_ability_dps',
     attackType: 'projectile',
-    fireIntervalSec: 1.8,
-    projectile: { speed: 48, damage: 34, lifeMs: 2000, radiusPx: 6, color: '#facc15', glowColor: 'rgba(250,204,21,0.85)', trailAlpha: 0.35 },
+    fireIntervalSec: 1.35,
+    projectile: { speed: 48, damage: 64, lifeMs: 2100, pierceCount: 2, radiusPx: 6, color: '#facc15', glowColor: 'rgba(250,204,21,0.85)', trailAlpha: 0.35 },
     spritePath: '/turret_engines/thunder_javelin.svg',
     description: 'Prioritizes high-ability-threat enemies with heavy javelins.',
   },
@@ -297,14 +319,14 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 4,
     cost: 1200,
     buildMs: 2400,
-    range: 20,
+    range: 26,
     protectionMultiplier: 0.99,
     targeting: 'highest_dps',
     attackType: 'projectile',
-    fireIntervalSec: 2.4,
+    fireIntervalSec: 2.2,
     projectile: {
       speed: 90,
-      damage: 78,
+      damage: 84,
       lifeMs: 2000,
       pierceCount: 3,
       radiusPx: 5,
@@ -321,12 +343,12 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 4,
     cost: 1350,
     buildMs: 2700,
-    range: 17,
+    range: 23,
     protectionMultiplier: 0.94,
     targeting: 'healthiest',
     attackType: 'projectile',
-    fireIntervalSec: 2.2,
-    projectile: { speed: 36, damage: 44, lifeMs: 2200, curvature: -8, splashRadius: 2.4, radiusPx: 8, color: '#fb7185', glowColor: 'rgba(251,113,133,0.9)', trailAlpha: 0.45 },
+    fireIntervalSec: 1.8,
+    projectile: { speed: 34, damage: 60, lifeMs: 2300, curvature: -8, splashRadius: 4.5, radiusPx: 9, color: '#fb7185', glowColor: 'rgba(251,113,133,0.9)', trailAlpha: 0.5 },
     spritePath: '/turret_engines/shock_mortar.svg',
     description: 'Mid-range mortar with broad splash damage.',
   },
@@ -336,12 +358,12 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 4,
     cost: 900,
     buildMs: 1800,
-    range: 12,
+    range: 20,
     protectionMultiplier: 0.88,
     targeting: 'nearest',
     attackType: 'projectile',
-    fireIntervalSec: 0.35,
-    projectile: { speed: 70, damage: 9, lifeMs: 1300, radiusPx: 4, color: '#fca5a5', glowColor: 'rgba(252,165,165,0.8)', trailAlpha: 0.25 },
+    fireIntervalSec: 0.28,
+    projectile: { speed: 72, damage: 12, lifeMs: 1300, radiusPx: 4, color: '#fca5a5', glowColor: 'rgba(252,165,165,0.8)', trailAlpha: 0.25 },
     spritePath: '/turret_engines/suppressor_nest.svg',
     description: 'Sustained suppressive fire and strong protection radius.',
   },
@@ -352,16 +374,16 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 5,
     cost: 2800,
     buildMs: 4200,
-    range: 22,
+    range: 31,
     protectionMultiplier: 0.98,
     targeting: 'strongest_ability_dps',
     attackType: 'drone_swarm',
-    fireIntervalSec: 7,
+    fireIntervalSec: 6.5,
     drones: {
-      droneCount: 4,
-      droneDamage: 65,
+      droneCount: 5,
+      droneDamage: 88,
       droneSpeed: 52,
-      cooldownSeconds: 7,
+      cooldownSeconds: 6.5,
     },
     spritePath: '/turret_engines/kamikaze_drone_hub.svg',
     description: 'Launches expensive self-destructing drones at priority threats.',
@@ -372,16 +394,16 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 5,
     cost: 1700,
     buildMs: 2600,
-    range: 16,
+    range: 26,
     protectionMultiplier: 0.9,
     targeting: 'highest_dps',
     attackType: 'chain_lightning',
-    fireIntervalSec: 5,
+    fireIntervalSec: 4.5,
     chainLightning: {
-      maxTargets: 4,
-      initialDamage: 60,
+      maxTargets: 5,
+      initialDamage: 72,
       falloffMultiplier: 0.72,
-      cooldownSeconds: 5,
+      cooldownSeconds: 4.5,
     },
     spritePath: '/turret_engines/lightning_rod.svg',
     description: 'Jumps electricity across multiple enemy targets.',
@@ -392,20 +414,20 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 5,
     cost: 2400,
     buildMs: 3500,
-    range: 20,
+    range: 29,
     protectionMultiplier: 0.97,
     targeting: 'nearest',
     attackType: 'artillery_barrage',
-    fireIntervalSec: 12,
+    fireIntervalSec: 11,
     artillery: {
       barrageCount: 14,
       spreadRange: 14,
       spreadLaneY: 5,
       startY: 23,
       fallSpeed: -14,
-      shellDamage: 28,
+      shellDamage: 38,
       shellRadius: 2.2,
-      cooldownSeconds: 12,
+      cooldownSeconds: 11,
     },
     spritePath: '/turret_engines/artillery_barrage_platform.svg',
     description: 'Area-denial barrage over a wide lane sector.',
@@ -416,12 +438,12 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 5,
     cost: 1300,
     buildMs: 2200,
-    range: 14,
+    range: 24,
     protectionMultiplier: 0.86,
     targeting: 'lowest_health',
     attackType: 'projectile',
-    fireIntervalSec: 0.65,
-    projectile: { speed: 62, damage: 16, lifeMs: 1400, splashRadius: 1.1, radiusPx: 4, color: '#fda4af', glowColor: 'rgba(253,164,175,0.85)', trailAlpha: 0.3 },
+    fireIntervalSec: 0.6,
+    projectile: { speed: 62, damage: 20, lifeMs: 1400, splashRadius: 1.1, radiusPx: 4, color: '#fda4af', glowColor: 'rgba(253,164,175,0.85)', trailAlpha: 0.3 },
     spritePath: '/turret_engines/flak_array.svg',
     description: 'Anti-swarm platform with high short-range protection.',
   },
@@ -432,12 +454,12 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 6,
     cost: 2200,
     buildMs: 2800,
-    range: 24,
+    range: 31,
     protectionMultiplier: 0.98,
     targeting: 'healthiest',
     attackType: 'projectile',
-    fireIntervalSec: 1.8,
-    projectile: { speed: 88, damage: 95, lifeMs: 1700, pierceCount: 1, radiusPx: 6, color: '#22d3ee', glowColor: 'rgba(34,211,238,0.95)', trailAlpha: 0.45 },
+    fireIntervalSec: 1.65,
+    projectile: { speed: 88, damage: 112, lifeMs: 1700, pierceCount: 1, radiusPx: 6, color: '#22d3ee', glowColor: 'rgba(34,211,238,0.95)', trailAlpha: 0.45 },
     spritePath: '/turret_engines/plasma_lance.svg',
     description: 'Long-range plasma bolt with heavy single-target pressure.',
   },
@@ -447,12 +469,12 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 6,
     cost: 2600,
     buildMs: 3000,
-    range: 26,
+    range: 32,
     protectionMultiplier: 0.99,
     targeting: 'highest_dps',
     attackType: 'projectile',
-    fireIntervalSec: 1.2,
-    projectile: { speed: 120, damage: 62, lifeMs: 1400, pierceCount: 2, radiusPx: 5, color: '#67e8f9', glowColor: 'rgba(103,232,249,0.95)', trailAlpha: 0.4 },
+    fireIntervalSec: 1.05,
+    projectile: { speed: 120, damage: 76, lifeMs: 1400, pierceCount: 2, radiusPx: 5, color: '#67e8f9', glowColor: 'rgba(103,232,249,0.95)', trailAlpha: 0.4 },
     spritePath: '/turret_engines/quantum_laser.svg',
     description: 'Near-instant beam pulses with partial piercing.',
   },
@@ -462,16 +484,16 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 6,
     cost: 3000,
     buildMs: 3600,
-    range: 20,
+    range: 29,
     protectionMultiplier: 0.88,
     targeting: 'strongest_ability_dps',
     attackType: 'chain_lightning',
-    fireIntervalSec: 4,
+    fireIntervalSec: 3.6,
     chainLightning: {
       maxTargets: 6,
-      initialDamage: 85,
+      initialDamage: 104,
       falloffMultiplier: 0.78,
-      cooldownSeconds: 4,
+      cooldownSeconds: 3.6,
     },
     spritePath: '/turret_engines/tesla_obelisk_mk2.svg',
     description: 'Upgraded chain lightning with broader jumps.',
@@ -482,20 +504,20 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 6,
     cost: 3600,
     buildMs: 4200,
-    range: 24,
+    range: 33,
     protectionMultiplier: 0.97,
     targeting: 'healthiest',
     attackType: 'artillery_barrage',
-    fireIntervalSec: 10,
+    fireIntervalSec: 9.5,
     artillery: {
-      barrageCount: 22,
+      barrageCount: 24,
       spreadRange: 18,
       spreadLaneY: 6,
       startY: 26,
       fallSpeed: -18,
-      shellDamage: 34,
+      shellDamage: 46,
       shellRadius: 2.8,
-      cooldownSeconds: 10,
+      cooldownSeconds: 9.5,
     },
     spritePath: '/turret_engines/orbital_barrage_mk2.svg',
     description: 'Future artillery saturation with higher density and damage.',
@@ -520,10 +542,18 @@ export function estimateEngineDps(engine: TurretEngineDef): number {
   if (engine.attackType === 'projectile') {
     const projectile = engine.projectile;
     if (!projectile) return 0;
-    const splitDps = projectile.splitOnImpact
-      ? (projectile.splitOnImpact.childCount * projectile.splitOnImpact.childDamage) / Math.max(engine.fireIntervalSec, 0.1) * 0.6
-      : 0;
-    return projectile.damage / Math.max(engine.fireIntervalSec, 0.1) + splitDps;
+    const interval = Math.max(engine.fireIntervalSec, 0.1);
+    let dps = projectile.damage / interval;
+
+    if (projectile.splitOnImpact) {
+      const split = projectile.splitOnImpact;
+      const splitCoverage = 0.8 + Math.min(0.35, split.spreadRadius * 0.08);
+      dps += (split.childCount * split.childDamage * splitCoverage) / interval;
+    }
+
+    const pierceFactor = 1 + Math.min(1.5, (projectile.pierceCount ?? 0) * 0.38);
+    const splashFactor = 1 + Math.min(1.4, (projectile.splashRadius ?? 0) * 0.33);
+    return dps * Math.min(2.8, pierceFactor * splashFactor);
   }
 
   if (engine.attackType === 'chain_lightning' && engine.chainLightning) {
@@ -537,16 +567,29 @@ export function estimateEngineDps(engine: TurretEngineDef): number {
   }
 
   if (engine.attackType === 'artillery_barrage' && engine.artillery) {
-    const volleyDamage = engine.artillery.barrageCount * engine.artillery.shellDamage * 0.45;
+    const footprintFactor = 1 + Math.min(0.9, engine.artillery.shellRadius * 0.22);
+    const saturationFactor = 0.4 + Math.min(0.6, engine.artillery.barrageCount * 0.02);
+    const volleyDamage = engine.artillery.barrageCount * engine.artillery.shellDamage * footprintFactor * saturationFactor;
     return volleyDamage / Math.max(engine.artillery.cooldownSeconds, 0.1);
   }
 
   if (engine.attackType === 'oil_pour' && engine.oil) {
-    return engine.oil.damage / Math.max(engine.oil.cooldownSeconds, 0.1);
+    const duration = Math.max(0, engine.oil.groundDurationSeconds ?? 2);
+    const ticksPerSecond = Math.max(1, engine.oil.ticksPerSecond ?? 3);
+    const initialImpact = Math.max(0, engine.oil.initialDamage ?? engine.oil.damage * 0.55);
+    const dotDamagePerTick = Math.max(0, engine.oil.dotDamagePerTick ?? (engine.oil.damage * Math.max(0, engine.oil.dotTickMultiplier ?? 0.25)));
+    const dotDamage = dotDamagePerTick * duration * ticksPerSecond;
+    const totalPerCast = initialImpact + dotDamage;
+    const forwardReach = Math.max(0.3, engine.oil.forwardReachUnits ?? engine.oil.radius);
+    const backReach = Math.max(0.2, engine.oil.backReachUnits ?? Math.max(0.6, engine.oil.radius * 0.6));
+    const spanFactor = Math.min(2.2, Math.max(0.8, (forwardReach + backReach) / Math.max(1, engine.oil.radius * 1.3)));
+    const expectedTargets = (1 + Math.min(2.8, engine.oil.radius * 0.8)) * spanFactor;
+    return (totalPerCast * expectedTargets) / Math.max(engine.oil.cooldownSeconds, 0.1);
   }
 
   if (engine.attackType === 'drone_swarm' && engine.drones) {
-    return (engine.drones.droneCount * engine.drones.droneDamage) / Math.max(engine.drones.cooldownSeconds, 0.1);
+    const impactReliability = 0.9 + Math.min(0.35, engine.drones.droneSpeed / 180);
+    return (engine.drones.droneCount * engine.drones.droneDamage * impactReliability) / Math.max(engine.drones.cooldownSeconds, 0.1);
   }
 
   return 0;

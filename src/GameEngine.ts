@@ -198,6 +198,7 @@ export class GameEngine {
   private lastUpdateTime = 0;
   private aiAccumulatorMs = 0;
   private isRunning = false;
+  private isPaused = false;
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
   private renderSystem: RenderSystem | null = null;
@@ -465,6 +466,7 @@ export class GameEngine {
   start(): void {
     if (this.isRunning) return;
     this.isRunning = true;
+    this.isPaused = false;
     // Use CoreLoop for fixed 60Hz deterministic stepping
     this.coreLoop = new CoreLoop(60, (dtMs) => {
       this.update(dtMs);
@@ -476,14 +478,36 @@ export class GameEngine {
   stop(): void {
     if (!this.isRunning) return;
     this.isRunning = false;
+    this.isPaused = false;
     if (this.coreLoop) {
       this.coreLoop.stop();
       this.coreLoop = null;
     }
   }
 
+  pause(): void {
+    if (!this.isRunning) return;
+    this.isPaused = true;
+  }
+
+  resume(): void {
+    if (!this.isRunning) return;
+    this.isPaused = false;
+  }
+
+  togglePause(): boolean {
+    if (!this.isRunning) return this.isPaused;
+    this.isPaused = !this.isPaused;
+    return this.isPaused;
+  }
+
+  getIsPaused(): boolean {
+    return this.isPaused;
+  }
+
   update(deltaTime: number): void {
     if (!this.isRunning) return;
+    if (this.isPaused) return;
 
     // CHECK GAME OVER FIRST - before any AI decisions or spawning
     if (this.state.enemyBase.health <= 0) {
@@ -793,14 +817,18 @@ export class GameEngine {
         break;
         
       case 'UPGRADE_TURRET_SLOTS':
-        this.queueTurretSlotUpgrade('ENEMY');
+        if (!this.queueTurretSlotUpgrade('ENEMY')) {
+          this.autoManageEnemyTurrets();
+        }
         break;
 
       case 'BUY_TURRET_ENGINE': {
         const slotIndex = (decision.parameters as any)?.slotIndex;
         const turretId = (decision.parameters as any)?.turretId;
         if (typeof slotIndex === 'number' && typeof turretId === 'string') {
-          this.queueTurretEngine('ENEMY', slotIndex, turretId);
+          if (!this.queueTurretEngine('ENEMY', slotIndex, turretId)) {
+            this.autoManageEnemyTurrets();
+          }
         } else {
           this.autoManageEnemyTurrets();
         }
@@ -810,7 +838,9 @@ export class GameEngine {
       case 'SELL_TURRET_ENGINE': {
         const slotIndex = (decision.parameters as any)?.slotIndex;
         if (typeof slotIndex === 'number') {
-          this.sellTurretEngine('ENEMY', slotIndex);
+          if (!this.sellTurretEngine('ENEMY', slotIndex)) {
+            this.autoManageEnemyTurrets();
+          }
         }
         break;
       }
@@ -965,6 +995,7 @@ export class GameEngine {
     if (engine.age > prog.age) return false;
 
     let finalCost = engine.cost;
+    const finalManaCost = engine.manaCost ?? 0;
     if (owner === 'ENEMY') {
       if (this.config.difficulty === 'MEDIUM') finalCost *= 0.8;
       else if (this.config.difficulty === 'HARD') finalCost *= 0.65;
@@ -973,7 +1004,9 @@ export class GameEngine {
     }
 
     if (econ.gold < finalCost) return false;
+    if (econ.mana < finalManaCost) return false;
     econ.gold -= finalCost;
+    econ.mana -= finalManaCost;
 
     queue.push({
       kind: 'turret_engine',

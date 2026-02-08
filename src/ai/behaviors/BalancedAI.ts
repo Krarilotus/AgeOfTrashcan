@@ -18,6 +18,7 @@ import { AIPersonality, AI_TUNING, ATTACK_GROUPS } from '../../config/aiConfig';
 import { UNIT_DEFS, getUnitsForAge, UnitDef } from '../../config/units';
 import { getManaCost } from '../../config/gameBalance';
 import {
+  estimateEngineDps,
   getTurretEngineDef,
   getTurretEnginesForAge,
   getTurretSlotUnlockCost,
@@ -107,20 +108,11 @@ export class BalancedAI implements IAIBehavior {
     const dpsWeight = threat >= ThreatLevel.HIGH ? 1.6 : 1.2;
     const protectionWeight = threat >= ThreatLevel.HIGH ? 1800 : 1200;
     const rangeWeight = threat >= ThreatLevel.LOW ? 14 : 10;
+    const efficiencyWeight = threat >= ThreatLevel.HIGH ? 4200 : 3000;
     const protectionValue = (1 - engine.protectionMultiplier) * protectionWeight;
-    const rawDps =
-      engine.attackType === 'projectile' && engine.projectile
-        ? engine.projectile.damage / Math.max(engine.fireIntervalSec, 0.1)
-        : engine.attackType === 'chain_lightning' && engine.chainLightning
-          ? (engine.chainLightning.initialDamage * engine.chainLightning.maxTargets * 0.65) / Math.max(engine.chainLightning.cooldownSeconds, 0.1)
-          : engine.attackType === 'artillery_barrage' && engine.artillery
-            ? (engine.artillery.barrageCount * engine.artillery.shellDamage * 0.35) / Math.max(engine.artillery.cooldownSeconds, 0.1)
-            : engine.attackType === 'oil_pour' && engine.oil
-              ? engine.oil.damage / Math.max(engine.oil.cooldownSeconds, 0.1)
-              : engine.attackType === 'drone_swarm' && engine.drones
-                ? (engine.drones.droneCount * engine.drones.droneDamage) / Math.max(engine.drones.cooldownSeconds, 0.1)
-                : 0;
-    return rawDps * dpsWeight + engine.range * rangeWeight + protectionValue;
+    const rawDps = estimateEngineDps(engine);
+    const dpsPerGold = rawDps / Math.max(1, engine.cost);
+    return rawDps * dpsWeight + dpsPerGold * efficiencyWeight + engine.range * rangeWeight + protectionValue;
   }
 
   private getTargetSlotsByAge(age: number, gameTime: number): number {
@@ -129,6 +121,99 @@ export class BalancedAI implements IAIBehavior {
     if (age === 5) return 3;
     if (gameTime < 90) return 3;
     return 4;
+  }
+
+  private getEnemyDiscountedCost(baseCost: number, difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER'): number {
+    let finalCost = baseCost;
+    if (difficulty === 'MEDIUM') finalCost *= 0.8;
+    else if (difficulty === 'HARD') finalCost *= 0.65;
+    else if (difficulty === 'CHEATER') finalCost *= 0.5;
+    return Math.floor(finalCost);
+  }
+
+  private buildForeseeablePlan(
+    state: GameStateSnapshot,
+    threat: ThreatLevel,
+    strategicState: StrategicState,
+    warchest: number,
+    spendableGold: number
+  ): string[] {
+    const plan: string[] = [];
+
+    if (state.enemyQueueSize > 0) {
+      plan.push(`Queue: ${state.enemyQueueSize} item(s) pending before instant execution.`);
+    } else {
+      plan.push('Queue: empty, next decision can execute immediately.');
+    }
+
+    if (state.enemyAge < 6) {
+      const ageShortfall = Math.max(0, state.enemyAgeCost - state.enemyGold);
+      if (ageShortfall <= 0) {
+        plan.push(`Tech: ready to age up to Age ${state.enemyAge + 1} now.`);
+      } else {
+        plan.push(`Tech: save ${Math.ceil(ageShortfall)}g for Age ${state.enemyAge + 1} (warchest ${Math.floor(warchest)}g).`);
+      }
+    } else {
+      plan.push('Tech: max age reached, convert surplus to military and turret upgrades.');
+    }
+
+    const unlocked = state.enemyTurretSlotsUnlocked ?? 1;
+    const slots = state.enemyTurretSlots ?? [];
+    const targetSlots = this.getTargetSlotsByAge(state.enemyAge, state.gameTime);
+    const availableEngines = Object.values(getTurretEnginesForAge(state.enemyAge));
+
+    if (this.pendingTurretReplacement) {
+      const pendingDef = getTurretEngineDef(this.pendingTurretReplacement.turretId);
+      if (pendingDef) {
+        plan.push(`Turrets: replace slot ${this.pendingTurretReplacement.slotIndex + 1} with ${pendingDef.name}.`);
+      }
+    } else if (unlocked < targetSlots) {
+      const nextSlotCost = getTurretSlotUnlockCost(unlocked);
+      plan.push(`Turrets: unlock slot ${unlocked + 1}/${targetSlots} for ${nextSlotCost}g.`);
+    } else {
+      const emptySlot = slots.find((s) => s.slotIndex < unlocked && !s.turretId);
+      if (emptySlot && availableEngines.length > 0) {
+        const bestAffordable = [...availableEngines]
+          .filter((def) =>
+            this.getEnemyDiscountedCost(def.cost, state.difficulty) <= spendableGold &&
+            (def.manaCost ?? 0) <= state.enemyMana
+          )
+          .sort((a, b) => this.scoreTurretEngine(b, threat) - this.scoreTurretEngine(a, threat))[0];
+        if (bestAffordable) {
+          plan.push(`Turrets: mount ${bestAffordable.name} on slot ${emptySlot.slotIndex + 1}.`);
+        } else {
+          plan.push(`Turrets: slot ${emptySlot.slotIndex + 1} is empty, waiting for gold/mana.`);
+        }
+      } else {
+        plan.push('Turrets: all unlocked slots filled, evaluate upgrades/replacements.');
+      }
+    }
+
+    if (this.currentGroupPlan) {
+      const nextIdx = this.currentGroupPlan.index;
+      const nextUnit = this.currentGroupPlan.units[nextIdx] || 'done';
+      plan.push(`Army: ${this.currentGroupPlan.name} ${Math.min(nextIdx + 1, this.currentGroupPlan.units.length)}/${this.currentGroupPlan.units.length}, next ${nextUnit}.`);
+    } else {
+      const stance =
+        strategicState === StrategicState.DEFENDING
+          ? 'frontline defense'
+          : strategicState === StrategicState.PUSHING
+            ? 'offensive pressure'
+            : 'balanced recruitment';
+      plan.push(`Army: ${stance} using ${Math.floor(spendableGold)}g spendable budget.`);
+    }
+
+    const targetManaLevel = AI_TUNING.manaUpgrades.targetLevelsByAge[state.enemyAge] || 0;
+    if (state.enemyAge === 1) {
+      plan.push('Mana: defer upgrades in Age 1.');
+    } else if (state.enemyManaLevel < targetManaLevel) {
+      const manaCost = getManaCost(state.enemyManaLevel);
+      plan.push(`Mana: upgrade to Lv ${state.enemyManaLevel + 1} for ${manaCost}g (target Lv ${targetManaLevel}).`);
+    } else {
+      plan.push(`Mana: at/above target (Lv ${state.enemyManaLevel}, target ${targetManaLevel}).`);
+    }
+
+    return plan.slice(0, 6);
   }
 
   private considerTurretSlotsAndEngines(
@@ -140,6 +225,22 @@ export class BalancedAI implements IAIBehavior {
     const slots = state.enemyTurretSlots ?? [];
     const available = Object.values(getTurretEnginesForAge(state.enemyAge));
     if (available.length === 0) return null;
+    const targetSlots = this.getTargetSlotsByAge(state.enemyAge, state.gameTime);
+    const hasEmptyUnlockedSlot = slots.some((s) => s.slotIndex < unlocked && !s.turretId);
+    const coreDefenseNeeds =
+      unlocked < targetSlots ||
+      hasEmptyUnlockedSlot ||
+      (state.enemyTurretInstalledCount ?? 0) < Math.max(1, unlocked);
+
+    // Keep warchest behavior for normal spending, but allow tower baseline progression
+    // to use available treasury so AI does not stall with no turret development.
+    const turretGoldBudget = coreDefenseNeeds
+      ? Math.max(spendableGold, Math.max(0, state.enemyGold - 25))
+      : spendableGold;
+
+    const canAffordEngine = (def: TurretEngineDef) =>
+      this.getEnemyDiscountedCost(def.cost, state.difficulty) <= turretGoldBudget &&
+      (def.manaCost ?? 0) <= state.enemyMana;
 
     const sortedByPower = [...available].sort((a, b) => this.scoreTurretEngine(b, threat) - this.scoreTurretEngine(a, threat));
 
@@ -147,7 +248,7 @@ export class BalancedAI implements IAIBehavior {
       const slot = slots.find((s) => s.slotIndex === this.pendingTurretReplacement!.slotIndex);
       if (slot && !slot.turretId) {
         const target = getTurretEngineDef(this.pendingTurretReplacement.turretId);
-        if (target && target.cost <= spendableGold) {
+        if (target && canAffordEngine(target)) {
           return {
             action: 'BUY_TURRET_ENGINE',
             parameters: { slotIndex: slot.slotIndex, turretId: target.id },
@@ -162,7 +263,7 @@ export class BalancedAI implements IAIBehavior {
     for (let i = 0; i < unlocked; i++) {
       const slot = slots.find((s) => s.slotIndex === i);
       if (!slot || slot.turretId) continue;
-      const pick = sortedByPower.find((def) => def.cost <= spendableGold);
+      const pick = sortedByPower.find((def) => canAffordEngine(def));
       if (pick) {
         return {
           action: 'BUY_TURRET_ENGINE',
@@ -174,7 +275,7 @@ export class BalancedAI implements IAIBehavior {
     }
 
     // Replace weak engines only in late game or under heavy threat.
-    const canReplace = state.enemyAge >= 5 && (threat >= ThreatLevel.HIGH || state.enemyAge === 6);
+    const canReplace = state.enemyAge >= 4 && (threat >= ThreatLevel.MODERATE || state.enemyAge >= 6);
     if (canReplace) {
       let weakestSlotIndex = -1;
       let weakestScore = Infinity;
@@ -193,7 +294,7 @@ export class BalancedAI implements IAIBehavior {
         }
       }
 
-      const betterOption = sortedByPower.find((def) => def.cost <= spendableGold && this.scoreTurretEngine(def, threat) > weakestScore * 1.45 && def.id !== weakestTurretId);
+      const betterOption = sortedByPower.find((def) => canAffordEngine(def) && this.scoreTurretEngine(def, threat) > weakestScore * 1.2 && def.id !== weakestTurretId);
       if (weakestSlotIndex >= 0 && betterOption) {
         this.pendingTurretReplacement = { slotIndex: weakestSlotIndex, turretId: betterOption.id };
         return {
@@ -205,12 +306,11 @@ export class BalancedAI implements IAIBehavior {
     }
 
     // Unlock next slot once existing slots are meaningfully equipped.
-    const targetSlots = this.getTargetSlotsByAge(state.enemyAge, state.gameTime);
     if (unlocked < targetSlots) {
       const filledUnlocked = slots.filter((slot) => slot.slotIndex < unlocked && !!slot.turretId).length;
       if (filledUnlocked >= Math.max(1, unlocked)) {
         const nextCost = getTurretSlotUnlockCost(unlocked);
-        if (spendableGold >= nextCost) {
+        if (turretGoldBudget >= nextCost) {
           return {
             action: 'UPGRADE_TURRET_SLOTS',
             reasoning: `Unlock turret slot ${unlocked + 1}`,
@@ -309,7 +409,16 @@ export class BalancedAI implements IAIBehavior {
         comp: compInfo,
         pushEst: `${attackStatus.feasibility.toFixed(2)} (${Math.floor(attackStatus.requiredMeatShield)}hp)`,
         turret: state.enemyTurretLevel,
-        manaLvl: state.enemyManaLevel
+        manaLvl: state.enemyManaLevel,
+        futurePlan: this.buildForeseeablePlan(state, threat, strategicState, warchest, spendableGold),
+        nextAction: 'ANALYZE',
+        nextReason: 'Evaluating priorities',
+    };
+
+    const finalizeDecision = (decision: AIDecision): AIDecision => {
+      this.debugMetrics.nextAction = decision.action;
+      this.debugMetrics.nextReason = decision.reasoning || decision.action;
+      return decision;
     };
     
     // Check for base emergency (< 25% health AND attacked within last 3 seconds)
@@ -331,7 +440,7 @@ export class BalancedAI implements IAIBehavior {
     const turretPlanDecision = this.considerTurretSlotsAndEngines(state, threat, recruitmentGold);
     if (turretPlanDecision) {
       this.lastRecruitmentDecision = turretPlanDecision.reasoning || turretPlanDecision.action;
-      return turretPlanDecision;
+      return finalizeDecision(turretPlanDecision);
     }
     
     // CONCURRENT DECISION-MAKING: Can do multiple actions per decision with randomization
@@ -352,7 +461,7 @@ export class BalancedAI implements IAIBehavior {
     if ((strategicState === StrategicState.DESPERATE && isPanicSituation) && this.consecutiveDefenseFrames < 5) {
       this.consecutiveDefenseFrames++;
       // Desperate defense overrides personality anyway (picks strongest unit)
-      return this.desperateDefense(state, personality, threat);
+      return finalizeDecision(this.desperateDefense(state, personality, threat));
     } else {
       this.consecutiveDefenseFrames = 0; // Clear after 5 frames or when not desperate
     }
@@ -395,11 +504,11 @@ export class BalancedAI implements IAIBehavior {
             if (bestUnitId) {
                  const reason = `Empty Field Defense: Recruiting ${bestUnitId} (Encroaching Enemy, Best HP/Gold: ${maxHpPerGold.toFixed(1)})`;
                  this.lastRecruitmentDecision = reason;
-                 return {
+                 return finalizeDecision({
                      action: 'RECRUIT_UNIT',
                      parameters: { unitType: bestUnitId, priority: 'normal' }, // Normal priority
                      reasoning: reason
-                 };
+                 });
             }
         }
     }
@@ -472,7 +581,7 @@ export class BalancedAI implements IAIBehavior {
       if (ageAction && Math.random() < 0.6) {
         this.lastAgeUpTime = state.gameTime;
         this.lastRecruitmentDecision = ageAction.reasoning || 'Age Up'; // Update reasoning
-        return ageAction;
+        return finalizeDecision(ageAction);
       }
       
       // Otherwise, randomly pick from available actions
@@ -481,21 +590,21 @@ export class BalancedAI implements IAIBehavior {
         this.lastAgeUpTime = state.gameTime;
       }
       this.lastRecruitmentDecision = randomAction.reasoning || randomAction.action; // Update reasoning
-      return randomAction;
+      return finalizeDecision(randomAction);
     }
     
     // Priority: Recruit units (use flexible gold - includes partial warchest)
     const recruitDecision = this.considerRecruitment(state, biasedPersonality, threat, strategicState, recruitmentGold);
-    if (recruitDecision) return recruitDecision;
+    if (recruitDecision) return finalizeDecision(recruitDecision);
     
     // Default: wait (accumulating warchest)
     const waitReason = `[${this.currentStrategy}] Accumulating warchest (${Math.floor(warchest)}g / ${state.enemyAgeCost}g for age)`;
     this.lastRecruitmentDecision = waitReason;
     
-    return {
+    return finalizeDecision({
       action: 'WAIT',
       reasoning: waitReason,
-    };
+    });
   }
   
   /**

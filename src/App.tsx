@@ -31,6 +31,7 @@ export default function App() {
   const [showAIDebug, setShowAIDebug] = useState(false);
   const [aiDebugInfo, setAIDebugInfo] = useState<any>(null);
   const [shouldLoadSavedGame, setShouldLoadSavedGame] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
 
   const hasSavedGame = GameEngine.hasSavedGame();
 
@@ -43,6 +44,7 @@ export default function App() {
     setGameOver(null);
     setGameState(null);
     setShouldLoadSavedGame(false);
+    setIsPaused(false);
     setIsRunning(true);
   };
 
@@ -56,6 +58,7 @@ export default function App() {
     setGameOver(null);
     setGameState(null);
     setShouldLoadSavedGame(true);
+    setIsPaused(false);
     setIsRunning(true);
   };
 
@@ -65,6 +68,7 @@ export default function App() {
     setGameOver(null);
     setIsRunning(false);
     setShouldLoadSavedGame(false);
+    setIsPaused(false);
   };
 
   useEffect(() => {
@@ -108,6 +112,7 @@ export default function App() {
           }
 
           setGameState(game.getState());
+          setIsPaused(false);
           game.start();
         })
         .catch(() => {
@@ -194,6 +199,12 @@ export default function App() {
     setGameState(null);
     setIsRunning(false);
     setShouldLoadSavedGame(false);
+    setIsPaused(false);
+  };
+
+  const handleTogglePause = () => {
+    if (!gameRef.current || gameOver) return;
+    setIsPaused(gameRef.current.togglePause());
   };
 
   const handleSaveGame = () => {
@@ -215,6 +226,7 @@ export default function App() {
       const success = gameRef.current.loadGameState();
       if (success) {
         setGameOver(null);
+        setIsPaused(gameRef.current.getIsPaused());
         alert('📂 Game loaded successfully!');
       } else {
         alert('⚠️ No saved game found');
@@ -227,6 +239,11 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyPress = (e: KeyboardEvent) => {
+      if ((e.key === 'p' || e.key === 'P' || e.key === ' ') && isRunning && !gameOver) {
+        if (e.key === ' ') e.preventDefault();
+        handleTogglePause();
+        return;
+      }
       if (e.key === 'r' || e.key === 'R') {
         handleRestart();
       }
@@ -234,7 +251,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
-  }, []);
+  }, [gameOver, isRunning]);
 
   if (!isRunning) {
     return (
@@ -264,6 +281,13 @@ export default function App() {
           <div className="flex items-center gap-4">
             <button onClick={() => setAudioEnabled(!audioEnabled)} className="text-slate-400 hover:text-white" title="Toggle audio">
               {audioEnabled ? '🔊' : '🔇'}
+            </button>
+            <button
+              onClick={handleTogglePause}
+              className="px-4 py-2 bg-violet-700 hover:bg-violet-600 text-white rounded font-semibold transition-colors"
+              title="Pause/Resume (P or Space)"
+            >
+              {isPaused ? '▶ Resume' : '⏸ Pause'}
             </button>
             <button
               onClick={handleSaveGame}
@@ -306,6 +330,14 @@ export default function App() {
             {!gameState && (
               <div className="absolute inset-0 bg-black/80 flex items-center justify-center pointer-events-none">
                 <div className="text-white text-xl">Loading...</div>
+              </div>
+            )}
+
+            {isPaused && !gameOver && (
+              <div className="absolute inset-0 bg-black/35 flex items-center justify-center pointer-events-none">
+                <div className="px-4 py-2 bg-slate-900/90 border border-slate-600 rounded text-slate-100 font-semibold tracking-wide">
+                  PAUSED
+                </div>
               </div>
             )}
 
@@ -388,6 +420,12 @@ export default function App() {
                   <div title="Spendable / Total">Gold: <span className="text-yellow-400">{aiDebugInfo.behaviorParams?.gold}</span></div>
                   <div>Reserved: {aiDebugInfo.behaviorParams?.reserved}g</div>
                   <div className="text-[10px] text-slate-400 mt-1">{aiDebugInfo.behaviorParams?.comp}</div>
+                  <div className="mt-1 text-[10px] text-slate-300">
+                    Next: <span className="text-emerald-300">{aiDebugInfo.behaviorParams?.nextAction ?? 'N/A'}</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 truncate" title={aiDebugInfo.behaviorParams?.nextReason}>
+                    {aiDebugInfo.behaviorParams?.nextReason}
+                  </div>
                   {aiDebugInfo.behaviorParams?.pushEst && (
                     <div className="text-[10px] text-cyan-400 mt-1" title="Attack Feasibility (Required HP)">Push: {aiDebugInfo.behaviorParams?.pushEst}</div>
                   )}
@@ -404,6 +442,18 @@ export default function App() {
                 ) : (
                   <div className="text-slate-600 text-[10px] italic">No active group execution</div>
                 )}
+              </div>
+              <div className="mt-3">
+                <div className="font-bold text-white mb-1 underline">Foreseeable Plan</div>
+                <div className="flex flex-col gap-0.5 max-h-24 overflow-y-auto">
+                  {Array.isArray(aiDebugInfo.behaviorParams?.futurePlan) && aiDebugInfo.behaviorParams.futurePlan.length > 0 ? (
+                    aiDebugInfo.behaviorParams.futurePlan.map((item: string, i: number) => (
+                      <span key={i} className="text-slate-400">- {item}</span>
+                    ))
+                  ) : (
+                    <span className="text-slate-600 text-[10px] italic">No projected plan available yet</span>
+                  )}
+                </div>
               </div>
               <div className="mt-3">
                 <div className="font-bold text-white mb-1 underline">Recent Actions</div>

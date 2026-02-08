@@ -155,23 +155,31 @@ export class ProjectileSystem {
     const split = projectile.splitOnImpact;
     if (!split) return;
 
+    const forward = projectile.owner === 'PLAYER' ? 1 : -1;
+    const baseLaunchAngleRad = (36 * Math.PI) / 180;
+    const fanHalfAngleRad = Math.min(0.62, Math.max(0.28, split.spreadRadius * 0.09));
+
     for (let i = 0; i < split.childCount; i++) {
-      const angle = (Math.PI * 2 * i) / split.childCount;
-      const targetX = impactX + Math.cos(angle) * split.spreadRadius;
-      const targetY = impactY + Math.sin(angle) * split.spreadRadius;
-      const dx = targetX - impactX;
-      const dy = targetY - impactY;
-      const dist = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
-      const nx = dx / dist;
-      const ny = dy / dist;
+      const t = split.childCount === 1 ? 0 : i / (split.childCount - 1);
+      const centered = t * 2 - 1;
+      const angleOffset = centered * fanHalfAngleRad + Math.sin((i + 1) * 2.17) * 0.06;
+      const launchAngle = baseLaunchAngleRad + angleOffset;
+      const speedScale = Math.max(0.72, 1 - Math.abs(centered) * 0.14 + (i % 2 === 0 ? 0.08 : -0.05));
+      const childSpeed = split.childSpeed * speedScale;
+      const vx = forward * Math.cos(launchAngle) * childSpeed;
+      const vy = Math.sin(launchAngle) * childSpeed;
+      const childCurvature = -26 - Math.abs(centered) * 18 + ((i % 3) - 1) * 3;
+      const spawnOffsetX = forward * (0.5 + Math.abs(centered) * 0.25);
+      const spawnOffsetY = 0.28 + Math.abs(centered) * 0.1;
 
         state.projectiles.push({
           id: state.nextEntityId++,
           owner: projectile.owner,
-          x: impactX + nx * 0.9,
-          y: impactY + ny * 0.9,
-          vx: (dx / dist) * split.childSpeed,
-          vy: (dy / dist) * split.childSpeed,
+          x: impactX + spawnOffsetX,
+          y: impactY + spawnOffsetY,
+          vx,
+          vy,
+          curvature: childCurvature,
           damage: split.childDamage,
           lifeMs: split.childLifeMs,
           delayMs: 20,

@@ -301,7 +301,18 @@ export class RenderSystem {
 
       const sprite = this.turretEngineSprites.get(slot.turretId);
       if (sprite && sprite.complete && sprite.naturalHeight > 0) {
-        this.ctx.drawImage(sprite, pos.x - 14, pos.y - 22, 28, 22);
+        if (slot.turretId === 'boiling_pot') {
+          const drawW = 88;
+          const drawH = 28;
+          const forwardShift = isPlayer ? 20 : -20;
+          this.ctx.save();
+          this.ctx.translate(pos.x + forwardShift, 0);
+          this.ctx.scale(isPlayer ? 1 : -1, 1);
+          this.ctx.drawImage(sprite, -drawW / 2, pos.y - 26, drawW, drawH);
+          this.ctx.restore();
+        } else {
+          this.ctx.drawImage(sprite, pos.x - 14, pos.y - 22, 28, 22);
+        }
       } else {
         this.ctx.fillStyle = isPlayer ? '#60a5fa' : '#f87171';
         this.ctx.beginPath();
@@ -483,7 +494,10 @@ export class RenderSystem {
     for (const vfx of state.vfx) {
       const x = (vfx.x / battlefieldWidth) * this.canvas.width;
       const y = this.canvas.height / 2 + (vfx.y * 15);
-      const alpha = vfx.lifeMs / (vfx.type === 'kill_reward' ? 800 : vfx.type === 'ability_cast' ? 600 : 1000);
+      const alpha = Math.max(
+        0,
+        Math.min(1, vfx.lifeMs / (vfx.type === 'kill_reward' ? 800 : vfx.type === 'ability_cast' ? 600 : 1000))
+      );
       
       this.ctx.save();
       this.ctx.globalAlpha = alpha;
@@ -608,16 +622,23 @@ export class RenderSystem {
 
         } else if (vfx.data?.turretAbility === 'oil_pour') {
             const oilRadiusUnits = Math.max(1, vfx.data?.radius ?? 2.5);
-            const oilRadiusPx = (oilRadiusUnits / battlefieldWidth) * this.canvas.width;
-            const phase = 1 - Math.max(0, vfx.lifeMs) / 900;
+            const forwardReachUnits = Math.max(0.4, vfx.data?.forwardReachUnits ?? oilRadiusUnits);
+            const backReachUnits = Math.max(0.2, vfx.data?.backReachUnits ?? oilRadiusUnits * 0.6);
+            const direction = vfx.data?.direction === -1 ? -1 : 1;
+            const halfSpanUnits = (forwardReachUnits + backReachUnits) * 0.5;
+            const forwardBiasUnits = ((forwardReachUnits - backReachUnits) * 0.5) * direction;
+            const oilRadiusPx = (halfSpanUnits / battlefieldWidth) * this.canvas.width;
+            const oilCenterX = x + (forwardBiasUnits / battlefieldWidth) * this.canvas.width;
+            const durationMs = Math.max(300, vfx.data?.durationMs ?? 900);
+            const phase = 1 - Math.max(0, vfx.lifeMs) / durationMs;
             const splashCount = 10;
 
             // Ground pool
             const poolGradient = this.ctx.createRadialGradient(
-              x,
+              oilCenterX,
               y + 3,
               oilRadiusPx * 0.2,
-              x,
+              oilCenterX,
               y + 3,
               oilRadiusPx
             );
@@ -626,14 +647,14 @@ export class RenderSystem {
             poolGradient.addColorStop(1, `rgba(35, 12, 4, ${0.38 * alpha})`);
             this.ctx.fillStyle = poolGradient;
             this.ctx.beginPath();
-            this.ctx.ellipse(x, y + 4, oilRadiusPx, Math.max(8, oilRadiusPx * 0.45), 0, 0, Math.PI * 2);
+            this.ctx.ellipse(oilCenterX, y + 4, oilRadiusPx, Math.max(8, oilRadiusPx * 0.45), 0, 0, Math.PI * 2);
             this.ctx.fill();
 
             // Boiling splashes
             for (let i = 0; i < splashCount; i++) {
               const t = (i / splashCount) * Math.PI * 2 + phase * 5;
               const r = oilRadiusPx * (0.25 + (i % 4) * 0.15);
-              const sx = x + Math.cos(t) * r;
+              const sx = oilCenterX + Math.cos(t) * r;
               const sy = y + 2 - Math.abs(Math.sin(phase * 8 + i)) * (6 + i * 0.3);
               const sr = 1.5 + (i % 3);
               this.ctx.fillStyle = `rgba(255, 210, 120, ${0.35 * alpha})`;

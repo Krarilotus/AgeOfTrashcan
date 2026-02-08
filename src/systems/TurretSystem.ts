@@ -7,8 +7,28 @@ import {
 } from '../config/turrets';
 import { TURRET_VISUALS, pixelsToUnits } from '../config/renderConfig';
 
+interface OilGroundPatch {
+  owner: 'PLAYER' | 'ENEMY';
+  targetOwner: 'PLAYER' | 'ENEMY';
+  direction: 1 | -1;
+  baseX: number;
+  centerX: number;
+  radius: number;
+  forwardReachUnits: number;
+  backReachUnits: number;
+  laneHalfHeight: number;
+  remainingSeconds: number;
+  tickIntervalSeconds: number;
+  tickCountdownSeconds: number;
+  tickDamage: number;
+}
+
 export class TurretSystem {
+  private oilPatches: OilGroundPatch[] = [];
+
   public update(state: GameState, deltaSeconds: number): void {
+    this.updateOilPatches(state, deltaSeconds);
+
     const updateTurretsForOwner = (owner: 'PLAYER' | 'ENEMY') => {
       const base = owner === 'PLAYER' ? state.playerBase : state.enemyBase;
       const enemyOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
@@ -48,8 +68,10 @@ export class TurretSystem {
         }
 
         if (engine.attackType === 'oil_pour' && engine.oil) {
-          this.castOilPour(state, owner, base.x, engine);
-          slot.cooldownRemaining = engine.oil.cooldownSeconds;
+          const casted = this.castOilPour(state, owner, base.x, engine);
+          if (casted) {
+            slot.cooldownRemaining = engine.oil.cooldownSeconds;
+          }
           continue;
         }
 
@@ -62,6 +84,51 @@ export class TurretSystem {
 
     updateTurretsForOwner('PLAYER');
     updateTurretsForOwner('ENEMY');
+  }
+
+  private updateOilPatches(state: GameState, deltaSeconds: number): void {
+    if (this.oilPatches.length === 0) return;
+
+    const nextPatches: OilGroundPatch[] = [];
+    for (const patch of this.oilPatches) {
+      patch.remainingSeconds -= deltaSeconds;
+      patch.tickCountdownSeconds -= deltaSeconds;
+
+      while (patch.tickCountdownSeconds <= 0 && patch.remainingSeconds > 0) {
+        patch.tickCountdownSeconds += patch.tickIntervalSeconds;
+        let tickTotalDamage = 0;
+
+        for (const entity of state.entities.values()) {
+          if (!this.isEntityInsideOilZone(
+            entity,
+            patch.targetOwner,
+            patch.baseX,
+            patch.centerX,
+            patch.direction,
+            patch.radius,
+            patch.laneHalfHeight,
+            patch.forwardReachUnits,
+            patch.backReachUnits
+          )) continue;
+          entity.health.current -= patch.tickDamage;
+          tickTotalDamage += patch.tickDamage;
+        }
+
+        if (tickTotalDamage > 0) {
+          if (patch.owner === 'PLAYER') {
+            state.stats.damageDealt.player += tickTotalDamage;
+          } else {
+            state.stats.damageDealt.enemy += tickTotalDamage;
+          }
+        }
+      }
+
+      if (patch.remainingSeconds > 0) {
+        nextPatches.push(patch);
+      }
+    }
+
+    this.oilPatches = nextPatches;
   }
 
   private selectTarget(
@@ -252,20 +319,77 @@ export class TurretSystem {
     }
   }
 
-  private castOilPour(state: GameState, owner: 'PLAYER' | 'ENEMY', baseX: number, engine: TurretEngineDef): void {
+  private castOilPour(state: GameState, owner: 'PLAYER' | 'ENEMY', baseX: number, engine: TurretEngineDef): boolean {
     const config = engine.oil;
-    if (!config) return;
+    if (!config) return false;
 
     const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
-    const direction = owner === 'PLAYER' ? 1 : -1;
-    const centerX = baseX + direction * 2.5;
+    const direction: 1 | -1 = owner === 'PLAYER' ? 1 : -1;
+    const centerX = baseX + direction * (config.pourOffsetUnits ?? 5.5);
+    const forwardReachUnits = Math.max(0.4, config.forwardReachUnits ?? config.radius);
+    const backReachUnits = Math.max(0.2, config.backReachUnits ?? Math.max(0.6, config.radius * 0.6));
+    const laneHalfHeight = Math.max(1.3, config.radius * 0.75);
+    const hasTargetsInPourZone = Array.from(state.entities.values()).some(
+      (entity) => this.isEntityInsideOilZone(
+        entity,
+        targetOwner,
+        baseX,
+        centerX,
+        direction,
+        config.radius,
+        laneHalfHeight,
+        forwardReachUnits,
+        backReachUnits
+      )
+    );
+    if (!hasTargetsInPourZone) return false;
 
+    const initialImpactDamage = Math.max(0, config.initialDamage ?? (config.damage * 0.55));
+    const duration = Math.max(0.2, config.groundDurationSeconds ?? 2);
+    const ticksPerSecond = Math.max(1, config.ticksPerSecond ?? 3);
+    const tickInterval = 1 / ticksPerSecond;
+    const tickDamage = Math.max(0, config.dotDamagePerTick ?? (config.damage * Math.max(0.05, config.dotTickMultiplier ?? 0.25)));
+
+    let initialTotalDamage = 0;
     for (const entity of state.entities.values()) {
-      if (entity.owner !== targetOwner) continue;
-      const dist = Math.abs(entity.transform.x - centerX);
-      if (dist > config.radius) continue;
-      entity.health.current -= config.damage;
+      if (!this.isEntityInsideOilZone(
+        entity,
+        targetOwner,
+        baseX,
+        centerX,
+        direction,
+        config.radius,
+        laneHalfHeight,
+        forwardReachUnits,
+        backReachUnits
+      )) continue;
+      entity.health.current -= initialImpactDamage;
+      initialTotalDamage += initialImpactDamage;
     }
+
+    if (initialTotalDamage > 0) {
+      if (owner === 'PLAYER') {
+        state.stats.damageDealt.player += initialTotalDamage;
+      } else {
+        state.stats.damageDealt.enemy += initialTotalDamage;
+      }
+    }
+
+    this.oilPatches.push({
+      owner,
+      targetOwner,
+      direction,
+      baseX,
+      centerX,
+      radius: config.radius,
+      forwardReachUnits,
+      backReachUnits,
+      laneHalfHeight,
+      remainingSeconds: duration,
+      tickIntervalSeconds: tickInterval,
+      tickCountdownSeconds: tickInterval,
+      tickDamage,
+    });
 
     state.vfx.push({
       id: state.nextVfxId++,
@@ -273,9 +397,43 @@ export class TurretSystem {
       x: centerX,
       y: 0,
       age: owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age,
-      lifeMs: 900,
-      data: { turretAbility: 'oil_pour', radius: config.radius },
+      lifeMs: duration * 1000,
+      data: {
+        turretAbility: 'oil_pour',
+        radius: config.radius,
+        durationMs: duration * 1000,
+        direction,
+        forwardReachUnits,
+        backReachUnits,
+      },
     });
+    return true;
+  }
+
+  private isEntityInsideOilZone(
+    entity: Entity,
+    targetOwner: 'PLAYER' | 'ENEMY',
+    baseX: number,
+    centerX: number,
+    direction: 1 | -1,
+    radius: number,
+    laneHalfHeight: number,
+    forwardReachUnits: number,
+    backReachUnits: number
+  ): boolean {
+    if (entity.owner !== targetOwner) return false;
+    if (entity.health.current <= 0) return false;
+    if (Math.abs(entity.transform.laneY) > laneHalfHeight) return false;
+
+    // Require enemies to be in front of the base and near the pour zone, not behind it.
+    const frontFromBase = (entity.transform.x - baseX) * direction;
+    if (frontFromBase < 0) return false;
+
+    const alongPourAxis = (entity.transform.x - centerX) * direction;
+    if (alongPourAxis > forwardReachUnits) return false;
+    if (alongPourAxis < -backReachUnits) return false;
+
+    return true;
   }
 
   private launchDroneSwarm(
