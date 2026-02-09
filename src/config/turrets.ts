@@ -1,3 +1,5 @@
+import { TURRET_BALANCE_CONFIG } from './gameBalance';
+
 export type TurretTargetingMode =
   | 'nearest'
   | 'healthiest'
@@ -10,7 +12,11 @@ export type TurretAttackType =
   | 'chain_lightning'
   | 'artillery_barrage'
   | 'oil_pour'
-  | 'drone_swarm';
+  | 'drone_swarm'
+  | 'flamethrower'
+  | 'laser_pulse'
+  | 'mana_siphon'
+  | 'mana_shield';
 
 export interface TurretSplitProjectileConfig {
   childCount: number;
@@ -71,6 +77,38 @@ export interface TurretDroneConfig {
   droneDamage: number;
   droneSpeed: number;
   cooldownSeconds: number;
+  explosionRadius?: number;
+  cruiseHeight?: number;
+  overflyPadding?: number;
+  diveSpeedMultiplier?: number;
+  retargetOnKill?: boolean;
+}
+
+export interface TurretFlamethrowerConfig {
+  damage: number;
+  width?: number;
+  cooldownSeconds: number;
+}
+
+export interface TurretLaserPulseConfig {
+  damage: number;
+  cooldownSeconds: number;
+  beamWidth?: number;
+  laneThickness?: number;
+  pulseDurationMs?: number;
+}
+
+export interface TurretManaSiphonConfig {
+  tickDamage: number;
+  ticksPerSecond: number;
+  manaLeechFraction: number;
+  laneThickness?: number;
+  waveAmplitude?: number;
+}
+
+export interface TurretBaseShieldConfig {
+  damageToManaRatio: number;
+  manaPerDamage: number;
 }
 
 export interface TurretEngineDef {
@@ -79,6 +117,7 @@ export interface TurretEngineDef {
   age: number;
   cost: number;
   manaCost?: number;
+  castManaCost?: number;
   buildMs: number;
   range: number;
   protectionMultiplier: number;
@@ -90,6 +129,10 @@ export interface TurretEngineDef {
   artillery?: TurretArtilleryConfig;
   oil?: TurretOilConfig;
   drones?: TurretDroneConfig;
+  flamethrower?: TurretFlamethrowerConfig;
+  laserPulse?: TurretLaserPulseConfig;
+  manaSiphon?: TurretManaSiphonConfig;
+  baseShield?: TurretBaseShieldConfig;
   spritePath: string;
   description: string;
 }
@@ -115,18 +158,16 @@ export interface TurretDefenseStats {
 }
 
 export const MAX_TURRET_SLOTS = 4;
-export const TURRET_SLOT_UNLOCK_COSTS: number[] = [0, 500, 1000, 5000];
-export const TURRET_SLOT_UNLOCK_BUILD_MS: number[] = [0, 1600, 2200, 3000];
 export const TURRET_SLOT_MOUNT_Y_OFFSETS_UNITS: number[] = [0.6, 1.3, 2.0, 2.8];
 
 export function getTurretSlotUnlockCost(currentUnlocked: number): number {
   if (currentUnlocked >= MAX_TURRET_SLOTS) return 0;
-  return TURRET_SLOT_UNLOCK_COSTS[currentUnlocked] ?? 0;
+  return TURRET_BALANCE_CONFIG.slotUnlockCosts[currentUnlocked] ?? 0;
 }
 
 export function getTurretSlotUnlockBuildMs(currentUnlocked: number): number {
   if (currentUnlocked >= MAX_TURRET_SLOTS) return 0;
-  return TURRET_SLOT_UNLOCK_BUILD_MS[currentUnlocked] ?? 2000;
+  return TURRET_BALANCE_CONFIG.slotUnlockBuildMs[currentUnlocked] ?? 2000;
 }
 
 export function getSlotMountYOffsetUnits(slotIndex: number): number {
@@ -169,16 +210,16 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'flame_catapult',
     name: 'Flame Catapult',
     age: 1,
-    cost: 500,
+    cost: 350,
     buildMs: 2600,
     range: 12,
     protectionMultiplier: 0.99,
     targeting: 'healthiest',
     attackType: 'projectile',
-    fireIntervalSec: 2.8,
+    fireIntervalSec: 2.5,
     projectile: {
       speed: 32,
-      damage: 30,
+      damage: 16,
       lifeMs: 2600,
       curvature: -14,
       radiusPx: 7,
@@ -201,7 +242,7 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'sunspike_ballista',
     name: 'Sunspike Ballista',
     age: 2,
-    cost: 420,
+    cost: 300,
     buildMs: 1800,
     range: 18,
     protectionMultiplier: 0.99,
@@ -210,7 +251,7 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     fireIntervalSec: 1.2,
     projectile: {
       speed: 58,
-      damage: 24,
+      damage: 15,
       lifeMs: 1800,
       pierceCount: 1,
       radiusPx: 4,
@@ -225,13 +266,13 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'shrapnel_urn_launcher',
     name: 'Shrapnel Urn Launcher',
     age: 2,
-    cost: 650,
+    cost: 500,
     buildMs: 2500,
     range: 14,
     protectionMultiplier: 0.95,
     targeting: 'healthiest',
     attackType: 'projectile',
-    fireIntervalSec: 2.1,
+    fireIntervalSec: 1.7,
     projectile: {
       speed: 28,
       damage: 22,
@@ -258,8 +299,9 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'boiling_pot',
     name: 'Boiling Pot',
     age: 3,
-    cost: 750,
-    manaCost: 100,
+    cost: 520,
+    manaCost: 160,
+    castManaCost: 45,
     buildMs: 2300,
     range: 14,
     protectionMultiplier: 0.75,
@@ -307,8 +349,8 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     protectionMultiplier: 0.96,
     targeting: 'strongest_ability_dps',
     attackType: 'projectile',
-    fireIntervalSec: 1.35,
-    projectile: { speed: 48, damage: 64, lifeMs: 2100, pierceCount: 2, radiusPx: 6, color: '#facc15', glowColor: 'rgba(250,204,21,0.85)', trailAlpha: 0.35 },
+    fireIntervalSec: 1.9,
+    projectile: { speed: 48, damage: 50, lifeMs: 2100, pierceCount: 2, radiusPx: 6, color: '#facc15', glowColor: 'rgba(250,204,21,0.85)', trailAlpha: 0.35 },
     spritePath: '/turret_engines/thunder_javelin.svg',
     description: 'Prioritizes high-ability-threat enemies with heavy javelins.',
   },
@@ -319,14 +361,14 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 4,
     cost: 1200,
     buildMs: 2400,
-    range: 26,
+    range: 32,
     protectionMultiplier: 0.99,
     targeting: 'highest_dps',
     attackType: 'projectile',
     fireIntervalSec: 2.2,
     projectile: {
       speed: 90,
-      damage: 84,
+      damage: 50,
       lifeMs: 2000,
       pierceCount: 3,
       radiusPx: 5,
@@ -341,7 +383,7 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'shock_mortar',
     name: 'Shock Mortar',
     age: 4,
-    cost: 1350,
+    cost: 1000,
     buildMs: 2700,
     range: 23,
     protectionMultiplier: 0.94,
@@ -356,7 +398,7 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'suppressor_nest',
     name: 'Suppressor Nest',
     age: 4,
-    cost: 900,
+    cost: 600,
     buildMs: 1800,
     range: 20,
     protectionMultiplier: 0.88,
@@ -372,18 +414,24 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'kamikaze_drone_hub',
     name: 'Kamikaze Drone Hub',
     age: 5,
-    cost: 2800,
+    cost: 2100,
+    castManaCost: 140,
     buildMs: 4200,
-    range: 31,
+    range: 35,
     protectionMultiplier: 0.98,
     targeting: 'strongest_ability_dps',
     attackType: 'drone_swarm',
-    fireIntervalSec: 6.5,
+    fireIntervalSec: 4.8,
     drones: {
-      droneCount: 5,
-      droneDamage: 88,
+      droneCount: 1,
+      droneDamage: 650,
       droneSpeed: 52,
-      cooldownSeconds: 6.5,
+      cooldownSeconds: 4.8,
+      explosionRadius: 5,
+      cruiseHeight: 8.5,
+      overflyPadding: 2.4,
+      diveSpeedMultiplier: 1.9,
+      retargetOnKill: true,
     },
     spritePath: '/turret_engines/kamikaze_drone_hub.svg',
     description: 'Launches expensive self-destructing drones at priority threats.',
@@ -392,7 +440,8 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'lightning_rod',
     name: 'Chain Lightning Rod',
     age: 5,
-    cost: 1700,
+    cost: 1200,
+    castManaCost: 45,
     buildMs: 2600,
     range: 26,
     protectionMultiplier: 0.9,
@@ -412,7 +461,8 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'artillery_barrage_platform',
     name: 'Artillery Barrage',
     age: 5,
-    cost: 2400,
+    cost: 1700,
+    castManaCost: 90,
     buildMs: 3500,
     range: 29,
     protectionMultiplier: 0.97,
@@ -447,6 +497,26 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     spritePath: '/turret_engines/flak_array.svg',
     description: 'Anti-swarm platform with high short-range protection.',
   },
+  inferno_projector: {
+    id: 'inferno_projector',
+    name: 'Inferno Projector',
+    age: 5,
+    cost: 700,
+    castManaCost: 2,
+    buildMs: 2200,
+    range: 10,
+    protectionMultiplier: 0.9,
+    targeting: 'nearest',
+    attackType: 'flamethrower',
+    fireIntervalSec: 0.2,
+    flamethrower: {
+      damage: 13,
+      width: 2.8,
+      cooldownSeconds: 0.2,
+    },
+    spritePath: '/turret_engines/inferno_projector.svg',
+    description: 'Short-range flamethrower turret that spends mana each burst.',
+  },
 
   plasma_lance: {
     id: 'plasma_lance',
@@ -454,12 +524,12 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     age: 6,
     cost: 2200,
     buildMs: 2800,
-    range: 31,
+    range: 30,
     protectionMultiplier: 0.98,
     targeting: 'healthiest',
     attackType: 'projectile',
-    fireIntervalSec: 1.65,
-    projectile: { speed: 88, damage: 112, lifeMs: 1700, pierceCount: 1, radiusPx: 6, color: '#22d3ee', glowColor: 'rgba(34,211,238,0.95)', trailAlpha: 0.45 },
+    fireIntervalSec: 1.1,
+    projectile: { speed: 88, damage: 132, lifeMs: 1700, radiusPx: 6, color: '#22d3ee', glowColor: 'rgba(34,211,238,0.95)', trailAlpha: 0.45 },
     spritePath: '/turret_engines/plasma_lance.svg',
     description: 'Long-range plasma bolt with heavy single-target pressure.',
   },
@@ -467,14 +537,15 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'quantum_laser',
     name: 'Quantum Laser',
     age: 6,
-    cost: 2600,
+    cost: 2200,
+    castManaCost: 35,
     buildMs: 3000,
-    range: 32,
+    range: 40,
     protectionMultiplier: 0.99,
     targeting: 'highest_dps',
     attackType: 'projectile',
-    fireIntervalSec: 1.05,
-    projectile: { speed: 120, damage: 76, lifeMs: 1400, pierceCount: 2, radiusPx: 5, color: '#67e8f9', glowColor: 'rgba(103,232,249,0.95)', trailAlpha: 0.4 },
+    fireIntervalSec: 1.2,
+    projectile: { speed: 120, damage: 92, lifeMs: 1400, pierceCount: 2, radiusPx: 5, color: '#67e8f9', glowColor: 'rgba(103,232,249,0.95)', trailAlpha: 0.4 },
     spritePath: '/turret_engines/quantum_laser.svg',
     description: 'Near-instant beam pulses with partial piercing.',
   },
@@ -482,7 +553,8 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'tesla_obelisk_mk2',
     name: 'Tesla Obelisk Mk II',
     age: 6,
-    cost: 3000,
+    cost: 2500,
+    castManaCost: 70,
     buildMs: 3600,
     range: 29,
     protectionMultiplier: 0.88,
@@ -491,9 +563,9 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     fireIntervalSec: 3.6,
     chainLightning: {
       maxTargets: 6,
-      initialDamage: 104,
+      initialDamage: 144,
       falloffMultiplier: 0.78,
-      cooldownSeconds: 3.6,
+      cooldownSeconds: 1.2,
     },
     spritePath: '/turret_engines/tesla_obelisk_mk2.svg',
     description: 'Upgraded chain lightning with broader jumps.',
@@ -502,16 +574,17 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     id: 'orbital_barrage_mk2',
     name: 'Orbital Barrage Mk II',
     age: 6,
-    cost: 3600,
+    cost: 2900,
+    castManaCost: 130,
     buildMs: 4200,
-    range: 33,
+    range: 50,
     protectionMultiplier: 0.97,
     targeting: 'healthiest',
     attackType: 'artillery_barrage',
     fireIntervalSec: 9.5,
     artillery: {
-      barrageCount: 24,
-      spreadRange: 18,
+      barrageCount: 32,
+      spreadRange: 32,
       spreadLaneY: 6,
       startY: 26,
       fallSpeed: -18,
@@ -521,6 +594,68 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     },
     spritePath: '/turret_engines/orbital_barrage_mk2.svg',
     description: 'Future artillery saturation with higher density and damage.',
+  },
+  continuum_laser_spire: {
+    id: 'continuum_laser_spire',
+    name: 'Continuum Laser Spire',
+    age: 6,
+    cost: 4200,
+    castManaCost: 80,
+    buildMs: 4600,
+    range: 46,
+    protectionMultiplier: 0.99,
+    targeting: 'healthiest',
+    attackType: 'laser_pulse',
+    fireIntervalSec: 2.8,
+    laserPulse: {
+      damage: 42,
+      cooldownSeconds: 2.8,
+      beamWidth: 1.8,
+      laneThickness: 2.4,
+      pulseDurationMs: 500,
+    },
+    spritePath: '/turret_engines/continuum_laser_spire.svg',
+    description: 'High-cost long-range pulse beam that pierces every enemy in its path.',
+  },
+  mana_cyphening_relay: {
+    id: 'mana_cyphening_relay',
+    name: 'Mana Cyphening Relay',
+    age: 6,
+    cost: 0,
+    manaCost: 2000,
+    buildMs: 3600,
+    range: 35,
+    protectionMultiplier: 1.0,
+    targeting: 'healthiest',
+    attackType: 'mana_siphon',
+    fireIntervalSec: 0.1,
+    manaSiphon: {
+      tickDamage: 10,
+      ticksPerSecond: 10,
+      manaLeechFraction: 0.5,
+      laneThickness: 2.4,
+      waveAmplitude: 7,
+    },
+    spritePath: '/turret_engines/mana_cyphening_relay.svg',
+    description: 'Channels a wavering mana siphon into the strongest target and returns half of damage as mana.',
+  },
+  mana_shield_relay: {
+    id: 'mana_shield_relay',
+    name: 'Mana Shield Relay',
+    age: 6,
+    cost: 2500,
+    buildMs: 3300,
+    range: 20,
+    protectionMultiplier: 0.8,
+    targeting: 'nearest',
+    attackType: 'mana_shield',
+    fireIntervalSec: 1,
+    baseShield: {
+      damageToManaRatio: 0.75,
+      manaPerDamage: 0.5,
+    },
+    spritePath: '/turret_engines/mana_shield_relay.svg',
+    description: 'Passive shield relay: converts 75% of base damage into mana drain while projecting a 20% protection aura.',
   },
 };
 
@@ -589,7 +724,30 @@ export function estimateEngineDps(engine: TurretEngineDef): number {
 
   if (engine.attackType === 'drone_swarm' && engine.drones) {
     const impactReliability = 0.9 + Math.min(0.35, engine.drones.droneSpeed / 180);
-    return (engine.drones.droneCount * engine.drones.droneDamage * impactReliability) / Math.max(engine.drones.cooldownSeconds, 0.1);
+    const radiusFactor = 1 + Math.min(1.2, (engine.drones.explosionRadius ?? 2) * 0.18);
+    return (engine.drones.droneCount * engine.drones.droneDamage * impactReliability * radiusFactor) / Math.max(engine.drones.cooldownSeconds, 0.1);
+  }
+
+  if (engine.attackType === 'flamethrower' && engine.flamethrower) {
+    const widthFactor = 1 + Math.min(1.2, (engine.flamethrower.width ?? 2) * 0.22);
+    const rangeFactor = 0.9 + Math.min(1.1, engine.range * 0.08);
+    return (engine.flamethrower.damage * widthFactor * rangeFactor) / Math.max(engine.flamethrower.cooldownSeconds, 0.1);
+  }
+
+  if (engine.attackType === 'laser_pulse' && engine.laserPulse) {
+    const lineCoverage = 1.6 + Math.min(3.0, engine.range * 0.09);
+    const laneFactor = 1 + Math.min(0.7, (engine.laserPulse.laneThickness ?? 2) * 0.16);
+    return (engine.laserPulse.damage * lineCoverage * laneFactor) / Math.max(engine.laserPulse.cooldownSeconds, 0.1);
+  }
+
+  if (engine.attackType === 'mana_siphon' && engine.manaSiphon) {
+    const laneFactor = 1 + Math.min(0.55, (engine.manaSiphon.laneThickness ?? 2.2) * 0.12);
+    const rangeFactor = 1 + Math.min(0.6, engine.range * 0.012);
+    return engine.manaSiphon.tickDamage * engine.manaSiphon.ticksPerSecond * laneFactor * rangeFactor;
+  }
+
+  if (engine.attackType === 'mana_shield') {
+    return 0;
   }
 
   return 0;

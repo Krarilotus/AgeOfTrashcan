@@ -17,6 +17,10 @@ function getTurretCooldown(def: TurretCatalog[string]): number {
   if (def.attackType === 'artillery_barrage') return def.artillery?.cooldownSeconds ?? def.fireIntervalSec;
   if (def.attackType === 'oil_pour') return def.oil?.cooldownSeconds ?? def.fireIntervalSec;
   if (def.attackType === 'drone_swarm') return def.drones?.cooldownSeconds ?? def.fireIntervalSec;
+  if (def.attackType === 'flamethrower') return def.flamethrower?.cooldownSeconds ?? def.fireIntervalSec;
+  if (def.attackType === 'laser_pulse') return def.laserPulse?.cooldownSeconds ?? def.fireIntervalSec;
+  if (def.attackType === 'mana_siphon') return 1 / Math.max(1, def.manaSiphon?.ticksPerSecond ?? 1);
+  if (def.attackType === 'mana_shield') return 0;
   return def.fireIntervalSec;
 }
 
@@ -36,6 +40,20 @@ function getTurretAttackDamage(def: TurretCatalog[string]): string {
   }
   if (def.attackType === 'drone_swarm') {
     return `${def.drones?.droneDamage ?? 0} / drone`;
+  }
+  if (def.attackType === 'flamethrower') {
+    return `${def.flamethrower?.damage ?? 0} / burst`;
+  }
+  if (def.attackType === 'laser_pulse') {
+    return `${def.laserPulse?.damage ?? 0} / pulse`;
+  }
+  if (def.attackType === 'mana_siphon') {
+    const tick = def.manaSiphon?.tickDamage ?? 0;
+    const tps = def.manaSiphon?.ticksPerSecond ?? 1;
+    return `${tick} / tick @ ${tps}/s`;
+  }
+  if (def.attackType === 'mana_shield') {
+    return '0 (support)';
   }
   return '0';
 }
@@ -62,6 +80,24 @@ function getTurretSkillSummary(def: TurretCatalog[string]): string {
 
   if (def.attackType === 'drone_swarm' && def.drones) {
     return `Drone swarm: ${def.drones.droneCount} drones, ${def.drones.droneDamage} dmg each`;
+  }
+
+  if (def.attackType === 'flamethrower' && def.flamethrower) {
+    return `Flamethrower: ${def.flamethrower.damage} burst dmg in ${def.flamethrower.width ?? 2.8} width`;
+  }
+
+  if (def.attackType === 'laser_pulse' && def.laserPulse) {
+    return `Laser pulse: ${def.laserPulse.damage} line dmg, infinite pierce on path`;
+  }
+
+  if (def.attackType === 'mana_siphon' && def.manaSiphon) {
+    const leechPct = Math.round(def.manaSiphon.manaLeechFraction * 100);
+    return `Mana siphon: strongest target, ${def.manaSiphon.tickDamage}/tick @ ${def.manaSiphon.ticksPerSecond}/s, returns ${leechPct}% as mana`;
+  }
+
+  if (def.attackType === 'mana_shield' && def.baseShield) {
+    const ratioPct = Math.round(def.baseShield.damageToManaRatio * 100);
+    return `Base mana shield: converts ${ratioPct}% incoming base dmg into mana drain (${def.baseShield.manaPerDamage} mana per dmg)`;
   }
 
   if (def.projectile?.splitOnImpact) {
@@ -268,6 +304,7 @@ export function UnitTrainingPanel({
                 const cooldown = getTurretCooldown(turret);
                 const attackDamage = getTurretAttackDamage(turret);
                 const turretManaCost = turret.manaCost ?? 0;
+                const castManaCost = turret.castManaCost ?? 0;
                 const requiresMana = turretManaCost > 0;
                 const disabled = !canBuildInSelectedSlot || playerGold < turret.cost || (requiresMana && playerMana < turretManaCost);
                 const skillSummary = getTurretSkillSummary(turret);
@@ -278,12 +315,13 @@ export function UnitTrainingPanel({
                     onClick={() => onQueueTurretEngine(selectedTurretSlot, turretId)}
                     disabled={disabled}
                     className="bg-slate-800 hover:bg-slate-700 p-2 rounded text-left border border-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                    title={`${turret.name}\nCost: ${turret.cost}g${requiresMana ? ` + ${turretManaCost}m` : ''}\nAttack Damage: ${attackDamage}\nCooldown: ${cooldown.toFixed(2)}s\nRange: ${turret.range}\nProtection Radius: ${turret.range}\nProtection: ${protectionPct}%\nSkill: ${skillSummary}\nTargeting: ${turret.targeting}\nBuild: ${(turret.buildMs / 1000).toFixed(1)}s\nQueue Target: Slot S${selectedTurretSlot + 1} (${selectedSlotStateLabel})`}
+                    title={`${turret.name}\nCost: ${turret.cost}g${requiresMana ? ` + ${turretManaCost}m` : ''}${castManaCost > 0 ? `\nAbility Mana: ${castManaCost}/cast` : ''}\nAttack Damage: ${attackDamage}\nCooldown: ${cooldown.toFixed(2)}s\nRange: ${turret.range}\nProtection Radius: ${turret.range}\nProtection: ${protectionPct}%\nSkill: ${skillSummary}\nTargeting: ${turret.targeting}\nBuild: ${(turret.buildMs / 1000).toFixed(1)}s\nQueue Target: Slot S${selectedTurretSlot + 1} (${selectedSlotStateLabel})`}
                   >
                     <div className="text-sm font-semibold truncate">{turret.name}</div>
                     <div className="text-xs text-slate-400 space-y-0.5">
                       <div>💰 {turret.cost}g{requiresMana ? ` ✨ ${turretManaCost}m` : ''} · ⏱️ {(turret.buildMs / 1000).toFixed(1)}s</div>
                       <div>⚔️ ATK {attackDamage} · 🕒 CD {cooldown.toFixed(2)}s</div>
+                      {castManaCost > 0 && <div>🧪 Ability Mana {castManaCost}/cast</div>}
                       <div>🎯 Range {turret.range} · 🛡️ Protection {protectionPct}%</div>
                       <div>🧠 Targeting: {turret.targeting}</div>
                       <div className="text-purple-300">✨ Skill: {skillSummary}</div>

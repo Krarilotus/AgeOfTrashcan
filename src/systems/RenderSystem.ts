@@ -35,7 +35,8 @@ export class RenderSystem {
       'boiling_pot', 'repeater_crossbow', 'thunder_javelin', 'piercing_sniper',
       'shock_mortar', 'suppressor_nest', 'kamikaze_drone_hub', 'lightning_rod',
       'artillery_barrage_platform', 'flak_array', 'plasma_lance', 'quantum_laser',
-      'tesla_obelisk_mk2', 'orbital_barrage_mk2',
+      'tesla_obelisk_mk2', 'orbital_barrage_mk2', 'inferno_projector', 'continuum_laser_spire',
+      'mana_cyphening_relay', 'mana_shield_relay',
     ];
 
     for (const turretId of turretIds) {
@@ -421,6 +422,75 @@ export class RenderSystem {
       const baselineY = this.canvas.height / 2;
       const y = baselineY - unitsToPixels(p.y); // Use helper
 
+      if (p.droneState) {
+        const phase = p.droneState.phase;
+        const speed = Math.max(0.1, Math.sqrt(p.vx * p.vx + p.vy * p.vy));
+        const heading = Math.atan2(-p.vy, p.vx);
+        const groundShadowY = baselineY + 6;
+        const altitudePx = Math.max(0, groundShadowY - y);
+        const shadowAlpha = Math.max(0.1, 0.28 - altitudePx * 0.0018);
+        const rotorSpin = (p.lifeMs * 0.035) % (Math.PI * 2);
+
+        this.ctx.globalAlpha = shadowAlpha;
+        this.ctx.fillStyle = '#020617';
+        this.ctx.beginPath();
+        this.ctx.ellipse(x, groundShadowY, 9, 3, 0, 0, Math.PI * 2);
+        this.ctx.fill();
+        this.ctx.globalAlpha = 1;
+
+        this.ctx.save();
+        this.ctx.translate(x, y);
+        this.ctx.rotate(heading);
+
+        const bodyLen = phase === 'dive' ? 17 : 14;
+        const bodyHeight = phase === 'dive' ? 7 : 6;
+        this.ctx.fillStyle = phase === 'dive' ? '#ef4444' : '#93c5fd';
+        this.ctx.strokeStyle = '#1e293b';
+        this.ctx.lineWidth = 1.1;
+        this.ctx.beginPath();
+        this.ctx.roundRect(-bodyLen * 0.5, -bodyHeight * 0.5, bodyLen, bodyHeight, 2);
+        this.ctx.fill();
+        this.ctx.stroke();
+
+        this.ctx.fillStyle = '#0f172a';
+        this.ctx.beginPath();
+        this.ctx.arc(2, 0, 2.2, 0, Math.PI * 2);
+        this.ctx.fill();
+
+        this.ctx.strokeStyle = 'rgba(226,232,240,0.9)';
+        this.ctx.lineWidth = 1.5;
+        this.ctx.beginPath();
+        this.ctx.moveTo(-8 * Math.cos(rotorSpin), -6 * Math.sin(rotorSpin));
+        this.ctx.lineTo(8 * Math.cos(rotorSpin), 6 * Math.sin(rotorSpin));
+        this.ctx.stroke();
+
+        if (phase === 'dive') {
+          this.ctx.fillStyle = 'rgba(248,113,113,0.85)';
+          this.ctx.beginPath();
+          this.ctx.moveTo(-bodyLen * 0.55, 0);
+          this.ctx.lineTo(-bodyLen * 0.9, -2.4);
+          this.ctx.lineTo(-bodyLen * 0.9, 2.4);
+          this.ctx.closePath();
+          this.ctx.fill();
+        }
+
+        this.ctx.restore();
+
+        const tail = Math.min(26, Math.max(10, speed * 0.3));
+        const nx = p.vx / speed;
+        const ny = p.vy / speed;
+        this.ctx.globalAlpha = 0.24;
+        this.ctx.strokeStyle = phase === 'dive' ? 'rgba(248,113,113,0.7)' : 'rgba(147,197,253,0.7)';
+        this.ctx.lineWidth = 2;
+        this.ctx.lineCap = 'round';
+        this.ctx.beginPath();
+        this.ctx.moveTo(x - nx * tail, y + ny * tail);
+        this.ctx.lineTo(x, y);
+        this.ctx.stroke();
+        this.ctx.globalAlpha = 1;
+        continue;
+      }
+
       if (p.isFalling) {
         // Falling Artillery Shell (Vertical Oval/Teardrop)
         this.ctx.fillStyle = p.color ?? '#ff4400';
@@ -619,6 +689,116 @@ export class RenderSystem {
                 this.ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.30})`;
                 this.ctx.stroke();
             }
+
+        } else if (vfx.data?.turretAbility === 'mana_siphon') {
+            const durationMs = Math.max(160, vfx.data?.durationMs ?? 220);
+            const elapsedMs = Math.max(0, durationMs - vfx.lifeMs);
+            const t = Math.min(1, elapsedMs / durationMs);
+            const flicker = 0.7 + 0.3 * Math.sin(elapsedMs * 0.06);
+            const startUnitsX = vfx.data?.startX ?? vfx.x;
+            const startUnitsY = vfx.data?.startY ?? vfx.y;
+            const endUnitsX = vfx.data?.endX ?? vfx.x;
+            const endUnitsY = vfx.data?.endY ?? vfx.y;
+            const startX = (startUnitsX / battlefieldWidth) * this.canvas.width;
+            const startY = this.canvas.height / 2 + (startUnitsY * 15);
+            const endX = (endUnitsX / battlefieldWidth) * this.canvas.width;
+            const endY = this.canvas.height / 2 + (endUnitsY * 15);
+            const laneThickness = Math.max(1.3, vfx.data?.laneThickness ?? 2.2);
+            const waveAmplitudePx = Math.max(3, vfx.data?.waveAmplitude ?? 7);
+            const segments = 20;
+
+            this.ctx.lineCap = 'round';
+            const glowWidth = laneThickness * 3.6;
+            this.ctx.strokeStyle = `rgba(45, 212, 191, ${0.14 * flicker * alpha})`;
+            this.ctx.lineWidth = glowWidth;
+            this.ctx.beginPath();
+            this.ctx.moveTo(startX, startY);
+            for (let i = 1; i <= segments; i++) {
+              const p = i / segments;
+              const bx = startX + (endX - startX) * p;
+              const by = startY + (endY - startY) * p;
+              const wave = Math.sin(p * 8 - elapsedMs * 0.03 + t * 4) * waveAmplitudePx * (1 - p * 0.2);
+              this.ctx.lineTo(bx, by + wave);
+            }
+            this.ctx.stroke();
+
+            this.ctx.strokeStyle = `rgba(167, 139, 250, ${0.38 * flicker * alpha})`;
+            this.ctx.lineWidth = laneThickness * 1.9;
+            this.ctx.beginPath();
+            this.ctx.moveTo(startX, startY);
+            for (let i = 1; i <= segments; i++) {
+              const p = i / segments;
+              const bx = startX + (endX - startX) * p;
+              const by = startY + (endY - startY) * p;
+              const wave = Math.sin(p * 10 - elapsedMs * 0.045 + t * 6) * waveAmplitudePx * 0.75;
+              this.ctx.lineTo(bx, by + wave);
+            }
+            this.ctx.stroke();
+
+            this.ctx.strokeStyle = `rgba(255, 255, 255, ${0.52 * flicker * alpha})`;
+            this.ctx.lineWidth = Math.max(1, laneThickness * 0.8);
+            this.ctx.beginPath();
+            this.ctx.moveTo(startX, startY);
+            for (let i = 1; i <= segments; i++) {
+              const p = i / segments;
+              const bx = startX + (endX - startX) * p;
+              const by = startY + (endY - startY) * p;
+              const wave = Math.sin(p * 12 - elapsedMs * 0.06 + t * 8) * waveAmplitudePx * 0.42;
+              this.ctx.lineTo(bx, by + wave);
+            }
+            this.ctx.stroke();
+
+        } else if (vfx.data?.turretAbility === 'laser_pulse') {
+            const durationMs = Math.max(280, vfx.data?.durationMs ?? 500);
+            const elapsedMs = Math.max(0, durationMs - vfx.lifeMs);
+            const t = Math.min(1, elapsedMs / durationMs);
+            const intensity = t < 0.58 ? (t / 0.58) : Math.max(0, (1 - t) / 0.42);
+            const startUnitsX = vfx.data?.startX ?? vfx.x;
+            const startUnitsY = vfx.data?.startY ?? vfx.y;
+            const endUnitsX = vfx.data?.endX ?? (vfx.x + 8);
+            const endUnitsY = vfx.data?.endY ?? vfx.y;
+            const startX = (startUnitsX / battlefieldWidth) * this.canvas.width;
+            const startY = this.canvas.height / 2 + (startUnitsY * 15);
+            const endX = (endUnitsX / battlefieldWidth) * this.canvas.width;
+            const endY = this.canvas.height / 2 + (endUnitsY * 15);
+            const beamWidth = Math.max(1, vfx.data?.beamWidth ?? 1.8);
+            const coreThickness = beamWidth * (2.2 + intensity * 4.5);
+            const glowThickness = coreThickness * 2.4;
+            const sweepX = startX + (endX - startX) * t;
+            const sweepY = startY + (endY - startY) * t;
+
+            const glowGrad = this.ctx.createLinearGradient(startX, startY, endX, endY);
+            glowGrad.addColorStop(0, `rgba(56, 189, 248, ${0.08 + intensity * 0.25})`);
+            glowGrad.addColorStop(0.5, `rgba(165, 243, 252, ${0.18 + intensity * 0.35})`);
+            glowGrad.addColorStop(1, `rgba(56, 189, 248, ${0.08 + intensity * 0.25})`);
+            this.ctx.strokeStyle = glowGrad;
+            this.ctx.lineWidth = glowThickness;
+            this.ctx.lineCap = 'round';
+            this.ctx.beginPath();
+            this.ctx.moveTo(startX, startY);
+            this.ctx.lineTo(endX, endY);
+            this.ctx.stroke();
+
+            const coreGrad = this.ctx.createLinearGradient(startX, startY, endX, endY);
+            coreGrad.addColorStop(0, `rgba(186, 230, 253, ${0.30 + intensity * 0.55})`);
+            coreGrad.addColorStop(0.5, `rgba(255, 255, 255, ${0.55 + intensity * 0.4})`);
+            coreGrad.addColorStop(1, `rgba(186, 230, 253, ${0.30 + intensity * 0.55})`);
+            this.ctx.strokeStyle = coreGrad;
+            this.ctx.lineWidth = coreThickness;
+            this.ctx.beginPath();
+            this.ctx.moveTo(startX, startY);
+            this.ctx.lineTo(endX, endY);
+            this.ctx.stroke();
+
+            const pulseRadius = Math.max(10, coreThickness * 1.6);
+            const pulseGrad = this.ctx.createRadialGradient(sweepX, sweepY, 0, sweepX, sweepY, pulseRadius);
+            pulseGrad.addColorStop(0, `rgba(255,255,255, ${0.35 + intensity * 0.5})`);
+            pulseGrad.addColorStop(0.45, `rgba(125, 211, 252, ${0.2 + intensity * 0.4})`);
+            pulseGrad.addColorStop(1, 'rgba(125,211,252,0)');
+            this.ctx.fillStyle = pulseGrad;
+            this.ctx.beginPath();
+            this.ctx.arc(sweepX, sweepY, pulseRadius, 0, Math.PI * 2);
+            this.ctx.fill();
 
         } else if (vfx.data?.turretAbility === 'oil_pour') {
             const oilRadiusUnits = Math.max(1, vfx.data?.radius ?? 2.5);
@@ -828,6 +1008,10 @@ export class RenderSystem {
         const range = vfx.data?.range || 4;
         const screenRange = (range / battlefieldWidth) * this.canvas.width;
         const isDarkCultist = vfx.data?.unitId === 'dark_cultist';
+        const isTurretSource = vfx.data?.sourceType === 'turret';
+        const targetLaneY = isTurretSource
+          ? this.canvas.height / 2 + ((vfx.data?.targetLaneY ?? 0) * 15)
+          : this.canvas.height / 2;
         
         // Use additive blending for brighter fire
         this.ctx.globalCompositeOperation = 'screen';
@@ -845,10 +1029,11 @@ export class RenderSystem {
            // Wiggle (Chaotic, not just sine)
            const timeScale = (state.tick / 60) * 20;
            const wiggle = Math.sin(timeScale + i * 0.5) * (15 * progress) + Math.cos(timeScale * 1.5 + i) * 5;
-           const yOffset = wiggle;
+           const yOffset = wiggle * (isTurretSource ? (0.7 + progress * 0.4) : 1);
            
            const cx = x + (dist * direction);
-           const cy = y + yOffset;
+           const originY = isTurretSource ? y + (targetLaneY - y) * Math.min(1, progress * 0.95) : y;
+           const cy = originY + yOffset;
            
            // Alpha fades out at end.
            // BOOSTED VISIBILITY: Multiplier 6.0 -> 12.0 to keep it opaque longer.

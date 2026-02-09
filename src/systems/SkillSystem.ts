@@ -1,5 +1,6 @@
 import { Entity, GameState } from '../GameEngine';
 import { UNIT_DEFS, UnitSkill } from '../config/units';
+import { CombatUtils } from './CombatUtils';
 
 /**
  * Skill System
@@ -359,10 +360,13 @@ export class SkillSystem {
     const targetBase = entity.owner === 'PLAYER' ? state.enemyBase : state.playerBase;
     const distToBase = Math.abs(targetBase.x - centerX);
     if (distToBase <= radius + 3) {
-       targetBase.health -= damageAmount;
-       hitCount++;
-       if (entity.owner === 'PLAYER') state.stats.damageDealt.player += damageAmount;
-       else state.stats.damageDealt.enemy += damageAmount;
+       const targetOwner = entity.owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+       const baseHit = CombatUtils.applyDamageToBase(state, targetOwner, damageAmount);
+       if (baseHit.actualDamage > 0) {
+         hitCount++;
+         if (entity.owner === 'PLAYER') state.stats.damageDealt.player += baseHit.actualDamage;
+         else state.stats.damageDealt.enemy += baseHit.actualDamage;
+       }
     }
 
     // Always return true to trigger cooldown/cost even if no one hit (wasted skill)
@@ -450,29 +454,27 @@ export class SkillSystem {
 
     // Check Base Damage
     const battlefieldWidth = state.battlefield.width;
-    let hitBase = false;
-    const currentTime = state.tick * 16.67;
 
     if (entity.owner === 'PLAYER') {
         const distToBase = battlefieldWidth - entity.transform.x;
         // Range check (using -0.5 buffer as well just in case)
         if (distToBase <= range && distToBase > -2.0) {
            const damageAmt = damage; 
-           state.enemyBase.health = Math.max(0, state.enemyBase.health - damageAmt);
-           state.stats.damageDealt.player += damageAmt;
-           state.enemyBase.lastAttackTime = currentTime;
-           hitBase = true;
-           hitCount++;
+           const baseHit = CombatUtils.applyDamageToBase(state, 'ENEMY', damageAmt);
+           if (baseHit.actualDamage > 0) {
+             state.stats.damageDealt.player += baseHit.actualDamage;
+             hitCount++;
+           }
         }
     } else {
         const distToBase = entity.transform.x;
         if (distToBase <= range && distToBase > -2.0) {
            const damageAmt = damage;
-           state.playerBase.health = Math.max(0, state.playerBase.health - damageAmt);
-           state.stats.damageDealt.enemy += damageAmt;
-           state.playerBase.lastAttackTime = currentTime;
-           hitBase = true;
-           hitCount++;
+           const baseHit = CombatUtils.applyDamageToBase(state, 'PLAYER', damageAmt);
+           if (baseHit.actualDamage > 0) {
+             state.stats.damageDealt.enemy += baseHit.actualDamage;
+             hitCount++;
+           }
         }
     }
 

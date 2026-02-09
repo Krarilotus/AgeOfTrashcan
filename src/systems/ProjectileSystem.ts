@@ -12,6 +12,10 @@ export class ProjectileSystem {
         continue;
       }
 
+      if (p.droneState) {
+        this.updateDroneGuidance(state, p, deltaSeconds);
+      }
+
       if (p.curvature && p.curvature !== 0) {
         p.vy += p.curvature * deltaSeconds;
       }
@@ -27,18 +31,16 @@ export class ProjectileSystem {
         if (p.splitOnImpact) {
           this.spawnSplitProjectiles(state, p, state.battlefield.width - 1, 0);
         }
-        state.enemyBase.health = Math.max(0, state.enemyBase.health - p.damage);
-        state.enemyBase.lastAttackTime = state.tick * (1000 / 60) / 1000;
-        state.stats.damageDealt.player += p.damage;
+        const baseHit = CombatUtils.applyDamageToBase(state, 'ENEMY', p.damage);
+        state.stats.damageDealt.player += baseHit.actualDamage;
         projToRemove.push(p.id);
         hitResolved = true;
       } else if (p.owner === 'ENEMY' && p.x <= 1) {
         if (p.splitOnImpact) {
           this.spawnSplitProjectiles(state, p, 1, 0);
         }
-        state.playerBase.health = Math.max(0, state.playerBase.health - p.damage);
-        state.playerBase.lastAttackTime = state.tick * (1000 / 60) / 1000;
-        state.stats.damageDealt.enemy += p.damage;
+        const baseHit = CombatUtils.applyDamageToBase(state, 'PLAYER', p.damage);
+        state.stats.damageDealt.enemy += baseHit.actualDamage;
         projToRemove.push(p.id);
         hitResolved = true;
       }
@@ -69,15 +71,22 @@ export class ProjectileSystem {
         candidates.sort((a, b) => Math.abs(a.transform.x - p.x) - Math.abs(b.transform.x - p.x));
         const primary = candidates[0];
         this.applyProjectileDamage(state, p, primary);
+        const impactX = primary.transform.x;
+        const impactY = primary.transform.laneY;
 
         if (p.splashRadius && p.splashRadius > 0) {
+          const splashDamageMultiplier = p.droneState ? 1.0 : 0.65;
           for (const ent of state.entities.values()) {
             if (ent.owner !== targetOwner || ent.entityId === primary.entityId) continue;
             const dist = Math.abs(ent.transform.x - primary.transform.x);
             if (dist <= p.splashRadius) {
-              this.applyProjectileDamage(state, p, ent, 0.65);
+              this.applyProjectileDamage(state, p, ent, splashDamageMultiplier);
             }
           }
+        }
+
+        if (p.droneState && p.splashRadius && p.splashRadius > 0) {
+          this.spawnDroneImpactVfx(state, p, impactX, impactY);
         }
 
         if (p.splitOnImpact) {
@@ -107,6 +116,95 @@ export class ProjectileSystem {
       const removeSet = new Set(projToRemove);
       state.projectiles = state.projectiles.filter((proj) => !removeSet.has(proj.id));
     }
+  }
+
+  private updateDroneGuidance(state: GameState, projectile: Projectile, deltaSeconds: number): void {
+    const drone = projectile.droneState;
+    if (!drone) return;
+
+    const direction = projectile.owner === 'PLAYER' ? 1 : -1;
+    const targetOwner = projectile.owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+
+    if (drone.phase === 'cruise') {
+      projectile.vx = direction * Math.max(8, drone.cruiseSpeed);
+      const yError = drone.cruiseY - projectile.y;
+      projectile.vy = Math.max(-10, Math.min(10, yError * 3.5));
+
+      const crossedOverfly = direction === 1 ? projectile.x >= drone.overflyX : projectile.x <= drone.overflyX;
+      if (crossedOverfly) {
+        const target = this.findHealthiestDroneTarget(state, targetOwner, drone.sourceX, drone.maxRange);
+        if (target) {
+          drone.phase = 'dive';
+          projectile.targetEntityId = target.entityId;
+        }
+      }
+      return;
+    }
+
+    let target =
+      typeof projectile.targetEntityId === 'number'
+        ? state.entities.get(projectile.targetEntityId)
+        : undefined;
+
+    if (!target || target.owner !== targetOwner || target.health.current <= 0) {
+      if (drone.retargetOnKill) {
+        target = this.findHealthiestDroneTarget(state, targetOwner, drone.sourceX, drone.maxRange) ?? undefined;
+        projectile.targetEntityId = target?.entityId;
+      } else {
+        target = undefined;
+      }
+    }
+
+    const diveSpeed = Math.max(12, drone.diveSpeed);
+    if (target) {
+      const dx = target.transform.x - projectile.x;
+      const dy = target.transform.laneY - projectile.y;
+      const dist = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
+      projectile.vx = (dx / dist) * diveSpeed;
+      projectile.vy = (dy / dist) * diveSpeed;
+    } else {
+      projectile.vx = direction * diveSpeed * 0.4;
+      projectile.vy = -Math.max(8, diveSpeed * 0.75);
+    }
+  }
+
+  private findHealthiestDroneTarget(
+    state: GameState,
+    targetOwner: 'PLAYER' | 'ENEMY',
+    sourceX: number,
+    maxRange: number
+  ): Entity | null {
+    let best: Entity | null = null;
+    let bestScore = -Infinity;
+
+    for (const ent of state.entities.values()) {
+      if (ent.owner !== targetOwner) continue;
+      if (ent.health.current <= 0) continue;
+      if (Math.abs(ent.transform.x - sourceX) > maxRange) continue;
+      const score = ent.health.current + ent.health.max * 0.2;
+      if (score > bestScore) {
+        bestScore = score;
+        best = ent;
+      }
+    }
+
+    return best;
+  }
+
+  private spawnDroneImpactVfx(state: GameState, projectile: Projectile, x: number, laneY: number): void {
+    state.vfx.push({
+      id: state.nextVfxId++,
+      type: 'ability_impact',
+      x,
+      y: laneY,
+      age: projectile.owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age,
+      lifeMs: 700,
+      data: {
+        radius: projectile.splashRadius ?? 5,
+        damage: projectile.damage,
+        turretAbility: 'kamikaze_drone',
+      },
+    });
   }
 
   private applyProjectileDamage(

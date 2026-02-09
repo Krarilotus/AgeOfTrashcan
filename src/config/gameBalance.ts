@@ -45,6 +45,13 @@ export const PROGRESSION_CONFIG = {
   ageBaseHealthMultiplier: 2,
 } as const;
 
+export const TURRET_BALANCE_CONFIG = {
+  // Slot 1 is free by design; entries map to current unlocked slot count.
+  // Example: unlocking slot 2 when currently at 1 unlocked costs 500.
+  slotUnlockCosts: [0, 300, 1000, 5000] as const,
+  slotUnlockBuildMs: [0, 1600, 2200, 3000] as const,
+} as const;
+
 export const MANA_CONVERSION_CONFIG = {
   unlockLevel: 6,
   percentPerLevel: 0.02,

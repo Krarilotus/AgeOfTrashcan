@@ -385,11 +385,11 @@ export class EntitySystem {
               entity.attack.cooldownRemaining -= deltaSeconds;
               if (entity.attack.cooldownRemaining <= 0) {
                   const dmg = entity.attack.damage; // Full damage
-                  targetBase.health -= dmg;
-                  targetBase.lastAttackTime = (state.tick * FIXED_TIMESTEP) / 1000;
+                  const targetOwner = entity.owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+                  const baseHit = CombatUtils.applyDamageToBase(state, targetOwner, dmg);
                   
-                  if (entity.owner === 'PLAYER') state.stats.damageDealt.player += dmg;
-                  else state.stats.damageDealt.enemy += dmg;
+                  if (entity.owner === 'PLAYER') state.stats.damageDealt.player += baseHit.actualDamage;
+                  else state.stats.damageDealt.enemy += baseHit.actualDamage;
                   
                   // Reset Cooldown
                   entity.attack.cooldownRemaining = 1.0 / Math.max(0.1, entity.attack.speed);

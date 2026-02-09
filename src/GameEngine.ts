@@ -113,6 +113,17 @@ export interface Projectile {
     childLifeMs: number;
     spreadRadius: number;
   };
+  targetEntityId?: number;
+  droneState?: {
+    phase: 'cruise' | 'dive';
+    sourceX: number;
+    maxRange: number;
+    cruiseY: number;
+    overflyX: number;
+    cruiseSpeed: number;
+    diveSpeed: number;
+    retargetOnKill: boolean;
+  };
 }
 
 export type BuildQueueItemKind = 'unit' | 'turret_slot' | 'turret_engine';
@@ -950,6 +961,15 @@ export class GameEngine {
     return owner === 'PLAYER' ? this.state.progression.player : this.state.progression.enemy;
   }
 
+  private getDiscountedGoldCostForOwner(owner: 'PLAYER' | 'ENEMY', baseCost: number): number {
+    if (owner !== 'ENEMY') return baseCost;
+    let finalCost = baseCost;
+    if (this.config.difficulty === 'MEDIUM') finalCost *= 0.8;
+    else if (this.config.difficulty === 'HARD') finalCost *= 0.65;
+    else if (this.config.difficulty === 'CHEATER') finalCost *= 0.5;
+    return Math.floor(finalCost);
+  }
+
   queueTurretSlotUpgrade(owner: 'PLAYER' | 'ENEMY' = 'PLAYER'): boolean {
     const base = this.getBaseForOwner(owner);
     const econ = this.getEconomyForOwner(owner);
@@ -958,7 +978,7 @@ export class GameEngine {
     if (base.turretSlotsUnlocked >= MAX_TURRET_SLOTS) return false;
     if (queue.some((item) => item.kind === 'turret_slot')) return false;
 
-    const cost = getTurretSlotUnlockCost(base.turretSlotsUnlocked);
+    const cost = this.getDiscountedGoldCostForOwner(owner, getTurretSlotUnlockCost(base.turretSlotsUnlocked));
     if (econ.gold < cost) return false;
     econ.gold -= cost;
 
@@ -994,14 +1014,8 @@ export class GameEngine {
     if (!engine) return false;
     if (engine.age > prog.age) return false;
 
-    let finalCost = engine.cost;
+    let finalCost = this.getDiscountedGoldCostForOwner(owner, engine.cost);
     const finalManaCost = engine.manaCost ?? 0;
-    if (owner === 'ENEMY') {
-      if (this.config.difficulty === 'MEDIUM') finalCost *= 0.8;
-      else if (this.config.difficulty === 'HARD') finalCost *= 0.65;
-      else if (this.config.difficulty === 'CHEATER') finalCost *= 0.5;
-      finalCost = Math.floor(finalCost);
-    }
 
     if (econ.gold < finalCost) return false;
     if (econ.mana < finalManaCost) return false;
@@ -1105,13 +1119,7 @@ export class GameEngine {
     if ((unitDef.age ?? 1) > ownerAge) return false; // cannot queue unit beyond current age
     
     // Apply Difficulty Discount for AI
-    let finalCost = unitDef.cost;
-    if (owner === 'ENEMY') {
-         if (this.config.difficulty === 'MEDIUM') finalCost *= 0.8;
-         else if (this.config.difficulty === 'HARD') finalCost *= 0.65;
-         else if (this.config.difficulty === 'CHEATER') finalCost *= 0.5;
-         finalCost = Math.floor(finalCost);
-    }
+    let finalCost = this.getDiscountedGoldCostForOwner(owner, unitDef.cost);
 
     if (econ.gold < finalCost) return false;
     

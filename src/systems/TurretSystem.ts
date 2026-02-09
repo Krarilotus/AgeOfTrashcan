@@ -6,6 +6,7 @@ import {
   type TurretEngineDef,
 } from '../config/turrets';
 import { TURRET_VISUALS, pixelsToUnits } from '../config/renderConfig';
+import { CombatUtils } from './CombatUtils';
 
 interface OilGroundPatch {
   owner: 'PLAYER' | 'ENEMY';
@@ -25,6 +26,34 @@ interface OilGroundPatch {
 
 export class TurretSystem {
   private oilPatches: OilGroundPatch[] = [];
+  private siphonTargetsBySlot: Map<string, number> = new Map();
+
+  private getForwardDirection(owner: 'PLAYER' | 'ENEMY'): 1 | -1 {
+    return owner === 'PLAYER' ? 1 : -1;
+  }
+
+  private getProjectileMuzzleOrigin(
+    owner: 'PLAYER' | 'ENEMY',
+    mount: { x: number; y: number },
+    target: Entity,
+    engine: TurretEngineDef
+  ): { x: number; y: number } {
+    const direction = this.getForwardDirection(owner);
+    const projectile = engine.projectile;
+    const dxRaw = target.transform.x - mount.x;
+    const dyRaw = target.transform.laneY - mount.y;
+    const distance = Math.max(0.001, Math.sqrt(dxRaw * dxRaw + dyRaw * dyRaw));
+    const ux = dxRaw / distance;
+    const uy = dyRaw / distance;
+    const speed = projectile?.speed ?? 32;
+    const radiusPx = projectile?.radiusPx ?? 4;
+    const forwardOffset = Math.max(0.55, Math.min(1.45, 0.6 + speed * 0.005 + radiusPx * 0.03));
+    const verticalLift = Math.abs(projectile?.curvature ?? 0) > 0.001 ? 0.16 : 0.08;
+    return {
+      x: mount.x + ux * forwardOffset + direction * 0.1,
+      y: mount.y + uy * (forwardOffset * 0.25) + verticalLift,
+    };
+  }
 
   public update(state: GameState, deltaSeconds: number): void {
     this.updateOilPatches(state, deltaSeconds);
@@ -32,38 +61,64 @@ export class TurretSystem {
     const updateTurretsForOwner = (owner: 'PLAYER' | 'ENEMY') => {
       const base = owner === 'PLAYER' ? state.playerBase : state.enemyBase;
       const enemyOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+      const econ = owner === 'PLAYER' ? state.economy.player : state.economy.enemy;
       const age = owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age;
 
       for (let slotIndex = 0; slotIndex < base.turretSlotsUnlocked; slotIndex++) {
+        const slotKey = `${owner}:${slotIndex}`;
         const slot = base.turretSlots[slotIndex];
-        if (!slot) continue;
+        if (!slot) {
+          this.siphonTargetsBySlot.delete(slotKey);
+          continue;
+        }
         slot.cooldownRemaining = Math.max(0, slot.cooldownRemaining - deltaSeconds);
-        if (!slot.turretId) continue;
+        if (!slot.turretId) {
+          this.siphonTargetsBySlot.delete(slotKey);
+          continue;
+        }
 
         const engine = getTurretEngineDef(slot.turretId);
-        if (!engine) continue;
+        if (!engine) {
+          this.siphonTargetsBySlot.delete(slotKey);
+          continue;
+        }
+        if (engine.attackType !== 'mana_siphon') {
+          this.siphonTargetsBySlot.delete(slotKey);
+        }
+        if (engine.attackType === 'mana_shield') {
+          slot.cooldownRemaining = 0;
+          continue;
+        }
         if (slot.cooldownRemaining > 0) continue;
-
-        const target = this.selectTarget(state, base.x, enemyOwner, engine);
-        if (!target) continue;
+        const castManaCost = Math.max(0, engine.castManaCost ?? 0);
+        if (castManaCost > 0 && econ.mana < castManaCost) continue;
+        const consumeCastMana = () => {
+          if (castManaCost <= 0) return;
+          econ.mana = Math.max(0, econ.mana - castManaCost);
+        };
 
         const mount = TurretSystem.getTurretPosition(base.x, age, slotIndex);
 
         if (engine.attackType === 'projectile' && engine.projectile) {
+          const target = this.selectTarget(state, base.x, enemyOwner, engine);
+          if (!target) continue;
           this.fireProjectile(state, owner, mount, target, engine);
           slot.cooldownRemaining = engine.fireIntervalSec;
+          consumeCastMana();
           continue;
         }
 
         if (engine.attackType === 'chain_lightning' && engine.chainLightning) {
           this.castChainLightning(state, owner, base.x, mount, engine);
           slot.cooldownRemaining = engine.chainLightning.cooldownSeconds;
+          consumeCastMana();
           continue;
         }
 
         if (engine.attackType === 'artillery_barrage' && engine.artillery) {
           this.castArtilleryBarrage(state, owner, base.x, mount, engine);
           slot.cooldownRemaining = engine.artillery.cooldownSeconds;
+          consumeCastMana();
           continue;
         }
 
@@ -71,13 +126,47 @@ export class TurretSystem {
           const casted = this.castOilPour(state, owner, base.x, engine);
           if (casted) {
             slot.cooldownRemaining = engine.oil.cooldownSeconds;
+            consumeCastMana();
           }
           continue;
         }
 
         if (engine.attackType === 'drone_swarm' && engine.drones) {
+          const target = this.selectTarget(state, base.x, enemyOwner, engine);
+          if (!target) continue;
           this.launchDroneSwarm(state, owner, mount, target, engine);
           slot.cooldownRemaining = engine.drones.cooldownSeconds;
+          consumeCastMana();
+          continue;
+        }
+
+        if (engine.attackType === 'flamethrower' && engine.flamethrower) {
+          const casted = this.castFlamethrowerBurst(state, owner, mount, engine);
+          if (casted) {
+            slot.cooldownRemaining = engine.flamethrower.cooldownSeconds;
+            consumeCastMana();
+          }
+          continue;
+        }
+
+        if (engine.attackType === 'laser_pulse' && engine.laserPulse) {
+          const casted = this.castLaserPulse(state, owner, mount, engine);
+          if (casted) {
+            slot.cooldownRemaining = engine.laserPulse.cooldownSeconds;
+            consumeCastMana();
+          }
+          continue;
+        }
+
+        if (engine.attackType === 'mana_siphon' && engine.manaSiphon) {
+          const casted = this.castManaSiphon(state, owner, slotIndex, base.x, mount, engine);
+          if (casted) {
+            slot.cooldownRemaining = Math.max(
+              0.05,
+              Math.min(engine.fireIntervalSec, 1 / Math.max(1, engine.manaSiphon.ticksPerSecond))
+            );
+            consumeCastMana();
+          }
         }
       }
     };
@@ -179,8 +268,9 @@ export class TurretSystem {
     const projectile = engine.projectile;
     if (!projectile) return;
 
-    const dx = target.transform.x - mount.x;
-    const dy = target.transform.laneY - mount.y;
+    const muzzle = this.getProjectileMuzzleOrigin(owner, mount, target, engine);
+    const dx = target.transform.x - muzzle.x;
+    const dy = target.transform.laneY - muzzle.y;
     const distanceToTarget = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
     const speed = Math.max(1, projectile.speed);
     const curvature = projectile.curvature ?? 0;
@@ -198,8 +288,8 @@ export class TurretSystem {
     state.projectiles.push({
       id: state.nextEntityId++,
       owner,
-      x: mount.x,
-      y: mount.y,
+      x: muzzle.x,
+      y: muzzle.y,
       vx,
       vy,
       curvature,
@@ -218,8 +308,8 @@ export class TurretSystem {
       state.vfx.push({
         id: state.nextVfxId++,
         type: 'ability_cast',
-        x: mount.x,
-        y: -mount.y,
+        x: muzzle.x,
+        y: -muzzle.y,
         age: owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age,
         lifeMs: 220,
         data: {
@@ -445,29 +535,290 @@ export class TurretSystem {
   ): void {
     const config = engine.drones;
     if (!config) return;
+    // One drone per cycle; cadence is controlled by cooldownSeconds (requested 4.8s).
+    const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+    const direction = owner === 'PLAYER' ? 1 : -1;
+    const inRangeTargets = Array.from(state.entities.values()).filter(
+      (entity) => entity.owner === targetOwner && entity.health.current > 0 && Math.abs(entity.transform.x - mount.x) <= engine.range
+    );
+    const farthestX = inRangeTargets.length > 0
+      ? direction === 1
+        ? Math.max(...inRangeTargets.map((entity) => entity.transform.x))
+        : Math.min(...inRangeTargets.map((entity) => entity.transform.x))
+      : target.transform.x;
+    const overflyPadding = Math.max(1.2, config.overflyPadding ?? 2.4);
+    const overflyX = farthestX + direction * overflyPadding;
+    const cruiseY = Math.max(6, config.cruiseHeight ?? 8.5);
+    const cruiseSpeed = Math.max(10, config.droneSpeed);
+    const diveSpeed = Math.max(16, cruiseSpeed * (config.diveSpeedMultiplier ?? 1.9));
+    const launchVy = Math.max(-4, Math.min(14, (cruiseY - mount.y) * 4));
 
-    for (let i = 0; i < config.droneCount; i++) {
-      const jitterY = (Math.random() - 0.5) * 1.4;
-      const dx = target.transform.x - mount.x;
-      const dy = target.transform.laneY + jitterY - mount.y;
-      const distance = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
-      const speed = Math.max(8, config.droneSpeed);
+    state.projectiles.push({
+      id: state.nextEntityId++,
+      owner,
+      x: mount.x,
+      y: mount.y,
+      vx: direction * cruiseSpeed,
+      vy: launchVy,
+      damage: config.droneDamage,
+      lifeMs: 6500,
+      splashRadius: Math.max(1.5, config.explosionRadius ?? 5),
+      radiusPx: 7,
+      color: '#93c5fd',
+      glowColor: 'rgba(147,197,253,0.9)',
+      trailAlpha: 0.22,
+      targetEntityId: target.entityId,
+      droneState: {
+        phase: 'cruise',
+        sourceX: mount.x,
+        maxRange: Math.max(2, engine.range),
+        cruiseY,
+        overflyX,
+        cruiseSpeed,
+        diveSpeed,
+        retargetOnKill: config.retargetOnKill ?? true,
+      },
+    });
+  }
 
-      state.projectiles.push({
-        id: state.nextEntityId++,
-        owner,
-        x: mount.x,
-        y: mount.y,
-        vx: (dx / distance) * speed,
-        vy: (dy / distance) * speed,
-        damage: config.droneDamage,
-        lifeMs: 1800,
-        radiusPx: 5,
-        color: '#93c5fd',
-        glowColor: 'rgba(147,197,253,0.85)',
-        trailAlpha: 0.25,
-      });
+  private getManaSiphonTarget(
+    state: GameState,
+    owner: 'PLAYER' | 'ENEMY',
+    slotIndex: number,
+    baseX: number,
+    targetOwner: 'PLAYER' | 'ENEMY',
+    engine: TurretEngineDef
+  ): Entity | null {
+    const slotKey = `${owner}:${slotIndex}`;
+    const lockedId = this.siphonTargetsBySlot.get(slotKey);
+    if (typeof lockedId === 'number') {
+      const locked = state.entities.get(lockedId);
+      if (
+        locked &&
+        locked.owner === targetOwner &&
+        locked.health.current > 0 &&
+        Math.abs(locked.transform.x - baseX) <= engine.range
+      ) {
+        return locked;
+      }
+      this.siphonTargetsBySlot.delete(slotKey);
     }
+
+    let best: Entity | null = null;
+    let bestScore = -Infinity;
+    for (const entity of state.entities.values()) {
+      if (entity.owner !== targetOwner || entity.health.current <= 0) continue;
+      const dist = Math.abs(entity.transform.x - baseX);
+      if (dist > engine.range) continue;
+      const score = entity.health.current + entity.health.max * 0.2 + entity.attack.damage * Math.max(0.2, entity.attack.speed) * 8;
+      if (score > bestScore) {
+        bestScore = score;
+        best = entity;
+      }
+    }
+
+    if (best) {
+      this.siphonTargetsBySlot.set(slotKey, best.entityId);
+    }
+
+    return best;
+  }
+
+  private castManaSiphon(
+    state: GameState,
+    owner: 'PLAYER' | 'ENEMY',
+    slotIndex: number,
+    baseX: number,
+    mount: { x: number; y: number },
+    engine: TurretEngineDef
+  ): boolean {
+    const config = engine.manaSiphon;
+    if (!config) return false;
+
+    const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+    const target = this.getManaSiphonTarget(state, owner, slotIndex, baseX, targetOwner, engine);
+    if (!target) return false;
+
+    const protectionMultiplier = CombatUtils.getTowerProtectionMultiplier(target, state);
+    const tickDamage = Math.max(0, config.tickDamage);
+    const actualDamage = tickDamage * protectionMultiplier;
+    if (actualDamage <= 0) return false;
+
+    target.health.current -= actualDamage;
+    const ownerEcon = owner === 'PLAYER' ? state.economy.player : state.economy.enemy;
+    ownerEcon.mana += actualDamage * Math.max(0, config.manaLeechFraction);
+
+    if (owner === 'PLAYER') state.stats.damageDealt.player += actualDamage;
+    else state.stats.damageDealt.enemy += actualDamage;
+
+    if (target.health.current <= 0) {
+      this.siphonTargetsBySlot.delete(`${owner}:${slotIndex}`);
+    }
+
+    state.vfx.push({
+      id: state.nextVfxId++,
+      type: 'ability_cast',
+      x: mount.x,
+      y: -mount.y,
+      age: owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age,
+      lifeMs: 220,
+      data: {
+        turretAbility: 'mana_siphon',
+        startX: mount.x,
+        startY: -mount.y,
+        endX: target.transform.x,
+        endY: target.transform.laneY,
+        durationMs: 220,
+        laneThickness: config.laneThickness ?? 2.2,
+        waveAmplitude: config.waveAmplitude ?? 7,
+      },
+    });
+
+    return true;
+  }
+
+  private castFlamethrowerBurst(
+    state: GameState,
+    owner: 'PLAYER' | 'ENEMY',
+    mount: { x: number; y: number },
+    engine: TurretEngineDef
+  ): boolean {
+    const config = engine.flamethrower;
+    if (!config) return false;
+
+    const direction: 1 | -1 = owner === 'PLAYER' ? 1 : -1;
+    const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+    const range = engine.range;
+    const width = Math.max(1, config.width ?? 2.6);
+    const primaryTarget = this.selectTarget(state, mount.x, targetOwner, engine);
+    if (!primaryTarget) return false;
+    const primaryForward = (primaryTarget.transform.x - mount.x) * direction;
+    if (primaryForward < -0.4 || primaryForward > range) return false;
+    const aimLaneY = primaryTarget.transform.laneY;
+
+    let totalDamage = 0;
+    let hitCount = 0;
+    let hasEnemyInCone = false;
+
+    for (const entity of state.entities.values()) {
+      if (entity.owner !== targetOwner || entity.health.current <= 0) continue;
+      const dx = (entity.transform.x - mount.x) * direction;
+      if (dx < -0.4 || dx > range) continue;
+      if (Math.abs(entity.transform.laneY - aimLaneY) > width) continue;
+      hasEnemyInCone = true;
+      const protectionMultiplier = CombatUtils.getTowerProtectionMultiplier(entity, state);
+      const damage = config.damage * protectionMultiplier;
+      entity.health.current -= damage;
+      totalDamage += damage;
+      hitCount++;
+    }
+
+    // Do not cast or consume mana when no enemy units are in actual flamethrower coverage.
+    if (!hasEnemyInCone) return false;
+
+    const enemyBase = owner === 'PLAYER' ? state.enemyBase : state.playerBase;
+    const baseForward = (enemyBase.x - mount.x) * direction;
+    if (baseForward >= 0 && baseForward <= range) {
+      const baseDamage = config.damage * 0.65;
+      const baseHit = CombatUtils.applyDamageToBase(state, targetOwner, baseDamage);
+      if (baseHit.actualDamage > 0) {
+        totalDamage += baseHit.actualDamage;
+        hitCount++;
+      }
+    }
+
+    if (totalDamage > 0) {
+      if (owner === 'PLAYER') state.stats.damageDealt.player += totalDamage;
+      else state.stats.damageDealt.enemy += totalDamage;
+    }
+
+    state.vfx.push({
+      id: state.nextVfxId++,
+      type: 'flamethrower',
+      x: mount.x + direction * 0.75,
+      y: -mount.y,
+      age: owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age,
+      lifeMs: Math.max(360, config.cooldownSeconds * 550),
+      data: {
+        range,
+        direction,
+        unitId: 'turret_flamethrower',
+        sourceType: 'turret',
+        targetLaneY: aimLaneY,
+      },
+    });
+
+    return hitCount > 0;
+  }
+
+  private castLaserPulse(
+    state: GameState,
+    owner: 'PLAYER' | 'ENEMY',
+    mount: { x: number; y: number },
+    engine: TurretEngineDef
+  ): boolean {
+    const config = engine.laserPulse;
+    if (!config) return false;
+
+    const direction: 1 | -1 = owner === 'PLAYER' ? 1 : -1;
+    const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+    const range = engine.range;
+    const laneThickness = Math.max(1.2, config.laneThickness ?? 2.4);
+    const beamWidth = Math.max(0.8, config.beamWidth ?? 1.8);
+    const pulseDurationMs = Math.max(260, config.pulseDurationMs ?? 500);
+    let totalDamage = 0;
+    let hitCount = 0;
+    let farthestHitX = mount.x + direction * range;
+
+    for (const entity of state.entities.values()) {
+      if (entity.owner !== targetOwner || entity.health.current <= 0) continue;
+      const dx = (entity.transform.x - mount.x) * direction;
+      if (dx < 0 || dx > range) continue;
+      if (Math.abs(entity.transform.laneY) > laneThickness) continue;
+      const protectionMultiplier = CombatUtils.getTowerProtectionMultiplier(entity, state);
+      const damage = config.damage * protectionMultiplier;
+      entity.health.current -= damage;
+      totalDamage += damage;
+      hitCount++;
+      farthestHitX = direction === 1 ? Math.max(farthestHitX, entity.transform.x) : Math.min(farthestHitX, entity.transform.x);
+    }
+
+    const enemyBase = owner === 'PLAYER' ? state.enemyBase : state.playerBase;
+    const baseForward = (enemyBase.x - mount.x) * direction;
+    if (baseForward >= 0 && baseForward <= range) {
+      const baseDamage = config.damage * 0.55;
+      const baseHit = CombatUtils.applyDamageToBase(state, targetOwner, baseDamage);
+      if (baseHit.actualDamage > 0) {
+        totalDamage += baseHit.actualDamage;
+        hitCount++;
+      }
+      farthestHitX = enemyBase.x;
+    }
+
+    if (totalDamage > 0) {
+      if (owner === 'PLAYER') state.stats.damageDealt.player += totalDamage;
+      else state.stats.damageDealt.enemy += totalDamage;
+    }
+
+    state.vfx.push({
+      id: state.nextVfxId++,
+      type: 'ability_cast',
+      x: mount.x + direction * 0.75,
+      y: -mount.y,
+      age: owner === 'PLAYER' ? state.progression.player.age : state.progression.enemy.age,
+      lifeMs: pulseDurationMs,
+      data: {
+        turretAbility: 'laser_pulse',
+        startX: mount.x + direction * 0.75,
+        startY: -mount.y,
+        endX: farthestHitX,
+        endY: 0,
+        beamWidth,
+        durationMs: pulseDurationMs,
+      },
+    });
+
+    return hitCount > 0;
   }
 
   public static getTurretPosition(baseX: number, age: number, slotIndex: number): { x: number; y: number } {

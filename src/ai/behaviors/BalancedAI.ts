@@ -115,12 +115,92 @@ export class BalancedAI implements IAIBehavior {
     return rawDps * dpsWeight + dpsPerGold * efficiencyWeight + engine.range * rangeWeight + protectionValue;
   }
 
-  private getTargetSlotsByAge(age: number, gameTime: number): number {
-    if (age <= 2) return 1;
-    if (age <= 4) return 2;
-    if (age === 5) return 3;
-    if (gameTime < 90) return 3;
+  private getTargetSlotsByState(state: GameStateSnapshot): number {
+    // Slot 2 at Age 3, slot 3 at Age 5, slot 4 late in Age 6 with mana gate.
+    if (state.enemyAge < 3) return 1;
+    if (state.enemyAge < 5) return 2;
+    if (state.enemyAge < 6) return 3;
+    if (state.enemyMana < 5000) return 3;
+    if (state.gameTime < 150) return 3;
     return 4;
+  }
+
+  private getSlotUnlockGateReason(state: GameStateSnapshot, unlocked: number): string {
+    if (unlocked >= 4) return 'max slots reached';
+    if (unlocked === 1 && state.enemyAge < 3) return 'slot 2 unlocks at age 3';
+    if (unlocked === 2 && state.enemyAge < 5) return 'slot 3 unlocks at age 5';
+    if (unlocked === 3) {
+      if (state.enemyAge < 6) return 'slot 4 unlocks at age 6';
+      if (state.enemyMana < 5000) return 'slot 4 requires 5000 mana';
+      if (state.gameTime < 150) return 'slot 4 is delayed to late age 6';
+    }
+    return '';
+  }
+
+  private isMultiTargetEngine(engine: TurretEngineDef): boolean {
+    if (engine.attackType === 'chain_lightning' || engine.attackType === 'artillery_barrage' || engine.attackType === 'oil_pour') {
+      return true;
+    }
+    if (engine.attackType !== 'projectile' || !engine.projectile) return false;
+    const p = engine.projectile;
+    return (p.splashRadius ?? 0) > 0 || !!p.splitOnImpact || (p.pierceCount ?? 0) >= 2;
+  }
+
+  private getSingleTargetPressure(engine: TurretEngineDef): number {
+    if (engine.attackType !== 'projectile' || !engine.projectile) return 0;
+    const p = engine.projectile;
+    const direct = p.damage / Math.max(0.1, engine.fireIntervalSec);
+    const pierceBonus = 1 + Math.min(0.6, (p.pierceCount ?? 0) * 0.2);
+    const antiSplashPenalty = this.isMultiTargetEngine(engine) ? 0.88 : 1.0;
+    return direct * pierceBonus * antiSplashPenalty;
+  }
+
+  private analyzeTurretRiskProfile(state: GameStateSnapshot): {
+    swarmPressure: boolean;
+    heavyPressure: boolean;
+    incomingPressure: boolean;
+  } {
+    const playerUnits = state.playerUnits ?? [];
+    const unitCount = playerUnits.length;
+    if (unitCount === 0) {
+      return {
+        swarmPressure: false,
+        heavyPressure: false,
+        incomingPressure: state.playerUnitsNearEnemyBase > 0,
+      };
+    }
+
+    const avgHealth = playerUnits.reduce((sum, u) => sum + u.health, 0) / unitCount;
+    const highHpUnits = playerUnits.filter((u) => u.health >= 320).length;
+    const swarmPressure = unitCount >= 6 || (unitCount >= 4 && avgHealth <= 160);
+    const heavyPressure = highHpUnits >= 2 || (unitCount >= 3 && avgHealth >= 260);
+    const incomingPressure = state.playerUnitsNearEnemyBase >= 2 || state.playerUnitCount > state.enemyUnitCount + 3;
+    return { swarmPressure, heavyPressure, incomingPressure };
+  }
+
+  private scoreTurretEngineForRisk(
+    engine: TurretEngineDef,
+    threat: ThreatLevel,
+    risk: { swarmPressure: boolean; heavyPressure: boolean; incomingPressure: boolean }
+  ): number {
+    let score = this.scoreTurretEngine(engine, threat);
+    const multiTarget = this.isMultiTargetEngine(engine);
+
+    if (risk.swarmPressure) {
+      score *= multiTarget ? 1.32 : 0.86;
+    }
+    if (risk.heavyPressure) {
+      const singleTargetPressure = this.getSingleTargetPressure(engine);
+      if (singleTargetPressure > 0) {
+        score += singleTargetPressure * 1.2;
+      }
+      if (!multiTarget) score *= 1.18;
+    }
+    if (risk.incomingPressure) {
+      score += (1 - engine.protectionMultiplier) * 2200 + engine.range * 6;
+    }
+
+    return score;
   }
 
   private getEnemyDiscountedCost(baseCost: number, difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER'): number {
@@ -159,7 +239,7 @@ export class BalancedAI implements IAIBehavior {
 
     const unlocked = state.enemyTurretSlotsUnlocked ?? 1;
     const slots = state.enemyTurretSlots ?? [];
-    const targetSlots = this.getTargetSlotsByAge(state.enemyAge, state.gameTime);
+    const targetSlots = this.getTargetSlotsByState(state);
     const availableEngines = Object.values(getTurretEnginesForAge(state.enemyAge));
 
     if (this.pendingTurretReplacement) {
@@ -168,8 +248,13 @@ export class BalancedAI implements IAIBehavior {
         plan.push(`Turrets: replace slot ${this.pendingTurretReplacement.slotIndex + 1} with ${pendingDef.name}.`);
       }
     } else if (unlocked < targetSlots) {
-      const nextSlotCost = getTurretSlotUnlockCost(unlocked);
+      const nextSlotCost = this.getEnemyDiscountedCost(getTurretSlotUnlockCost(unlocked), state.difficulty);
       plan.push(`Turrets: unlock slot ${unlocked + 1}/${targetSlots} for ${nextSlotCost}g.`);
+    } else if (unlocked < 4) {
+      const gate = this.getSlotUnlockGateReason(state, unlocked);
+      if (gate) {
+        plan.push(`Turrets: hold at ${unlocked} slots (${gate}).`);
+      }
     } else {
       const emptySlot = slots.find((s) => s.slotIndex < unlocked && !s.turretId);
       if (emptySlot && availableEngines.length > 0) {
@@ -225,7 +310,8 @@ export class BalancedAI implements IAIBehavior {
     const slots = state.enemyTurretSlots ?? [];
     const available = Object.values(getTurretEnginesForAge(state.enemyAge));
     if (available.length === 0) return null;
-    const targetSlots = this.getTargetSlotsByAge(state.enemyAge, state.gameTime);
+    const targetSlots = this.getTargetSlotsByState(state);
+    const risk = this.analyzeTurretRiskProfile(state);
     const hasEmptyUnlockedSlot = slots.some((s) => s.slotIndex < unlocked && !s.turretId);
     const coreDefenseNeeds =
       unlocked < targetSlots ||
@@ -242,7 +328,7 @@ export class BalancedAI implements IAIBehavior {
       this.getEnemyDiscountedCost(def.cost, state.difficulty) <= turretGoldBudget &&
       (def.manaCost ?? 0) <= state.enemyMana;
 
-    const sortedByPower = [...available].sort((a, b) => this.scoreTurretEngine(b, threat) - this.scoreTurretEngine(a, threat));
+    const sortedByPower = [...available].sort((a, b) => this.scoreTurretEngineForRisk(b, threat, risk) - this.scoreTurretEngineForRisk(a, threat, risk));
 
     if (this.pendingTurretReplacement) {
       const slot = slots.find((s) => s.slotIndex === this.pendingTurretReplacement!.slotIndex);
@@ -259,16 +345,27 @@ export class BalancedAI implements IAIBehavior {
       this.pendingTurretReplacement = null;
     }
 
+    const installedEngines = slots
+      .filter((s) => s.slotIndex < unlocked && !!s.turretId)
+      .map((s) => getTurretEngineDef(s.turretId!))
+      .filter((s): s is TurretEngineDef => !!s);
+    const hasMultiTargetCoverage = installedEngines.some((e) => this.isMultiTargetEngine(e));
+
     // Fill empty slots first with strongest affordable engine.
     for (let i = 0; i < unlocked; i++) {
       const slot = slots.find((s) => s.slotIndex === i);
       if (!slot || slot.turretId) continue;
-      const pick = sortedByPower.find((def) => canAffordEngine(def));
+      const affordable = sortedByPower.filter((def) => canAffordEngine(def));
+      const pick =
+        (risk.swarmPressure && !hasMultiTargetCoverage
+          ? affordable.find((def) => this.isMultiTargetEngine(def))
+          : null) ??
+        affordable[0];
       if (pick) {
         return {
           action: 'BUY_TURRET_ENGINE',
           parameters: { slotIndex: i, turretId: pick.id },
-          reasoning: `Mount ${pick.name} on empty slot ${i + 1}`,
+          reasoning: `Mount ${pick.name} on empty slot ${i + 1} (${risk.swarmPressure ? 'anti-swarm' : risk.heavyPressure ? 'anti-heavy' : 'balanced'})`,
         };
       }
       return null;
@@ -286,7 +383,7 @@ export class BalancedAI implements IAIBehavior {
         if (!slot?.turretId) continue;
         const def = getTurretEngineDef(slot.turretId);
         if (!def) continue;
-        const score = this.scoreTurretEngine(def, threat);
+        const score = this.scoreTurretEngineForRisk(def, threat, risk);
         if (score < weakestScore) {
           weakestScore = score;
           weakestSlotIndex = i;
@@ -294,7 +391,12 @@ export class BalancedAI implements IAIBehavior {
         }
       }
 
-      const betterOption = sortedByPower.find((def) => canAffordEngine(def) && this.scoreTurretEngine(def, threat) > weakestScore * 1.2 && def.id !== weakestTurretId);
+      const betterOption = sortedByPower.find(
+        (def) =>
+          canAffordEngine(def) &&
+          this.scoreTurretEngineForRisk(def, threat, risk) > weakestScore * 1.2 &&
+          def.id !== weakestTurretId
+      );
       if (weakestSlotIndex >= 0 && betterOption) {
         this.pendingTurretReplacement = { slotIndex: weakestSlotIndex, turretId: betterOption.id };
         return {
@@ -309,7 +411,7 @@ export class BalancedAI implements IAIBehavior {
     if (unlocked < targetSlots) {
       const filledUnlocked = slots.filter((slot) => slot.slotIndex < unlocked && !!slot.turretId).length;
       if (filledUnlocked >= Math.max(1, unlocked)) {
-        const nextCost = getTurretSlotUnlockCost(unlocked);
+        const nextCost = this.getEnemyDiscountedCost(getTurretSlotUnlockCost(unlocked), state.difficulty);
         if (turretGoldBudget >= nextCost) {
           return {
             action: 'UPGRADE_TURRET_SLOTS',

@@ -1,5 +1,4 @@
 ﻿<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
-  <rect x="0" y="92" width="160" height="28" fill="#1f2937"/>
   <rect x="18" y="70" width="124" height="20" rx="8" fill="#7c3f00" stroke="#3b1d00" stroke-width="4"/>
   <rect x="36" y="48" width="88" height="18" rx="9" fill="#b45309" stroke="#3b1d00" stroke-width="4"/>
   <ellipse cx="50" cy="57" rx="10" ry="7" fill="#fff6d5" stroke="#7c5f2a" stroke-width="2"/>

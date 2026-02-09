@@ -200,11 +200,11 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
 
   // ===== AGE 4: Steel Age =====
   steel_tank: {
-    cost: 200,
+    cost: 250,
     role: ['TANK', 'FRONTLINE'],
-    health: 550,
-    damage: 48,
-    speed: 4.5,
+    health: 620,
+    damage: 60,
+    speed: 4.6,
     range: 1,
     trainingMs: 5000,
     age: 4,
@@ -264,9 +264,9 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
 
   // ===== AGE 5: Industrial Age =====
   gunner: {
-    cost: 160,
+    cost: 170,
     role: ['RANGED_DPS'],
-    health: 300,
+    health: 350,
     damage: 9,
     speed: 6.8,
     range: 9,
@@ -289,7 +289,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   energy_shield: {
     cost: 180,
-    role: ['TANK', 'FRONTLINE', 'SUPPORT'],
+    role: ['TANK', 'FRONTLINE'],
     manaCost: 60,
     health: 1200,
     damage: 8,
@@ -314,16 +314,17 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
     skill: { type: 'flamethrower', manaCost: 1, cooldownMs: 200, power: 8, range: 8 }, 
   },
   steam_mech: {
-    cost: 280,
+    cost: 360,
     role: ['TANK', 'FRONTLINE', 'MELEE_DPS'],
     manaCost: 70,
-    health: 800,
-    damage: 70,
-    speed: 4.5,
+    health: 950,
+    damage: 80,
+    speed: 4.8,
     range: 1,
     trainingMs: 5500,
     age: 5,
-    skill: { type: 'direct', manaCost: 18, cooldownMs: 12000, power: 160, range: 2 },
+    visualScale: 1.2,
+    skill: { type: 'direct', manaCost: 18, cooldownMs: 12000, power: 160, range: 3 },
   },
   sniper: {
     cost: 130,
@@ -341,7 +342,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
     cost: 200,
     role: ['SUPPORT', 'RANGED_DPS'],
     manaCost: 45,
-    health: 320,
+    health: 360,
     damage: 42,
     speed: 6.5,
     range: 7,
