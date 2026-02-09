@@ -1,4 +1,4 @@
-import { CoreLoop } from './core/CoreLoop';
+﻿import { CoreLoop } from './core/CoreLoop';
 import { PRNG } from './core/PRNG';
 import { createSnapshot } from './core/World';
 
@@ -49,7 +49,7 @@ export { UNIT_DEFS };
 // OLD UNIT_DEFS REMOVED - All units now imported from config/units.ts
 
 export interface GameConfig {
-  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER';
+  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER';
   startingGold: number;
   startingMana: number;
   goldIncomeBase: number;
@@ -809,14 +809,7 @@ export class GameEngine {
         if (unitType) {
           const unit = UNIT_DEFS[unitType];
           if (!unit) return;
-          
-          const goldCost = unit.cost || 0;
-          const manaCost = unit.manaCost || 0;
-          
-          if (this.state.economy.enemy.gold >= goldCost && 
-              this.state.economy.enemy.mana >= manaCost) {
-            this.queueUnit('ENEMY', unitType);
-          }
+          this.queueUnit('ENEMY', unitType);
         }
         break;
         
@@ -829,20 +822,14 @@ export class GameEngine {
         break;
         
       case 'UPGRADE_TURRET_SLOTS':
-        if (!this.queueTurretSlotUpgrade('ENEMY')) {
-          this.autoManageEnemyTurrets();
-        }
+        this.queueTurretSlotUpgrade('ENEMY');
         break;
 
       case 'BUY_TURRET_ENGINE': {
         const slotIndex = (decision.parameters as any)?.slotIndex;
         const turretId = (decision.parameters as any)?.turretId;
         if (typeof slotIndex === 'number' && typeof turretId === 'string') {
-          if (!this.queueTurretEngine('ENEMY', slotIndex, turretId)) {
-            this.autoManageEnemyTurrets();
-          }
-        } else {
-          this.autoManageEnemyTurrets();
+          this.queueTurretEngine('ENEMY', slotIndex, turretId);
         }
         break;
       }
@@ -850,9 +837,7 @@ export class GameEngine {
       case 'SELL_TURRET_ENGINE': {
         const slotIndex = (decision.parameters as any)?.slotIndex;
         if (typeof slotIndex === 'number') {
-          if (!this.sellTurretEngine('ENEMY', slotIndex)) {
-            this.autoManageEnemyTurrets();
-          }
+          this.sellTurretEngine('ENEMY', slotIndex);
         }
         break;
       }
@@ -864,39 +849,14 @@ export class GameEngine {
             for (let i = 0; i < composition.count; i++) {
               const unit = UNIT_DEFS[composition.unitId];
               if (!unit) continue;
-              
-              const goldCost = unit.cost || 0;
-              const manaCost = unit.manaCost || 0;
-              
-              if (this.state.economy.enemy.gold >= goldCost && 
-                  this.state.economy.enemy.mana >= manaCost) {
-                this.queueUnit('ENEMY', composition.unitId);
-              }
+              this.queueUnit('ENEMY', composition.unitId);
             }
           }
         }
         break;
         
       case 'WAIT':
-        // If pressure is high while waiting, opportunistically improve turret defenses.
-        {
-          const playerUnits = this.state.entities.size > 0
-            ? Array.from(this.state.entities.values()).filter((e) => e.owner === 'PLAYER').length
-            : 0;
-          const enemyUnits = this.state.entities.size > 0
-            ? Array.from(this.state.entities.values()).filter((e) => e.owner === 'ENEMY').length
-            : 0;
-          const playerNearEnemyBase = Array.from(this.state.entities.values()).filter(
-            (e) => e.owner === 'PLAYER' && Math.abs(e.transform.x - this.state.enemyBase.x) < 15
-          ).length;
-          const severePressure =
-            playerUnits >= Math.max(6, enemyUnits * 4) ||
-            playerNearEnemyBase >= 3 ||
-            this.state.enemyBase.health < this.state.enemyBase.maxHealth * 0.7;
-          if (severePressure) {
-            this.autoManageEnemyTurrets();
-          }
-        }
+        // Intentionally no fallback spending here; behavior logic owns reserve-aware decisions.
         break;
 
       case 'REPAIR_BASE':
@@ -1431,14 +1391,14 @@ export class GameEngine {
       };
       
       localStorage.setItem(GameEngine.SAVE_KEY, JSON.stringify(saveData));
-      console.log('✅ Game saved successfully:', {
+      console.log('[SAVE] Game saved successfully:', {
         entities: entitiesArray.length,
         playerGold: this.state.economy.player.gold,
         playerAge: this.state.progression.player.age,
         battlefieldWidth: this.state.battlefield.width,
       });
     } catch (error) {
-      console.error('❌ Failed to save game:', error);
+      console.error('[ERROR] Failed to save game:', error);
       throw error;
     }
   }
@@ -1459,7 +1419,7 @@ export class GameEngine {
       
       // Validate save data version (future-proofing)
       if (!saveData.version) {
-        console.warn('⚠️ Legacy save format detected');
+        console.warn('[WARN] Legacy save format detected');
       }
       
       // Restore config first - critical for proper initialization
@@ -1487,11 +1447,11 @@ export class GameEngine {
       
       // Ensure bases exist with valid positions
       if (!loadedState.playerBase) {
-        console.error('❌ Invalid save: missing playerBase');
+        console.error('[ERROR] Invalid save: missing playerBase');
         return false;
       }
       if (!loadedState.enemyBase) {
-        console.error('❌ Invalid save: missing enemyBase');
+        console.error('[ERROR] Invalid save: missing enemyBase');
         return false;
       }
       
@@ -1554,7 +1514,7 @@ export class GameEngine {
       // This fixes the "invisible units" bug if save contains units not in initial sprite list
       this.ensureUnitSpritesLoaded();
 
-      console.log('✅ Game loaded successfully:', {
+      console.log('[LOAD] Game loaded successfully:', {
         entities: this.state.entities.size,
         playerGold: this.state.economy.player.gold,
         playerAge: this.state.progression.player.age,
@@ -1565,7 +1525,7 @@ export class GameEngine {
       
       return true;
     } catch (error) {
-      console.error('❌ Failed to load game:', error);
+      console.error('[ERROR] Failed to load game:', error);
       return false;
     }
   }
@@ -1582,6 +1542,7 @@ export class GameEngine {
    */
   static deleteSavedGame(): void {
     localStorage.removeItem(GameEngine.SAVE_KEY);
-    console.log('🗑️ Saved game deleted');
+    console.log('ðŸ—‘ï¸ Saved game deleted');
   }
 }
+

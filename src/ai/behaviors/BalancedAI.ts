@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Balanced AI Behavior
  * A well-rounded strategy that adapts to situations
  * Balances economy, military, and aggression
@@ -41,6 +41,7 @@ export class BalancedAI implements IAIBehavior {
   private lastRecruitmentDecision: string = ""; // DEBUG: Store detailed reasoning
   private lastRejectedUnits: string = ""; // DEBUG: Store rejection reasons
   private pendingTurretReplacement: { slotIndex: number; turretId: string } | null = null;
+  private consecutiveTurretDecisions = 0;
 
   getName(): string {
     return this.name;
@@ -66,6 +67,7 @@ export class BalancedAI implements IAIBehavior {
           ...this.debugMetrics,
           lastAgeUp: this.lastAgeUpTime.toFixed(1),
           pendingTurretReplacement: this.pendingTurretReplacement,
+          consecutiveTurretDecisions: this.consecutiveTurretDecisions,
           // Persistable State (Raw Values)
           _lastAgeUpTime: this.lastAgeUpTime,
           _lastStrategySwitch: this.lastStrategySwitch,
@@ -95,6 +97,9 @@ export class BalancedAI implements IAIBehavior {
       }
       if (params.pendingTurretReplacement) {
           this.pendingTurretReplacement = params.pendingTurretReplacement;
+      }
+      if (typeof params.consecutiveTurretDecisions === 'number') {
+          this.consecutiveTurretDecisions = Math.max(0, Math.floor(params.consecutiveTurretDecisions));
       }
   }
   
@@ -204,17 +209,18 @@ export class BalancedAI implements IAIBehavior {
     return score;
   }
 
-  private getEnemyDiscountedCost(baseCost: number, difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER'): number {
+  private getEnemyDiscountedCost(baseCost: number, difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER'): number {
     let finalCost = baseCost;
     if (difficulty === 'MEDIUM') finalCost *= 0.8;
     else if (difficulty === 'HARD') finalCost *= 0.65;
+    else if (difficulty === 'SMART') finalCost *= 0.8;
     else if (difficulty === 'CHEATER') finalCost *= 0.5;
     return Math.floor(finalCost);
   }
 
-  private getEnemySellRefundMultiplier(difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER'): number {
+  private getEnemySellRefundMultiplier(difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER'): number {
     if (difficulty === 'EASY') return 0.5;
-    if (difficulty === 'MEDIUM') return 0.6;
+    if (difficulty === 'MEDIUM' || difficulty === 'SMART') return 0.6;
     if (difficulty === 'HARD') return 0.8;
     return 1.0;
   }
@@ -321,17 +327,8 @@ export class BalancedAI implements IAIBehavior {
     const targetSlots = this.getTargetSlotsByState(state);
     const risk = this.analyzeTurretRiskProfile(state);
     const severeOutnumbered = (state.playerUnitCount >= Math.max(7, state.enemyUnitCount * 6)) || (state.playerUnitsNearEnemyBase >= 4);
-    const hasEmptyUnlockedSlot = slots.some((s) => s.slotIndex < unlocked && !s.turretId);
-    const coreDefenseNeeds =
-      unlocked < targetSlots ||
-      hasEmptyUnlockedSlot ||
-      (state.enemyTurretInstalledCount ?? 0) < Math.max(1, unlocked);
-
-    // Keep warchest behavior for normal spending, but allow tower baseline progression
-    // to use available treasury so AI does not stall with no turret development.
-    const turretGoldBudget = coreDefenseNeeds
-      ? Math.max(spendableGold, Math.max(0, state.enemyGold - 25))
-      : spendableGold;
+    const turretGoldBudget = Math.max(0, spendableGold);
+    if (turretGoldBudget <= 0) return null;
 
     const canAffordEngine = (def: TurretEngineDef) =>
       this.getEnemyDiscountedCost(def.cost, state.difficulty) <= turretGoldBudget &&
@@ -490,6 +487,22 @@ export class BalancedAI implements IAIBehavior {
 
     // Spendable Gold: Strictly what we have above our reserves
     let spendableGold = Math.max(0, state.enemyGold - totalReserved);
+
+    type DecisionStageStatus = 'info' | 'candidate' | 'selected' | 'skipped';
+    const decisionStages: Array<{
+      stage: string;
+      status: DecisionStageStatus;
+      detail: string;
+      action?: string;
+    }> = [];
+    const pushStage = (
+      stage: string,
+      status: DecisionStageStatus,
+      detail: string,
+      action?: string
+    ) => {
+      decisionStages.push({ stage, status, detail, action });
+    };
     
     // STRICT RULE: Warchest is SACRED. 
     // It is ONLY unlocked if the base is physically dying (<25% HP AND taking damage).
@@ -506,7 +519,18 @@ export class BalancedAI implements IAIBehavior {
     if (baseCriticalScore && isBaseUnderAttackScore) {
         spendableGold = state.enemyGold; // EMERGENCY: Unlock everything to survive
         isWarchestUnlocked = true;
-    } 
+    }
+
+    pushStage(
+      '1) Strategic Assessment',
+      'info',
+      `Strategy ${this.currentStrategy}, Threat ${threat}, StrategicState ${strategicState}`
+    );
+    pushStage(
+      '2) Economy Gates',
+      'info',
+      `Gold ${Math.floor(state.enemyGold)}, Spendable ${Math.floor(spendableGold)}, Reserved ${Math.floor(Math.min(state.enemyGold, totalReserved))}, Warchest ${Math.floor(warchest)}${isWarchestUnlocked ? ' (UNLOCKED EMERGENCY)' : ''}`
+    );
     // Otherwise, spendableGold remains strictly (Gold - Reserve).
     // Even if Threat is CRITICAL, we do NOT spend the warchest. We save for the next Age to turn the tide.
     
@@ -539,6 +563,7 @@ export class BalancedAI implements IAIBehavior {
         turret: state.enemyTurretLevel,
         manaLvl: state.enemyManaLevel,
         futurePlan: this.buildForeseeablePlan(state, threat, strategicState, warchest, spendableGold),
+        decisionStages,
         nextAction: 'ANALYZE',
         nextReason: 'Evaluating priorities',
     };
@@ -546,6 +571,18 @@ export class BalancedAI implements IAIBehavior {
     const finalizeDecision = (decision: AIDecision): AIDecision => {
       this.debugMetrics.nextAction = decision.action;
       this.debugMetrics.nextReason = decision.reasoning || decision.action;
+      this.debugMetrics.decisionStages = decisionStages;
+      this.debugMetrics.decisionOutcome = {
+        action: decision.action,
+        reason: decision.reasoning || decision.action,
+      };
+      const isTurretAction =
+        decision.action === 'UPGRADE_TURRET_SLOTS' ||
+        decision.action === 'BUY_TURRET_ENGINE' ||
+        decision.action === 'SELL_TURRET_ENGINE';
+      this.consecutiveTurretDecisions = isTurretAction
+        ? Math.min(6, this.consecutiveTurretDecisions + 1)
+        : 0;
       return decision;
     };
     
@@ -565,10 +602,41 @@ export class BalancedAI implements IAIBehavior {
     const recruitmentGold = spendableGold;
     const ageUpgradeGold = state.enemyGold; // Age up can always use full gold
 
-    const turretPlanDecision = this.considerTurretSlotsAndEngines(state, threat, recruitmentGold);
-    if (turretPlanDecision) {
-      this.lastRecruitmentDecision = turretPlanDecision.reasoning || turretPlanDecision.action;
-      return finalizeDecision(turretPlanDecision);
+    const severeOutnumberedForBalance =
+      state.playerUnitCount >= Math.max(6, state.enemyUnitCount * 2) || state.playerUnitsNearEnemyBase >= 3;
+    const frontlineDeficit =
+      state.enemyUnitCount < Math.max(4, Math.floor(state.playerUnitCount * 0.55)) || state.enemyQueueSize === 0;
+    const canAffordAnyCombatUnit = Object.values(getUnitsForAge(state.enemyAge)).some((def) => {
+      if (def.cost > recruitmentGold) return false;
+      if ((def.manaCost ?? 0) > state.enemyMana) return false;
+      if (def.skill?.type === 'heal' && state.enemyUnitCount === 0) return false;
+      return true;
+    });
+    const throttleTurretPlanning =
+      severeOutnumberedForBalance &&
+      frontlineDeficit &&
+      canAffordAnyCombatUnit &&
+      this.consecutiveTurretDecisions >= 1;
+
+    if (throttleTurretPlanning) {
+      pushStage(
+        '3) Turret Planning',
+        'skipped',
+        'Throttled: preserving spendable gold for frontline unit response while outnumbered'
+      );
+    } else {
+      const turretPlanDecision = this.considerTurretSlotsAndEngines(state, threat, recruitmentGold);
+      if (turretPlanDecision) {
+        pushStage(
+          '3) Turret Planning',
+          'selected',
+          turretPlanDecision.reasoning || 'Turret plan decision selected',
+          turretPlanDecision.action
+        );
+        this.lastRecruitmentDecision = turretPlanDecision.reasoning || turretPlanDecision.action;
+        return finalizeDecision(turretPlanDecision);
+      }
+      pushStage('3) Turret Planning', 'skipped', 'No immediate turret slot/engine action selected');
     }
     
     // CONCURRENT DECISION-MAKING: Can do multiple actions per decision with randomization
@@ -588,18 +656,25 @@ export class BalancedAI implements IAIBehavior {
     // We only trigger desperate defense if we are actually under siege.
     if ((strategicState === StrategicState.DESPERATE && isPanicSituation) && this.consecutiveDefenseFrames < 5) {
       this.consecutiveDefenseFrames++;
+      pushStage(
+        '4) Emergency Defense',
+        'selected',
+        'Desperate defense forced due to panic condition',
+        'RECRUIT_UNIT'
+      );
       // Desperate defense overrides personality anyway (picks strongest unit)
       return finalizeDecision(this.desperateDefense(state, personality, threat));
     } else {
       this.consecutiveDefenseFrames = 0; // Clear after 5 frames or when not desperate
     }
+    pushStage('4) Emergency Defense', 'skipped', 'No desperate-defense override this tick');
     
     // Priority 1.5: Empty Field Defense (Smart Meat Shield)
     // If we have no units on the field and none in queue, we must maintain presence.
     // User Request: "detect that when it has nothing on its side and can recruit a single unit, it should do so... and use the best one it finds in budget for price to HP pool"
     const isFieldEmpty = state.enemyUnitCount === 0 && state.enemyQueueSize === 0;
     
-    if (isFieldEmpty && state.enemyTurretLevel > 0) {
+    if (isFieldEmpty) {
         
         // Triggers only if Player units have crossed into our territory ( > 50% field width)
         // User Request: "only does it when an enemy unit is already on the half of the battle field on its side"
@@ -629,26 +704,34 @@ export class BalancedAI implements IAIBehavior {
                 }
             }
             
-            if (bestUnitId) {
-                 const reason = `Empty Field Defense: Recruiting ${bestUnitId} (Encroaching Enemy, Best HP/Gold: ${maxHpPerGold.toFixed(1)})`;
-                 this.lastRecruitmentDecision = reason;
-                 return finalizeDecision({
-                     action: 'RECRUIT_UNIT',
+             if (bestUnitId) {
+                  const reason = `Empty Field Defense: Recruiting ${bestUnitId} (Encroaching Enemy, Best HP/Gold: ${maxHpPerGold.toFixed(1)})`;
+                  pushStage('5) Empty Field Guard', 'selected', reason, 'RECRUIT_UNIT');
+                  this.lastRecruitmentDecision = reason;
+                  return finalizeDecision({
+                      action: 'RECRUIT_UNIT',
                      parameters: { unitType: bestUnitId, priority: 'normal' }, // Normal priority
                      reasoning: reason
                  });
             }
         }
     }
+    pushStage('5) Empty Field Guard', 'skipped', 'No empty-field emergency recruit needed');
 
     // CONCURRENT PLANNING: Consider multiple actions and pick best one
     // Age up consideration (can use full gold)
     const ageDecision = this.considerAging(state, biasedPersonality, threat, warchest, ageUpgradeGold);
-    if (ageDecision) urgentActions.push(ageDecision);
+    if (ageDecision) {
+      urgentActions.push(ageDecision);
+      pushStage('6) Urgent Candidates', 'candidate', ageDecision.reasoning || 'Age-up candidate', ageDecision.action);
+    }
 
     // OP Unit consideration (Super Weapon - Cheater Only)
     const opUnitDecision = this.considerOpUnit(state, ageUpgradeGold);
-    if (opUnitDecision) urgentActions.push(opUnitDecision);
+    if (opUnitDecision) {
+      urgentActions.push(opUnitDecision);
+      pushStage('6) Urgent Candidates', 'candidate', opUnitDecision.reasoning || 'OP-unit candidate', opUnitDecision.action);
+    }
 
     // CYBER ASSASSIN MANA BONUS TRIGGER (Age 6)
     // Attempt to trigger the 6k and 12k mana bonuses by spawning an assassin in the window.
@@ -666,11 +749,13 @@ export class BalancedAI implements IAIBehavior {
         }
         
         if (shouldForceAssassin) {
-             urgentActions.push({
+             const decision = {
                  action: 'RECRUIT_UNIT',
                  parameters: { unitType: 'cyber_assassin', priority: 'emergency' },
                  reasoning: `Mana Threshold Trigger (${Math.floor(state.enemyMana)}): Deploying Cyber Assassin for Potential Bonus`
-             });
+             } as AIDecision;
+             urgentActions.push(decision);
+             pushStage('6) Urgent Candidates', 'candidate', decision.reasoning || 'Cyber assassin threshold candidate', decision.action);
         }
     }
     
@@ -678,7 +763,10 @@ export class BalancedAI implements IAIBehavior {
     // If enemy is at our gates and we have no units, spawn a cheap tank even if saving.
     if (state.enemyAge === 6 && state.playerUnitsNearEnemyBase > 0 && state.enemyUnitCount < 3) {
         const emergencyDecision = this.considerAge6Defense(state, recruitmentGold);
-        if (emergencyDecision) urgentActions.push(emergencyDecision);
+        if (emergencyDecision) {
+          urgentActions.push(emergencyDecision);
+          pushStage('6) Urgent Candidates', 'candidate', emergencyDecision.reasoning || 'Age6 emergency defense candidate', emergencyDecision.action);
+        }
     }
     
     // BASE REPAIR (Age 6 Excess Mana)
@@ -688,10 +776,11 @@ export class BalancedAI implements IAIBehavior {
          const missingHP = state.enemyBaseMaxHealth - state.enemyBaseHealth;
          if (missingHP > 10) { // Don't spam for 1 HP
              this.lastRecruitmentDecision = "Excess Mana: Repairing Base";
-             urgentActions.push({
-                 action: 'REPAIR_BASE',
-                 reasoning: `Excess Mana Repair (>20k): 500 Mana -> 200 HP`,
-             });
+              urgentActions.push({
+                  action: 'REPAIR_BASE',
+                  reasoning: `Excess Mana Repair (>20k): 500 Mana -> 200 HP`,
+              });
+              pushStage('6) Urgent Candidates', 'candidate', 'Excess mana base repair candidate', 'REPAIR_BASE');
          }
     }
 
@@ -700,13 +789,17 @@ export class BalancedAI implements IAIBehavior {
     // Calculate projected mana consumption for preferred units
     const projectedManaNeed = AIBehaviorUtils.calculateProjectedManaNeed(state, biasedPersonality);
     const manaDecision = this.considerManaUpgrade(state, biasedPersonality, threat, recruitmentGold, projectedManaNeed);
-    if (manaDecision) urgentActions.push(manaDecision);
+    if (manaDecision) {
+      urgentActions.push(manaDecision);
+      pushStage('6) Urgent Candidates', 'candidate', manaDecision.reasoning || 'Mana upgrade candidate', manaDecision.action);
+    }
     
     // If we have multiple urgent actions, pick one based on priority and randomness
     if (urgentActions.length > 0) {
       // Age up is usually highest priority (60%)
       const ageAction = urgentActions.find(a => a.action === 'AGE_UP');
       if (ageAction && Math.random() < 0.6) {
+        pushStage('6) Urgent Candidates', 'selected', ageAction.reasoning || 'Age-up priority candidate won', ageAction.action);
         this.lastAgeUpTime = state.gameTime;
         this.lastRecruitmentDecision = ageAction.reasoning || 'Age Up'; // Update reasoning
         return finalizeDecision(ageAction);
@@ -717,18 +810,25 @@ export class BalancedAI implements IAIBehavior {
       if (randomAction.action === 'AGE_UP') {
         this.lastAgeUpTime = state.gameTime;
       }
+      pushStage('6) Urgent Candidates', 'selected', randomAction.reasoning || 'Urgent candidate selected by weighted/random choice', randomAction.action);
       this.lastRecruitmentDecision = randomAction.reasoning || randomAction.action; // Update reasoning
       return finalizeDecision(randomAction);
     }
+    pushStage('6) Urgent Candidates', 'skipped', 'No urgent candidate selected this tick');
     
     // Priority: Recruit units (use flexible gold - includes partial warchest)
     const recruitDecision = this.considerRecruitment(state, biasedPersonality, threat, strategicState, recruitmentGold);
-    if (recruitDecision) return finalizeDecision(recruitDecision);
+    if (recruitDecision) {
+      pushStage('7) Recruitment', 'selected', recruitDecision.reasoning || 'Recruitment decision selected', recruitDecision.action);
+      return finalizeDecision(recruitDecision);
+    }
+    pushStage('7) Recruitment', 'skipped', 'No recruit decision selected');
     
     // Default: wait (accumulating warchest)
     const waitReason = `[${this.currentStrategy}] Accumulating warchest (${Math.floor(warchest)}g / ${state.enemyAgeCost}g for age)`;
     this.lastRecruitmentDecision = waitReason;
-    
+    pushStage('8) Wait Fallback', 'selected', waitReason, 'WAIT');
+
     return finalizeDecision({
       action: 'WAIT',
       reasoning: waitReason,
@@ -945,7 +1045,7 @@ export class BalancedAI implements IAIBehavior {
     }
     
     // Normal age up: Just do it if we have the money (Warchest logic ensures we saved for it)
-    const reason = `Age ${state.enemyAge} → ${state.enemyAge + 1} (funds secured: ${Math.floor(totalGold)}g)`;
+    const reason = `Age ${state.enemyAge} -> ${state.enemyAge + 1} (funds secured: ${Math.floor(totalGold)}g)`;
     this.lastRecruitmentDecision = reason;
     return {
       action: 'AGE_UP',
@@ -1143,6 +1243,39 @@ export class BalancedAI implements IAIBehavior {
     }
 
     if (spendableGold < adjustedThreshold) {
+      const immediatePressure =
+        state.enemyQueueSize === 0 &&
+        (state.playerUnitsNearEnemyBase > 0 || state.playerUnitCount >= state.enemyUnitCount + 3);
+
+      if (immediatePressure) {
+        const availableUnits = getUnitsForAge(state.enemyAge);
+        let reserveBreakUnit: string | null = null;
+        let bestDurabilityScore = -1;
+
+        for (const [unitType, unitDef] of Object.entries(availableUnits)) {
+          const discountedCost = this.getEnemyDiscountedCost(unitDef.cost, state.difficulty);
+          if (discountedCost > state.enemyGold) continue;
+          if ((unitDef.manaCost ?? 0) > state.enemyMana) continue;
+          if (unitDef.skill?.type === 'heal') continue;
+
+          const durabilityScore = unitDef.health / Math.max(1, discountedCost);
+          if (durabilityScore > bestDurabilityScore) {
+            bestDurabilityScore = durabilityScore;
+            reserveBreakUnit = unitType;
+          }
+        }
+
+        if (reserveBreakUnit) {
+          const reason = `Reserve break: immediate frontline response with ${reserveBreakUnit}`;
+          this.lastRecruitmentDecision = reason;
+          return {
+            action: 'RECRUIT_UNIT',
+            parameters: { unitType: reserveBreakUnit, priority: 'emergency' },
+            reasoning: reason,
+          };
+        }
+      }
+
       // Calculate what we are roughly saving for (Avg cost * multiplier)
       // Reverse engineer the minRecruitGold to explain "Why"
       const multiplier = (AI_TUNING.recruitment.difficultyStackMultipliers as any)?.[state.difficulty] || 2.0;
@@ -1876,3 +2009,4 @@ export class BalancedAI implements IAIBehavior {
     this.pendingTurretReplacement = null;
   }
 }
+

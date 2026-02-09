@@ -1,4 +1,4 @@
-# AI System Architecture - Interface for Symbolic & ML Agents
+﻿# AI System Architecture - Interface for Symbolic & ML Agents
 
 ## Overview
 
@@ -77,7 +77,7 @@ The `GameStateSnapshot` provides **complete observability** of the game:
 ### Meta (3 fields)
 - `tick` - Game tick counter
 - `gameTime` - Elapsed game time in seconds
-- `difficulty` - Difficulty level ('EASY' | 'MEDIUM' | 'HARD' | 'CHEATER')
+- `difficulty` - Difficulty level ('EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER')
 
 **Total: 36 observable state fields** - Everything needed for decision-making!
 
@@ -169,16 +169,16 @@ interface AIDecision {
 ```
 AIController (Orchestrator)
     |
-    ├── IAIBehavior (Pluggable Strategy)
-    |      ├── BalancedAI (symbolic)
-    |      ├── AggressiveAI (symbolic)
-    |      ├── DefensiveAI (symbolic)
-    |      └── PPO_AI (ML - future)
+    â”œâ”€â”€ IAIBehavior (Pluggable Strategy)
+    |      â”œâ”€â”€ BalancedAI (symbolic)
+    |      â”œâ”€â”€ AggressiveAI (symbolic)
+    |      â”œâ”€â”€ DefensiveAI (symbolic)
+    |      â””â”€â”€ PPO_AI (ML - future)
     |
-    └── GameStateSnapshot (observation)
-            ↓
+    â””â”€â”€ GameStateSnapshot (observation)
+            â†“
         AIDecision (action)
-            ↓
+            â†“
         GameEngine.executeAIDecision()
 ```
 
@@ -302,17 +302,17 @@ const mlController = AIControllerFactory.createMLBased('HARD', new PPO_AI());
 
 ```
 GameEngine.state (full internal state)
-    ↓
+    â†“
 extractGameStateForAI() 
-    ↓
+    â†“
 GameStateSnapshot (36 observable fields)
-    ↓
+    â†“
 IAIBehavior.decide()
-    ↓
+    â†“
 AIDecision
-    ↓
+    â†“
 GameEngine.executeAIDecision()
-    ↓
+    â†“
 Game state updated
 ```
 
@@ -329,7 +329,7 @@ Game state updated
 
 - **Decision Frequency:** ~5 Hz (every 200ms)
 - **State Vector Size:** 36 fields + variable-length unit arrays
-- **Action Space:** 5 action types × unit varieties = ~35 discrete actions
+- **Action Space:** 5 action types Ã— unit varieties = ~35 discrete actions
 - **Game Length:** 100-500 ticks (20-100 seconds)
 - **Episodes for Training:** Estimated 5,000-10,000 for convergence
 
@@ -350,8 +350,8 @@ Game state updated
    - Stage 5: Self-play
 
 3. **Network Architecture:**
-   - Input: 36-field state vector + 2×20 unit arrays (flattened)
-   - Hidden: 3 layers × 256 units (ReLU)
+   - Input: 36-field state vector + 2Ã—20 unit arrays (flattened)
+   - Hidden: 3 layers Ã— 256 units (ReLU)
    - Output: Policy head (35 actions, softmax) + Value head (1 scalar)
 
 4. **Hyperparameters:**
@@ -392,12 +392,13 @@ describe('PPO_AI Integration', () => {
 ## Summary
 
 The AI system provides:
-- ✅ **Clean interface** for both symbolic and ML agents
-- ✅ **Complete game state** observable in 36 fields
-- ✅ **Discrete action space** with 5 action types
-- ✅ **Pluggable architecture** - swap AI behaviors easily
-- ✅ **Three working symbolic AIs** - BalancedAI, AggressiveAI, DefensiveAI
-- ✅ **ML-ready design** - perfect for PPO, A3C, or other RL algorithms
-- ✅ **Preserved sophisticated logic** - warchest, difficulty scaling, emergency behavior
+- âœ… **Clean interface** for both symbolic and ML agents
+- âœ… **Complete game state** observable in 36 fields
+- âœ… **Discrete action space** with 5 action types
+- âœ… **Pluggable architecture** - swap AI behaviors easily
+- âœ… **Three working symbolic AIs** - BalancedAI, AggressiveAI, DefensiveAI
+- âœ… **ML-ready design** - perfect for PPO, A3C, or other RL algorithms
+- âœ… **Preserved sophisticated logic** - warchest, difficulty scaling, emergency behavior
 
 You can now plug in a PPO agent by implementing `IAIBehavior` and training it against the existing symbolic AIs!
+

@@ -147,6 +147,7 @@ export const AI_TUNING = {
       EASY: 1.5,    // Wait for 1.5x average unit cost
       MEDIUM: 2.0,  // Wait for 2.0x average unit cost
       HARD: 2.5,    // Wait for 2.5x average unit cost
+      SMART: 2.2,   // Planner AI keeps pressure while still staging coordinated waves
       CHEATER: 1.0, // Cheater just spams (1.0x)
     },
     
@@ -163,6 +164,7 @@ export const AI_TUNING = {
       EASY: 0.6,    // Weak economy management
       MEDIUM: 1.0,  // Standard
       HARD: 1.25,   // Efficient saving
+      SMART: 1.0,   // Same macro reserve behavior as medium economy profile
       CHEATER: 1.5, // Rapid tech up
     },
   },

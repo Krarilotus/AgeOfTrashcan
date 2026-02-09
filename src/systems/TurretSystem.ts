@@ -274,6 +274,10 @@ export class TurretSystem {
     const distanceToTarget = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
     const speed = Math.max(1, projectile.speed);
     const curvature = projectile.curvature ?? 0;
+    const maxTravelDistance = Math.max(0.5, engine.range * 1.2);
+    const maxLifeMs = (maxTravelDistance / speed) * 1000;
+    const configuredLifeMs = projectile.lifeMs ?? (distanceToTarget / speed) * 1200;
+    const clampedLifeMs = Math.max(120, Math.min(configuredLifeMs, maxLifeMs));
 
     let vx = (dx / distanceToTarget) * speed;
     let vy = (dy / distanceToTarget) * speed;
@@ -294,7 +298,7 @@ export class TurretSystem {
       vy,
       curvature,
       damage: projectile.damage,
-      lifeMs: projectile.lifeMs ?? (distanceToTarget / speed) * 1200,
+      lifeMs: clampedLifeMs,
       remainingPierces: projectile.pierceCount ?? 0,
       splitOnImpact: projectile.splitOnImpact,
       splashRadius: projectile.splashRadius,
@@ -332,21 +336,50 @@ export class TurretSystem {
     if (!config) return;
 
     const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
-    const targets = Array.from(state.entities.values())
-      .filter((entity) => entity.owner === targetOwner && Math.abs(entity.transform.x - baseX) <= engine.range)
-      .sort((a, b) => Math.abs(a.transform.x - baseX) - Math.abs(b.transform.x - baseX))
-      .slice(0, config.maxTargets);
-
-    if (targets.length === 0) return;
+    const inRangeTargets = Array.from(state.entities.values())
+      .filter(
+        (entity) =>
+          entity.owner === targetOwner &&
+          entity.health.current > 0 &&
+          Math.abs(entity.transform.x - baseX) <= engine.range
+      );
+    if (inRangeTargets.length === 0) return;
 
     const positions: Array<{ x: number; y: number }> = [];
     let damage = config.initialDamage;
+    let currentTarget: Entity | null = [...inRangeTargets].sort(
+      (a, b) => Math.abs(a.transform.x - baseX) - Math.abs(b.transform.x - baseX)
+    )[0] ?? null;
+    let previousTarget: Entity | null = null;
 
-    for (const target of targets) {
-      target.health.current -= damage;
-      positions.push({ x: target.transform.x, y: target.transform.laneY });
+    for (let bounce = 0; bounce < config.maxTargets; bounce++) {
+      if (!currentTarget) break;
+      if (currentTarget.health.current <= 0) break;
+
+      currentTarget.health.current -= damage;
+      positions.push({ x: currentTarget.transform.x, y: currentTarget.transform.laneY });
       damage *= config.falloffMultiplier;
+
+      previousTarget = currentTarget;
+      const nextCandidates = inRangeTargets.filter(
+        (entity) =>
+          entity.health.current > 0 &&
+          entity.entityId !== previousTarget!.entityId
+      );
+      if (nextCandidates.length === 0) break;
+
+      currentTarget = [...nextCandidates].sort((a, b) => {
+        const da =
+          Math.abs(a.transform.x - previousTarget!.transform.x) +
+          Math.abs(a.transform.laneY - previousTarget!.transform.laneY) * 0.6;
+        const db =
+          Math.abs(b.transform.x - previousTarget!.transform.x) +
+          Math.abs(b.transform.laneY - previousTarget!.transform.laneY) * 0.6;
+        return da - db;
+      })[0] ?? null;
     }
+
+    if (positions.length === 0) return;
 
     state.vfx.push({
       id: state.nextVfxId++,

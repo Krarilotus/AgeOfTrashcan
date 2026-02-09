@@ -45,6 +45,9 @@ export const PROGRESSION_CONFIG = {
   ageBaseHealthMultiplier: 2,
 } as const;
 
+export type GameDifficulty = 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER';
+export type EnemyPurchaseCategory = 'unit' | 'turret_upgrade' | 'turret_engine' | 'other';
+
 export const TURRET_BALANCE_CONFIG = {
   // Slot 1 is free by design; entries map to current unlocked slot count.
   // Example: unlocking slot 2 when currently at 1 unlocked costs 500.
@@ -138,26 +141,76 @@ export const COMBAT_CONFIG = {
 export const DIFFICULTY_CONFIG = {
   EASY: {
     goldMultiplier: 1.0,
+    manaIncomeMultiplier: 1.0,
+    killGoldMultiplier: 1.0,
+    unitDiscountMultiplier: 1.0,
+    turretUpgradeDiscountMultiplier: 1.0,
+    turretEngineDiscountMultiplier: 1.0,
     xpMultiplier: 1.0,
     stackSizeMultiplier: 2.0,
     stackSizeMultiplierMax: 2.5, 
   },
   MEDIUM: {
     goldMultiplier: 1.2,
+    manaIncomeMultiplier: 1.0,
+    killGoldMultiplier: 1.0,
+    unitDiscountMultiplier: 0.8,
+    turretUpgradeDiscountMultiplier: 0.8,
+    turretEngineDiscountMultiplier: 0.8,
     stackSizeMultiplier: 2.5,
     stackSizeMultiplierMax: 3.0,
   },
   HARD: {
     goldMultiplier: 1.5,
+    manaIncomeMultiplier: 1.0,
+    killGoldMultiplier: 1.0,
+    unitDiscountMultiplier: 0.65,
+    turretUpgradeDiscountMultiplier: 0.65,
+    turretEngineDiscountMultiplier: 0.65,
+    stackSizeMultiplier: 3.0,
+    stackSizeMultiplierMax: 3.5,
+  },
+  SMART: {
+    // Smart planner keeps Medium macro-economy pressure but uses stronger unit-discount tempo.
+    goldMultiplier: 1.2,
+    manaIncomeMultiplier: 1.2,
+    killGoldMultiplier: 1.2,
+    unitDiscountMultiplier: 0.65,
+    turretUpgradeDiscountMultiplier: 0.8,
+    turretEngineDiscountMultiplier: 0.8,
     stackSizeMultiplier: 3.0,
     stackSizeMultiplierMax: 3.5,
   },
   CHEATER: {
     goldMultiplier: 2.0,
+    manaIncomeMultiplier: 1.0,
+    killGoldMultiplier: 1.0,
+    unitDiscountMultiplier: 0.5,
+    turretUpgradeDiscountMultiplier: 0.5,
+    turretEngineDiscountMultiplier: 0.5,
     stackSizeMultiplier: 3.5,
     stackSizeMultiplierMax: 4.0,
   },
 };
+
+export function getEnemyPurchaseDiscountMultiplier(
+  difficulty: GameDifficulty,
+  category: EnemyPurchaseCategory
+): number {
+  const cfg = DIFFICULTY_CONFIG[difficulty];
+  if (category === 'unit') return cfg.unitDiscountMultiplier;
+  if (category === 'turret_upgrade') return cfg.turretUpgradeDiscountMultiplier;
+  if (category === 'turret_engine') return cfg.turretEngineDiscountMultiplier;
+  return cfg.unitDiscountMultiplier;
+}
+
+export function getEnemyManaIncomeMultiplier(difficulty: GameDifficulty): number {
+  return DIFFICULTY_CONFIG[difficulty].manaIncomeMultiplier ?? 1.0;
+}
+
+export function getEnemyKillGoldMultiplier(difficulty: GameDifficulty): number {
+  return DIFFICULTY_CONFIG[difficulty].killGoldMultiplier ?? 1.0;
+}
 
 /**
  * Training Queue Configuration

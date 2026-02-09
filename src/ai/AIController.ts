@@ -1,4 +1,4 @@
-/**
+﻿/**
  * AI Controller
  * Main orchestrator for AI decision-making
  * Delegates to pluggable behavior strategies
@@ -25,7 +25,7 @@ import {
  * AI Controller Configuration
  */
 export interface AIControllerConfig {
-  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER';
+  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER';
   personality: AIPersonality;
   behavior: IAIBehavior;
   mlConfig?: MLConfig;
@@ -107,6 +107,10 @@ export class AIController {
   
   public getDebugInfo(): any {
     const behaviorParams = this.config.behavior.getParameters ? this.config.behavior.getParameters() : {};
+    const visibleActions = this.state.recentActions
+      .filter((a) => a.action !== 'WAIT')
+      .slice(-8)
+      .map((a) => `${a.action}${a.reasoning ? ` - ${a.reasoning}` : ''}`);
     
     // Fallback: If AIController has no group (legacy path), check if Behavior has one defined
     let activeGroup = this.state.plannedAttackGroup;
@@ -116,7 +120,8 @@ export class AIController {
 
     return {
         ...this.state,
-        recentActions: this.state.recentActions.slice(-5).map(a => a.action),
+        recentActions: visibleActions,
+        lastDecision: this.state.recentActions.length > 0 ? this.state.recentActions[this.state.recentActions.length - 1] : null,
         plannedAttackGroup: activeGroup ? {
             name: activeGroup.name,
             units: activeGroup.units
@@ -302,7 +307,7 @@ export class AIControllerFactory {
    * Create a standard rule-based AI
    */
   static createRuleBased(
-    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER',
+    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER',
     personalityName: keyof typeof AI_PERSONALITIES,
     behavior: IAIBehavior
   ): AIController {
@@ -320,7 +325,7 @@ export class AIControllerFactory {
    * Create an adaptive AI that learns during gameplay
    */
   static createAdaptive(
-    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER',
+    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER',
     behavior: IAIBehavior,
     mlConfig?: MLConfig
   ): AIController {
@@ -342,3 +347,4 @@ export class AIControllerFactory {
     return new AIController(config);
   }
 }
+

@@ -78,6 +78,13 @@ The output will be in the `dist/` directory, ready for deployment.
   - `F5`: Reload/Reset the game.
   - UI allows upgrading Age, Turret, and Mana.
 
+## UI Text And Icon Policy
+
+- Preserve existing UI emoticons/symbols exactly (examples: `💾`, `📂`, `🔄`, `⏸`, `▶`, `✅`, `🔩`, `⬆️`, `✨`, `💰`, `💚`).
+- Do not replace iconized labels with plain text unless explicitly requested.
+- Do not bulk-rewrite or re-encode UI files through shell scripts.
+- If a file has encoding issues, apply minimal surgical edits and verify no mojibake remains in UI strings.
+
 ## License
 
 Private Project. All rights reserved.

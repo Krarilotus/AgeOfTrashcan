@@ -2,6 +2,7 @@
 import { UNIT_DEFS } from '../GameEngine';
 import { type TurretEngineDef } from '../config/turrets';
 import { getAbilityDisplay, getAbilityText, getUnitName } from './unitDisplay';
+import { UI_EMOTES, UI_SYMBOLS } from './uiEmotes';
 
 type TurretCatalog = Record<string, TurretEngineDef>;
 
@@ -189,7 +190,7 @@ export function UnitTrainingPanel({
   return (
     <div className="training-scroll bg-slate-800 border border-slate-700 rounded-xl p-4 max-h-[500px] overflow-y-auto">
       <div className="text-sm text-slate-400 mb-3 flex justify-between items-center">
-        <span>⚔️ Unit Training</span>
+        <span>{UI_EMOTES.unitTraining} Unit Training</span>
         <span className="text-xs">
           Build Time: {Math.floor((1 - (playerAge - 1) * 0.1) * 100)}%
           {playerAge > 1 && <span className="text-green-400"> ({(playerAge - 1) * 10}% faster)</span>}
@@ -245,21 +246,21 @@ export function UnitTrainingPanel({
                 >
                   <div className="text-sm font-semibold truncate">{getUnitName(id)}</div>
                   <div className="text-xs text-slate-400 space-y-0.5">
-                    <div>💰 {def.cost}g{needsMana ? ` ✨ ${def.manaCost}m` : ''}</div>
+                    <div>{UI_EMOTES.gold} {def.cost}g{needsMana ? ` ${UI_EMOTES.mana} ${def.manaCost}m` : ''}</div>
                     <div className="flex gap-2">
-                      <span title="Health">❤️ {def.health}</span>
-                      <span title="Damage">⚔️ {def.damage}</span>
-                      <span title="Speed">🦶 {def.speed}</span>
+                      <span title="Health">{UI_EMOTES.health} {def.health}</span>
+                      <span title="Damage">{UI_EMOTES.unitTraining} {def.damage}</span>
+                      <span title="Speed">{UI_EMOTES.speed} {def.speed}</span>
                     </div>
                     <div className="flex gap-2">
-                      <span title="Range">{(def.range ?? 1) > 1.5 ? '🏹' : '⚔️'} {def.range ?? 1}</span>
-                      <span title="Build Time">⏱️ {actualBuildTime}s</span>
+                      <span title="Range">{(def.range ?? 1) > 1.5 ? UI_EMOTES.ranged : UI_EMOTES.unitTraining} {def.range ?? 1}</span>
+                      <span title="Build Time">{UI_EMOTES.buildTime} {actualBuildTime}s</span>
                     </div>
                     {def.skill && <div className="text-purple-400 text-xs">{getAbilityDisplay(def.skill)}</div>}
-                    {def.manaLeech && <div className="text-blue-400 text-xs mt-1">💧 Mana Leech: {Math.round(def.manaLeech * 100)}%</div>}
-                    {def.manaShield && <div className="text-cyan-400 text-xs mt-1">🛡️ Mana Shield</div>}
-                    {def.burstFire && <div className="text-orange-400 text-xs mt-1">🔫 Burst: {def.burstFire.shots}x</div>}
-                    {def.teleporter && <div className="text-pink-400 text-xs mt-1">🌌 Teleporter</div>}
+                    {def.manaLeech && <div className="text-blue-400 text-xs mt-1">{UI_EMOTES.manaLeech} Mana Leech: {Math.round(def.manaLeech * 100)}%</div>}
+                    {def.manaShield && <div className="text-cyan-400 text-xs mt-1">{UI_EMOTES.shield} Mana Shield</div>}
+                    {def.burstFire && <div className="text-orange-400 text-xs mt-1">{UI_EMOTES.burst} Burst: {def.burstFire.shots}x</div>}
+                    {def.teleporter && <div className="text-pink-400 text-xs mt-1">{UI_EMOTES.teleporter} Teleporter</div>}
                   </div>
                 </button>
               );
@@ -268,7 +269,7 @@ export function UnitTrainingPanel({
 
           <div className="border-t border-slate-600 pt-3">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-xs text-slate-300">🗼 Turret Engine Purchase Cards</div>
+              <div className="text-xs text-slate-300">{UI_EMOTES.turretEngine} Turret Engine Purchase Cards</div>
               <div className="flex items-center gap-1">
                 <span className="text-[11px] text-slate-500">Slot:</span>
                 {Array.from({ length: maxSlots }).map((_, idx) => {
@@ -319,12 +320,12 @@ export function UnitTrainingPanel({
                   >
                     <div className="text-sm font-semibold truncate">{turret.name}</div>
                     <div className="text-xs text-slate-400 space-y-0.5">
-                      <div>💰 {turret.cost}g{requiresMana ? ` ✨ ${turretManaCost}m` : ''} · ⏱️ {(turret.buildMs / 1000).toFixed(1)}s</div>
-                      <div>⚔️ ATK {attackDamage} · 🕒 CD {cooldown.toFixed(2)}s</div>
-                      {castManaCost > 0 && <div>🧪 Ability Mana {castManaCost}/cast</div>}
-                      <div>🎯 Range {turret.range} · 🛡️ Protection {protectionPct}%</div>
-                      <div>🧠 Targeting: {turret.targeting}</div>
-                      <div className="text-purple-300">✨ Skill: {skillSummary}</div>
+                      <div>{UI_EMOTES.gold} {turret.cost}g{requiresMana ? ` ${UI_EMOTES.mana} ${turretManaCost}m` : ''} {UI_SYMBOLS.middleDot} {UI_EMOTES.buildTime} {(turret.buildMs / 1000).toFixed(1)}s</div>
+                      <div>{UI_EMOTES.unitTraining} ATK {attackDamage} {UI_SYMBOLS.middleDot} {UI_EMOTES.cooldown} CD {cooldown.toFixed(2)}s</div>
+                      {castManaCost > 0 && <div>{UI_EMOTES.abilityMana} Ability Mana {castManaCost}/cast</div>}
+                      <div>{UI_EMOTES.strike} Range {turret.range} {UI_SYMBOLS.middleDot} {UI_EMOTES.shield} Protection {protectionPct}%</div>
+                      <div>{UI_EMOTES.targeting} Targeting: {turret.targeting}</div>
+                      <div className="text-purple-300">{UI_EMOTES.mana} Skill: {skillSummary}</div>
                     </div>
                     <div className="mt-2 text-[11px] text-cyan-300">
                       Queue on Slot S{selectedTurretSlot + 1}
@@ -354,7 +355,7 @@ export function UnitTrainingPanel({
                     title="Click to cancel"
                     className="bg-slate-600 hover:bg-red-700 px-2 py-1 rounded text-xs transition-colors cursor-pointer"
                   >
-                    {label} {((q.remainingMs ?? 0) / 1000).toFixed(1)}s ✕
+                    {label} {((q.remainingMs ?? 0) / 1000).toFixed(1)}s {UI_SYMBOLS.times}
                   </button>
                 );
               })}

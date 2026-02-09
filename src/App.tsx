@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+﻿import React, { useEffect, useRef, useState } from 'react';
 import { GameEngine } from './GameEngine';
 import {
   BASE_CONFIG,
@@ -15,6 +15,7 @@ import {
 import { GameOverOverlay } from './ui/GameOverOverlay';
 import { StartScreen, type Difficulty } from './ui/StartScreen';
 import { UnitTrainingPanel } from './ui/UnitTrainingPanel';
+import { UI_EMOTES, UI_SYMBOLS } from './ui/uiEmotes';
 
 type Winner = 'PLAYER' | 'ENEMY';
 
@@ -212,9 +213,9 @@ export default function App() {
 
     try {
       gameRef.current.saveGameState();
-      alert('💾 Game saved successfully!');
+      alert(`${UI_EMOTES.save} Game saved successfully!`);
     } catch (error) {
-      alert('❌ Failed to save game');
+      alert(`${UI_EMOTES.error} Failed to save game`);
       console.error('Save error:', error);
     }
   };
@@ -227,12 +228,12 @@ export default function App() {
       if (success) {
         setGameOver(null);
         setIsPaused(gameRef.current.getIsPaused());
-        alert('📂 Game loaded successfully!');
+        alert(`${UI_EMOTES.load} Game loaded successfully!`);
       } else {
-        alert('⚠️ No saved game found');
+        alert(`${UI_EMOTES.warning} No saved game found`);
       }
     } catch (error) {
-      alert('❌ Failed to load game');
+      alert(`${UI_EMOTES.error} Failed to load game`);
       console.error('Load error:', error);
     }
   };
@@ -280,35 +281,35 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <button onClick={() => setAudioEnabled(!audioEnabled)} className="text-slate-400 hover:text-white" title="Toggle audio">
-              {audioEnabled ? '🔊' : '🔇'}
+              {audioEnabled ? UI_EMOTES.audioOn : UI_EMOTES.audioOff}
             </button>
             <button
               onClick={handleTogglePause}
               className="px-4 py-2 bg-violet-700 hover:bg-violet-600 text-white rounded font-semibold transition-colors"
               title="Pause/Resume (P or Space)"
             >
-              {isPaused ? '▶ Resume' : '⏸ Pause'}
+              {isPaused ? `${UI_EMOTES.resume} Resume` : `${UI_EMOTES.pause} Pause`}
             </button>
             <button
               onClick={handleSaveGame}
               className="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded font-semibold transition-colors"
               title="Save game"
             >
-              💾 Save
+              {UI_EMOTES.save} Save
             </button>
             <button
               onClick={handleLoadGame}
               className="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-white rounded font-semibold transition-colors"
               title="Load game"
             >
-              📂 Load
+              {UI_EMOTES.load} Load
             </button>
             <button
               onClick={handleRestart}
               className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded font-semibold transition-colors"
               title="Restart game"
             >
-              🔄 Restart
+              {UI_EMOTES.restart} Restart
             </button>
           </div>
         </div>
@@ -426,8 +427,49 @@ export default function App() {
                   <div className="text-[10px] text-slate-500 truncate" title={aiDebugInfo.behaviorParams?.nextReason}>
                     {aiDebugInfo.behaviorParams?.nextReason}
                   </div>
+                  {aiDebugInfo.behaviorParams?.decisionOutcome && (
+                    <div className="mt-1 text-[10px] bg-slate-800 p-1 rounded border border-slate-700">
+                      <div className="text-slate-300">
+                        Outcome: <span className="text-emerald-300">{aiDebugInfo.behaviorParams.decisionOutcome.action}</span>
+                      </div>
+                      <div className="text-slate-500 truncate" title={aiDebugInfo.behaviorParams.decisionOutcome.reason}>
+                        {aiDebugInfo.behaviorParams.decisionOutcome.reason}
+                      </div>
+                    </div>
+                  )}
                   {aiDebugInfo.behaviorParams?.pushEst && (
                     <div className="text-[10px] text-cyan-400 mt-1" title="Attack Feasibility (Required HP)">Push: {aiDebugInfo.behaviorParams?.pushEst}</div>
+                  )}
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="font-bold text-white mb-1 underline">Decision Pipeline</div>
+                <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
+                  {Array.isArray(aiDebugInfo.behaviorParams?.decisionStages) && aiDebugInfo.behaviorParams.decisionStages.length > 0 ? (
+                    aiDebugInfo.behaviorParams.decisionStages.map((stage: any, i: number) => (
+                      <div key={i} className="bg-slate-800/80 border border-slate-700 rounded px-2 py-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-slate-200">{stage.stage}</span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                              stage.status === 'selected'
+                                ? 'text-emerald-300 border-emerald-700 bg-emerald-900/30'
+                                : stage.status === 'candidate'
+                                  ? 'text-yellow-300 border-yellow-700 bg-yellow-900/30'
+                                  : stage.status === 'info'
+                                    ? 'text-cyan-300 border-cyan-700 bg-cyan-900/30'
+                                    : 'text-slate-400 border-slate-700 bg-slate-900/40'
+                            }`}
+                          >
+                            {stage.status}
+                            {stage.action ? ` ${UI_SYMBOLS.middleDot} ${stage.action}` : ''}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-500" title={stage.detail}>{stage.detail}</div>
+                      </div>
+                    ))
+                  ) : (
+                    <span className="text-slate-600 text-[10px] italic">No pipeline stages emitted yet</span>
                   )}
                 </div>
               </div>
@@ -458,9 +500,13 @@ export default function App() {
               <div className="mt-3">
                 <div className="font-bold text-white mb-1 underline">Recent Actions</div>
                 <div className="flex flex-col gap-0.5 max-h-24 overflow-y-auto">
-                  {aiDebugInfo.recentActions.slice().reverse().map((a: string, i: number) => (
-                    <span key={i} className="text-slate-400">- {a}</span>
-                  ))}
+                  {aiDebugInfo.recentActions.length > 0 ? (
+                    aiDebugInfo.recentActions.slice().reverse().map((a: string, i: number) => (
+                      <span key={i} className="text-slate-400">- {a}</span>
+                    ))
+                  ) : (
+                    <span className="text-slate-600 text-[10px] italic">No non-wait actions in recent history</span>
+                  )}
                 </div>
               </div>
             </div>
@@ -478,7 +524,7 @@ export default function App() {
               <div className="border-t border-slate-600 pt-2 mt-2">
                 <div className="flex justify-between">
                   <span>Resources</span>
-                  <span className="font-bold"><span className="text-yellow-400">💰 {Math.floor(gameState?.economy?.player?.gold ?? 0)}</span><span className="text-blue-400 ml-2">✨ {Math.floor(gameState?.economy?.player?.mana ?? 0)}</span></span>
+                  <span className="font-bold"><span className="text-yellow-400">{UI_EMOTES.gold} {Math.floor(gameState?.economy?.player?.gold ?? 0)}</span><span className="text-blue-400 ml-2">{UI_EMOTES.mana} {Math.floor(gameState?.economy?.player?.mana ?? 0)}</span></span>
                 </div>
                 <div className="flex justify-between mt-1 text-slate-500">
                   <span>Income</span>
@@ -528,8 +574,8 @@ export default function App() {
                   const percent = rate * 100;
                   return Number.isInteger(percent) ? `${percent.toFixed(0)}%` : `${percent.toFixed(1)}%`;
                 };
-                const currentConversionLabel = `${toPercent(conversionRate)} gold→mana on kills`;
-                const nextConversionLabel = `${toPercent(nextConversionRate)} gold→mana on kills`;
+                const currentConversionLabel = `${toPercent(conversionRate)} gold${UI_SYMBOLS.arrowRight}mana on kills`;
+                const nextConversionLabel = `${toPercent(nextConversionRate)} gold${UI_SYMBOLS.arrowRight}mana on kills`;
 
                 const currentEffectText =
                   level === 0
@@ -557,7 +603,7 @@ export default function App() {
                       className="w-full px-3 py-2 text-sm bg-blue-900 hover:bg-blue-800 border border-blue-700 rounded font-semibold disabled:opacity-50 disabled:cursor-not-started transition-all"
                       disabled={(gameState?.economy?.player?.gold ?? 0) < nextCost}
                     >
-                      ✨ Upgrade Mana Pool (Lv.{level}) - {nextCost}g
+                      {UI_EMOTES.mana} Upgrade Mana Pool (Lv.{level}) - {nextCost}g
                     </button>
                     <div className="text-xs text-slate-500 text-center">
                       Upgrade yields: <span className="text-blue-300">{nextEffectText}</span>
@@ -584,7 +630,7 @@ export default function App() {
                   className="w-full px-3 py-2 text-sm bg-green-900 hover:bg-green-800 border border-green-700 rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                   disabled={(gameState?.economy?.player?.mana ?? 0) < 500 || (gameState?.playerBase?.health ?? 0) >= (gameState?.playerBase?.maxHealth ?? 200)}
                 >
-                  💚 Heal Base (+200 HP) - 500 mana
+                  {UI_EMOTES.heal} Heal Base (+200 HP) - 500 mana
                 </button>
               )}
 
@@ -602,8 +648,8 @@ export default function App() {
                   !queueFull;
                 const unlockLabel =
                   slotsUnlocked >= maxSlots
-                    ? '✅ All turret slots unlocked'
-                    : `🔩 Unlock Slot ${Math.min(slotsUnlocked + 1, maxSlots)} - ${nextSlotCost}g`;
+                    ? `${UI_EMOTES.unlocked} All turret slots unlocked`
+                    : `${UI_EMOTES.unlockSlot} Unlock Slot ${Math.min(slotsUnlocked + 1, maxSlots)} - ${nextSlotCost}g`;
 
                 return (
                   <button
@@ -651,7 +697,7 @@ export default function App() {
                 className="w-full px-4 py-2 bg-gradient-to-r from-amber-600 to-purple-600 hover:from-amber-700 hover:to-purple-700 text-white rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                 disabled={!(gameState?.progression?.player?.ageProgress?.canUpgrade) || (gameState?.economy?.player?.gold ?? 0) < (gameState?.progression?.player?.ageProgress?.costGold ?? 500)}
               >
-                ⬆️ Advance to Age {Math.min((gameState?.progression?.player?.age ?? 1) + 1, PROGRESSION_CONFIG.maxAge)}
+                {UI_EMOTES.ageUp} Advance to Age {Math.min((gameState?.progression?.player?.age ?? 1) + 1, PROGRESSION_CONFIG.maxAge)}
                 <span className="ml-2 text-sm opacity-75">({gameState?.progression?.player?.ageProgress?.costGold ?? 500}g)</span>
               </button>
             </div>
@@ -661,4 +707,5 @@ export default function App() {
     </div>
   );
 }
+
 

@@ -1,6 +1,8 @@
-import React from 'react';
+ï»¿import React from 'react';
 
-export type Difficulty = 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER';
+import { UI_SYMBOLS } from './uiEmotes';
+
+export type Difficulty = 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER';
 
 interface StartScreenProps {
   difficulty: Difficulty;
@@ -28,13 +30,13 @@ export function StartScreen({
         Command armies across 6 ages of warfare. From Stone Age clubmen to futuristic mechs.
         <br />
         <br />
-        <span className="text-sm">Spawn units • Upgrade your base • Advance through ages • Destroy the enemy</span>
+        <span className="text-sm">Spawn units {UI_SYMBOLS.bullet} Upgrade your base {UI_SYMBOLS.bullet} Advance through ages {UI_SYMBOLS.bullet} Destroy the enemy</span>
       </div>
 
       <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 w-full max-w-md">
         <div className="text-lg font-semibold mb-4 text-center">Select Difficulty</div>
-        <div className="grid grid-cols-2 gap-3">
-          {(['EASY', 'MEDIUM', 'HARD', 'CHEATER'] as const).map((diff) => (
+        <div className="grid grid-cols-3 gap-3">
+          {(['EASY', 'MEDIUM', 'HARD', 'SMART', 'CHEATER'] as const).map((diff) => (
             <button
               key={diff}
               onClick={() => onDifficultyChange(diff)}
@@ -47,15 +49,17 @@ export function StartScreen({
               {diff === 'EASY' && 'Easy'}
               {diff === 'MEDIUM' && 'Medium'}
               {diff === 'HARD' && 'Hard'}
+              {diff === 'SMART' && 'Smart'}
               {diff === 'CHEATER' && 'Cheater'}
             </button>
           ))}
         </div>
         <div className="mt-4 text-sm text-slate-400 text-center">
-          {difficulty === 'EASY' && 'AI gets 80% income, makes basic decisions'}
-          {difficulty === 'MEDIUM' && 'Balanced AI with normal income'}
-          {difficulty === 'HARD' && 'Smart AI with 120% income bonus'}
-          {difficulty === 'CHEATER' && 'Ruthless AI with 150% income!'}
+          {difficulty === 'EASY' && 'Basic reactive AI with no discounts.'}
+          {difficulty === 'MEDIUM' && 'Balanced AI with moderate discounts and income.'}
+          {difficulty === 'HARD' && 'Balanced AI with stronger economy and discounts.'}
+          {difficulty === 'SMART' && 'Hierarchical planner AI with proactive wave + turret strategy.'}
+          {difficulty === 'CHEATER' && 'Ruthless AI with extreme economy and pressure.'}
         </div>
       </div>
 

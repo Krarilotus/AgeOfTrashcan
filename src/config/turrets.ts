@@ -1,4 +1,4 @@
-import { TURRET_BALANCE_CONFIG } from './gameBalance';
+﻿import { TURRET_BALANCE_CONFIG } from './gameBalance';
 
 export type TurretTargetingMode =
   | 'nearest'
@@ -174,10 +174,10 @@ export function getSlotMountYOffsetUnits(slotIndex: number): number {
   return TURRET_SLOT_MOUNT_Y_OFFSETS_UNITS[slotIndex] ?? TURRET_SLOT_MOUNT_Y_OFFSETS_UNITS[TURRET_SLOT_MOUNT_Y_OFFSETS_UNITS.length - 1];
 }
 
-export function getTurretSellRefundMultiplier(isPlayer: boolean, difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER'): number {
+export function getTurretSellRefundMultiplier(isPlayer: boolean, difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER'): number {
   if (isPlayer) return 0.5;
   if (difficulty === 'EASY') return 0.5;
-  if (difficulty === 'MEDIUM') return 0.6;
+  if (difficulty === 'MEDIUM' || difficulty === 'SMART') return 0.6;
   if (difficulty === 'HARD') return 0.8;
   return 1.0;
 }
@@ -227,7 +227,7 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
       glowColor: 'rgba(251,146,60,0.9)',
       trailAlpha: 0.45,
       splitOnImpact: {
-        childCount: 6,
+        childCount: 3,
         childDamage: 5,
         childSpeed: 24,
         childLifeMs: 900,
@@ -424,13 +424,13 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     fireIntervalSec: 4.8,
     drones: {
       droneCount: 1,
-      droneDamage: 650,
+      droneDamage: 450,
       droneSpeed: 52,
       cooldownSeconds: 4.8,
-      explosionRadius: 5,
-      cruiseHeight: 8.5,
-      overflyPadding: 2.4,
-      diveSpeedMultiplier: 1.9,
+      explosionRadius: 3.5,
+      cruiseHeight: 7.5,
+      overflyPadding: 1.4,
+      diveSpeedMultiplier: 1.2,
       retargetOnKill: true,
     },
     spritePath: '/turret_engines/kamikaze_drone_hub.svg',
@@ -797,3 +797,4 @@ export function getProtectionMultiplierAtDistance(base: TurretBaseLike, distance
   }
   return multiplier;
 }
+
