@@ -28,6 +28,7 @@ import {
   MAX_TURRET_SLOTS,
   TURRET_ENGINES,
   calculateTurretDefenseStats,
+  estimateEngineDps,
   getTurretEngineDef,
   getTurretEnginesForAge,
   getTurretSellRefundMultiplier,
@@ -877,7 +878,25 @@ export class GameEngine {
         break;
         
       case 'WAIT':
-        // Do nothing - AI is waiting for resources or opportunity
+        // If pressure is high while waiting, opportunistically improve turret defenses.
+        {
+          const playerUnits = this.state.entities.size > 0
+            ? Array.from(this.state.entities.values()).filter((e) => e.owner === 'PLAYER').length
+            : 0;
+          const enemyUnits = this.state.entities.size > 0
+            ? Array.from(this.state.entities.values()).filter((e) => e.owner === 'ENEMY').length
+            : 0;
+          const playerNearEnemyBase = Array.from(this.state.entities.values()).filter(
+            (e) => e.owner === 'PLAYER' && Math.abs(e.transform.x - this.state.enemyBase.x) < 15
+          ).length;
+          const severePressure =
+            playerUnits >= Math.max(6, enemyUnits * 4) ||
+            playerNearEnemyBase >= 3 ||
+            this.state.enemyBase.health < this.state.enemyBase.maxHealth * 0.7;
+          if (severePressure) {
+            this.autoManageEnemyTurrets();
+          }
+        }
         break;
 
       case 'REPAIR_BASE':
@@ -1054,20 +1073,87 @@ export class GameEngine {
 
   private autoManageEnemyTurrets(): boolean {
     const base = this.state.enemyBase;
+    const econ = this.state.economy.enemy;
     const enemyAge = this.state.progression.enemy.age;
     const gameTime = (this.state.tick * FIXED_TIMESTEP) / 1000;
+    const playerUnits = Array.from(this.state.entities.values()).filter((e) => e.owner === 'PLAYER');
+    const enemyUnits = Array.from(this.state.entities.values()).filter((e) => e.owner === 'ENEMY');
+    const playerUnitCount = playerUnits.length;
+    const enemyUnitCount = enemyUnits.length;
+    const playerNearEnemyBase = playerUnits.filter((u) => Math.abs(u.transform.x - this.state.enemyBase.x) < 15).length;
+    const severeOutnumbered = playerUnitCount >= Math.max(7, enemyUnitCount * 6) || playerNearEnemyBase >= 4;
+    const avgPlayerHp = playerUnitCount > 0
+      ? playerUnits.reduce((sum, u) => sum + u.health.current, 0) / playerUnitCount
+      : 0;
+    const swarmPressure = playerUnitCount >= Math.max(6, enemyUnitCount + 4) || (playerUnitCount >= 4 && avgPlayerHp <= 180);
+    const heavyPressure = avgPlayerHp >= 260 || playerUnits.filter((u) => u.health.current >= 320).length >= 2;
 
-    const desiredSlotsByAge = enemyAge >= 6 ? (gameTime >= 90 ? 4 : 3) : enemyAge >= 5 ? 3 : enemyAge >= 3 ? 2 : 1;
+    const desiredSlotsByAge = enemyAge >= 6
+      ? ((gameTime >= 140 && this.state.economy.enemy.mana >= 5000) ? 4 : 3)
+      : enemyAge >= 5 ? 3 : enemyAge >= 3 ? 2 : 1;
 
+    const isMultiTargetEngine = (engine: NonNullable<ReturnType<typeof getTurretEngineDef>>) => {
+      if (engine.attackType === 'chain_lightning' || engine.attackType === 'artillery_barrage' || engine.attackType === 'oil_pour') {
+        return true;
+      }
+      if (engine.attackType !== 'projectile' || !engine.projectile) return false;
+      return (engine.projectile.splashRadius ?? 0) > 0 || !!engine.projectile.splitOnImpact || (engine.projectile.pierceCount ?? 0) >= 2;
+    };
+
+    const getSingleTargetPressure = (engine: NonNullable<ReturnType<typeof getTurretEngineDef>>) => {
+      if (engine.attackType === 'projectile' && engine.projectile) {
+        const direct = engine.projectile.damage / Math.max(0.1, engine.fireIntervalSec);
+        const pierceBonus = 1 + Math.min(0.6, (engine.projectile.pierceCount ?? 0) * 0.2);
+        const antiSplashPenalty = isMultiTargetEngine(engine) ? 0.88 : 1.0;
+        return direct * pierceBonus * antiSplashPenalty;
+      }
+      if (engine.attackType === 'laser_pulse' && engine.laserPulse) return engine.laserPulse.damage / Math.max(0.1, engine.laserPulse.cooldownSeconds);
+      if (engine.attackType === 'mana_siphon' && engine.manaSiphon) return engine.manaSiphon.tickDamage * engine.manaSiphon.ticksPerSecond;
+      return 0;
+    };
+
+    const scoreEngine = (engine: NonNullable<ReturnType<typeof getTurretEngineDef>>): number => {
+      let score =
+        estimateEngineDps(engine) * 2.2 +
+        (1 - engine.protectionMultiplier) * 2000 +
+        engine.range * 15 +
+        engine.age * 50;
+      if (swarmPressure) {
+        score *= isMultiTargetEngine(engine) ? 1.35 : 0.86;
+      }
+      if (heavyPressure) {
+        score += getSingleTargetPressure(engine) * 1.25;
+        if (!isMultiTargetEngine(engine)) score *= 1.14;
+      }
+      if (severeOutnumbered && enemyAge >= 4 && engine.age < Math.max(2, enemyAge - 2)) {
+        score *= 0.76;
+      }
+      return score;
+    };
+
+    const getDiscountedCost = (cost: number) => this.getDiscountedGoldCostForOwner('ENEMY', cost);
+    const canAfford = (engine: NonNullable<ReturnType<typeof getTurretEngineDef>>, goldOverride?: number) =>
+      getDiscountedCost(engine.cost) <= (goldOverride ?? econ.gold) &&
+      (engine.manaCost ?? 0) <= econ.mana;
     const availableEngines = Object.values(getTurretEnginesForAge(enemyAge))
-      .sort((a, b) => (b.cost + b.range * 20) - (a.cost + a.range * 20));
+      .sort((a, b) => scoreEngine(b) - scoreEngine(a));
 
     if (availableEngines.length === 0) return false;
 
     for (let i = 0; i < base.turretSlotsUnlocked; i++) {
       if (!base.turretSlots[i]?.turretId) {
-        const target = availableEngines[0];
-        return this.queueTurretEngine('ENEMY', i, target.id);
+        const preferred = severeOutnumbered && enemyAge >= 4
+          ? availableEngines.filter((e) => e.age >= Math.max(2, enemyAge - 2))
+          : availableEngines;
+        const candidatePool = preferred.length > 0 ? preferred : availableEngines;
+        const affordable = candidatePool.filter((e) => canAfford(e));
+        const pick =
+          (swarmPressure ? affordable.find((e) => isMultiTargetEngine(e)) : null) ??
+          (heavyPressure ? [...affordable].sort((a, b) => getSingleTargetPressure(b) - getSingleTargetPressure(a))[0] : null) ??
+          affordable[0];
+        if (pick) {
+          return this.queueTurretEngine('ENEMY', i, pick.id);
+        }
       }
     }
 
@@ -1075,24 +1161,45 @@ export class GameEngine {
       return this.queueTurretSlotUpgrade('ENEMY');
     }
 
-    if (enemyAge >= 6 && this.state.enemyBase.health < this.state.enemyBase.maxHealth * 0.35) {
+    const canReplace = enemyAge >= 4 && (
+      severeOutnumbered ||
+      playerUnitCount > enemyUnitCount + 3 ||
+      this.state.enemyBase.health < this.state.enemyBase.maxHealth * 0.7
+    );
+    if (canReplace) {
+      if (this.state.enemyQueue.length >= QUEUE_CONFIG.maxQueueSize) {
+        return false;
+      }
       let weakestSlot = -1;
-      let weakestCost = Infinity;
+      let weakestScore = Infinity;
+      let weakestDef: NonNullable<ReturnType<typeof getTurretEngineDef>> | null = null;
       for (let i = 0; i < base.turretSlotsUnlocked; i++) {
         const turretId = base.turretSlots[i]?.turretId;
         if (!turretId) continue;
         const def = getTurretEngineDef(turretId);
         if (!def) continue;
-        if (def.cost < weakestCost) {
-          weakestCost = def.cost;
+        const score = scoreEngine(def);
+        if (score < weakestScore) {
+          weakestScore = score;
           weakestSlot = i;
+          weakestDef = def;
         }
       }
-      const strongestEngine = availableEngines[0];
-      if (weakestSlot >= 0 && strongestEngine.cost > weakestCost * 1.4) {
+
+      if (weakestSlot >= 0 && weakestDef) {
+        const refundMultiplier = getTurretSellRefundMultiplier(false, this.config.difficulty);
+        const budgetAfterSell = econ.gold + Math.floor(weakestDef.cost * refundMultiplier);
+        const improvementThreshold = severeOutnumbered ? 1.06 : 1.16;
+        const betterOption = availableEngines.find(
+          (def) =>
+            def.id !== weakestDef!.id &&
+            canAfford(def, budgetAfterSell) &&
+            scoreEngine(def) > weakestScore * improvementThreshold
+        );
+        if (!betterOption) return false;
         const sold = this.sellTurretEngine('ENEMY', weakestSlot);
         if (sold) {
-          return this.queueTurretEngine('ENEMY', weakestSlot, strongestEngine.id);
+          return this.queueTurretEngine('ENEMY', weakestSlot, betterOption.id);
         }
       }
     }

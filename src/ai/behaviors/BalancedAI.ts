@@ -105,14 +105,15 @@ export class BalancedAI implements IAIBehavior {
   }
 
   private scoreTurretEngine(engine: TurretEngineDef, threat: ThreatLevel): number {
-    const dpsWeight = threat >= ThreatLevel.HIGH ? 1.6 : 1.2;
-    const protectionWeight = threat >= ThreatLevel.HIGH ? 1800 : 1200;
-    const rangeWeight = threat >= ThreatLevel.LOW ? 14 : 10;
-    const efficiencyWeight = threat >= ThreatLevel.HIGH ? 4200 : 3000;
+    const dpsWeight = threat >= ThreatLevel.HIGH ? 2.4 : 1.8;
+    const protectionWeight = threat >= ThreatLevel.HIGH ? 2100 : 1400;
+    const rangeWeight = threat >= ThreatLevel.LOW ? 16 : 12;
+    const efficiencyWeight = threat >= ThreatLevel.HIGH ? 1500 : 1000;
+    const agePowerBias = engine.age * 55;
     const protectionValue = (1 - engine.protectionMultiplier) * protectionWeight;
     const rawDps = estimateEngineDps(engine);
     const dpsPerGold = rawDps / Math.max(1, engine.cost);
-    return rawDps * dpsWeight + dpsPerGold * efficiencyWeight + engine.range * rangeWeight + protectionValue;
+    return rawDps * dpsWeight + dpsPerGold * efficiencyWeight + engine.range * rangeWeight + protectionValue + agePowerBias;
   }
 
   private getTargetSlotsByState(state: GameStateSnapshot): number {
@@ -209,6 +210,13 @@ export class BalancedAI implements IAIBehavior {
     else if (difficulty === 'HARD') finalCost *= 0.65;
     else if (difficulty === 'CHEATER') finalCost *= 0.5;
     return Math.floor(finalCost);
+  }
+
+  private getEnemySellRefundMultiplier(difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'CHEATER'): number {
+    if (difficulty === 'EASY') return 0.5;
+    if (difficulty === 'MEDIUM') return 0.6;
+    if (difficulty === 'HARD') return 0.8;
+    return 1.0;
   }
 
   private buildForeseeablePlan(
@@ -312,6 +320,7 @@ export class BalancedAI implements IAIBehavior {
     if (available.length === 0) return null;
     const targetSlots = this.getTargetSlotsByState(state);
     const risk = this.analyzeTurretRiskProfile(state);
+    const severeOutnumbered = (state.playerUnitCount >= Math.max(7, state.enemyUnitCount * 6)) || (state.playerUnitsNearEnemyBase >= 4);
     const hasEmptyUnlockedSlot = slots.some((s) => s.slotIndex < unlocked && !s.turretId);
     const coreDefenseNeeds =
       unlocked < targetSlots ||
@@ -328,6 +337,8 @@ export class BalancedAI implements IAIBehavior {
       this.getEnemyDiscountedCost(def.cost, state.difficulty) <= turretGoldBudget &&
       (def.manaCost ?? 0) <= state.enemyMana;
 
+    const emergencyDefenseMode = severeOutnumbered || risk.incomingPressure || threat >= ThreatLevel.HIGH;
+    const minPreferredAge = emergencyDefenseMode && state.enemyAge >= 4 ? Math.max(2, state.enemyAge - 2) : 1;
     const sortedByPower = [...available].sort((a, b) => this.scoreTurretEngineForRisk(b, threat, risk) - this.scoreTurretEngineForRisk(a, threat, risk));
 
     if (this.pendingTurretReplacement) {
@@ -356,16 +367,21 @@ export class BalancedAI implements IAIBehavior {
       const slot = slots.find((s) => s.slotIndex === i);
       if (!slot || slot.turretId) continue;
       const affordable = sortedByPower.filter((def) => canAffordEngine(def));
+      const preferredAffordable = affordable.filter((def) => def.age >= minPreferredAge);
+      const candidatePool = preferredAffordable.length > 0 ? preferredAffordable : affordable;
       const pick =
         (risk.swarmPressure && !hasMultiTargetCoverage
-          ? affordable.find((def) => this.isMultiTargetEngine(def))
+          ? candidatePool.find((def) => this.isMultiTargetEngine(def))
           : null) ??
-        affordable[0];
+        (risk.heavyPressure
+          ? [...candidatePool].sort((a, b) => this.getSingleTargetPressure(b) - this.getSingleTargetPressure(a))[0]
+          : null) ??
+        candidatePool[0];
       if (pick) {
         return {
           action: 'BUY_TURRET_ENGINE',
           parameters: { slotIndex: i, turretId: pick.id },
-          reasoning: `Mount ${pick.name} on empty slot ${i + 1} (${risk.swarmPressure ? 'anti-swarm' : risk.heavyPressure ? 'anti-heavy' : 'balanced'})`,
+          reasoning: `Mount ${pick.name} on empty slot ${i + 1} (${severeOutnumbered ? 'emergency defense' : risk.swarmPressure ? 'anti-swarm' : risk.heavyPressure ? 'anti-heavy' : 'balanced'})`,
         };
       }
       return null;
@@ -391,19 +407,29 @@ export class BalancedAI implements IAIBehavior {
         }
       }
 
-      const betterOption = sortedByPower.find(
-        (def) =>
-          canAffordEngine(def) &&
-          this.scoreTurretEngineForRisk(def, threat, risk) > weakestScore * 1.2 &&
-          def.id !== weakestTurretId
-      );
-      if (weakestSlotIndex >= 0 && betterOption) {
-        this.pendingTurretReplacement = { slotIndex: weakestSlotIndex, turretId: betterOption.id };
-        return {
-          action: 'SELL_TURRET_ENGINE',
-          parameters: { slotIndex: weakestSlotIndex },
-          reasoning: `Sell weak slot ${weakestSlotIndex + 1} turret for ${betterOption.name}`,
-        };
+      if (weakestSlotIndex >= 0 && weakestTurretId) {
+        const weakestDef = getTurretEngineDef(weakestTurretId);
+        if (weakestDef) {
+          const refundMultiplier = this.getEnemySellRefundMultiplier(state.difficulty);
+          const budgetAfterSell = turretGoldBudget + Math.floor(weakestDef.cost * refundMultiplier);
+          const improvementThreshold = severeOutnumbered ? 1.06 : 1.16;
+          const betterOption = sortedByPower.find(
+            (def) =>
+              this.getEnemyDiscountedCost(def.cost, state.difficulty) <= budgetAfterSell &&
+              (def.manaCost ?? 0) <= state.enemyMana &&
+              this.scoreTurretEngineForRisk(def, threat, risk) > weakestScore * improvementThreshold &&
+              def.id !== weakestTurretId
+          );
+
+          if (betterOption) {
+            this.pendingTurretReplacement = { slotIndex: weakestSlotIndex, turretId: betterOption.id };
+            return {
+              action: 'SELL_TURRET_ENGINE',
+              parameters: { slotIndex: weakestSlotIndex },
+              reasoning: `Sell weak slot ${weakestSlotIndex + 1} turret for ${betterOption.name}`,
+            };
+          }
+        }
       }
     }
 
