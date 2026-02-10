@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ageoftrashcan.local/schemas/transition_schema.json",
+  "title": "AgeOfTrashcanTransition",
+  "type": "object",
+  "required": [
+    "seed",
+    "tick",
+    "game_time",
+    "observation",
+    "action",
+    "action_mask",
+    "reward",
+    "reward_components",
+    "done",
+    "terminal_cause"
+  ],
+  "properties": {
+    "seed": { "type": "integer", "minimum": 0 },
+    "tick": { "type": "integer", "minimum": 0 },
+    "game_time": { "type": "number", "minimum": 0 },
+    "observation": { "$ref": "./observation_schema.json" },
+    "next_observation": { "$ref": "./observation_schema.json" },
+    "action": { "$ref": "./action_schema.json" },
+    "action_mask": {
+      "type": "object",
+      "required": ["action_type_mask", "unit_mask", "turret_mask", "buy_slot_mask", "sell_slot_mask"],
+      "properties": {
+        "action_type_mask": { "type": "array", "items": { "type": "integer", "enum": [0, 1] } },
+        "unit_mask": { "type": "array", "items": { "type": "integer", "enum": [0, 1] } },
+        "turret_mask": { "type": "array", "items": { "type": "integer", "enum": [0, 1] } },
+        "buy_slot_mask": { "type": "array", "items": { "type": "integer", "enum": [0, 1] } },
+        "sell_slot_mask": { "type": "array", "items": { "type": "integer", "enum": [0, 1] } }
+      },
+      "additionalProperties": false
+    },
+    "reward": { "type": "number" },
+    "reward_components": {
+      "type": "object",
+      "required": [
+        "enemy_unit_kill_value",
+        "own_unit_loss_value",
+        "enemy_base_damage",
+        "own_base_damage",
+        "safe_age_up_bonus",
+        "lane_control_delta",
+        "illegal_action_penalty",
+        "terminal_outcome"
+      ],
+      "properties": {
+        "enemy_unit_kill_value": { "type": "number" },
+        "own_unit_loss_value": { "type": "number" },
+        "enemy_base_damage": { "type": "number" },
+        "own_base_damage": { "type": "number" },
+        "safe_age_up_bonus": { "type": "number" },
+        "lane_control_delta": { "type": "number" },
+        "illegal_action_penalty": { "type": "number" },
+        "terminal_outcome": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "done": { "type": "boolean" },
+    "terminal_cause": {
+      "type": "string",
+      "enum": ["none", "player_win", "enemy_win", "timeout", "error"]
+    },
+    "info": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

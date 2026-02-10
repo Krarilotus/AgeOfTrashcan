@@ -31,6 +31,12 @@ export default function App() {
   const [difficulty, setDifficulty] = useState<Difficulty>('MEDIUM');
   const [showAIDebug, setShowAIDebug] = useState(false);
   const [aiDebugInfo, setAIDebugInfo] = useState<any>(null);
+  const [aiDebugSections, setAIDebugSections] = useState({
+    htn: true,
+    reserve: true,
+    context: true,
+    actionSpace: true,
+  });
   const [shouldLoadSavedGame, setShouldLoadSavedGame] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
 
@@ -206,6 +212,10 @@ export default function App() {
   const handleTogglePause = () => {
     if (!gameRef.current || gameOver) return;
     setIsPaused(gameRef.current.togglePause());
+  };
+
+  const toggleAIDebugSection = (section: 'htn' | 'reserve' | 'context' | 'actionSpace') => {
+    setAIDebugSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
 
   const handleSaveGame = () => {
@@ -391,7 +401,10 @@ export default function App() {
                       <div className="italic text-slate-500">Waiting for tick...</div>
                     )}
                   </div>
-                  <div className="mt-1">Strat: {aiDebugInfo.strategicState}</div>
+                  <div className="mt-1">Strat: {aiDebugInfo.behaviorParams?.activeGoal ?? aiDebugInfo.strategicState}</div>
+                  {aiDebugInfo.behaviorParams?.activeGoal && (
+                    <div className="text-[10px] text-slate-500">Controller Strat: {aiDebugInfo.strategicState}</div>
+                  )}
                   <div title={aiDebugInfo.behaviorParams?.plan} className="text-[9px] text-slate-500 truncate mt-1">
                     {aiDebugInfo.behaviorParams?.plan}
                   </div>
@@ -444,6 +457,128 @@ export default function App() {
                   )}
                 </div>
               </div>
+              <div className="mt-3">
+                <div className="font-bold text-white mb-1 underline">Debug Controls</div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => toggleAIDebugSection('htn')}
+                    className={`text-[10px] px-2 py-1 rounded border ${aiDebugSections.htn ? 'text-emerald-300 border-emerald-700 bg-emerald-900/20' : 'text-slate-400 border-slate-700 bg-slate-900/40'}`}
+                  >
+                    {aiDebugSections.htn ? 'Hide HTN' : 'Show HTN'}
+                  </button>
+                  <button
+                    onClick={() => toggleAIDebugSection('reserve')}
+                    className={`text-[10px] px-2 py-1 rounded border ${aiDebugSections.reserve ? 'text-cyan-300 border-cyan-700 bg-cyan-900/20' : 'text-slate-400 border-slate-700 bg-slate-900/40'}`}
+                  >
+                    {aiDebugSections.reserve ? 'Hide Reserve' : 'Show Reserve'}
+                  </button>
+                  <button
+                    onClick={() => toggleAIDebugSection('context')}
+                    className={`text-[10px] px-2 py-1 rounded border ${aiDebugSections.context ? 'text-purple-300 border-purple-700 bg-purple-900/20' : 'text-slate-400 border-slate-700 bg-slate-900/40'}`}
+                  >
+                    {aiDebugSections.context ? 'Hide Context' : 'Show Context'}
+                  </button>
+                  <button
+                    onClick={() => toggleAIDebugSection('actionSpace')}
+                    className={`text-[10px] px-2 py-1 rounded border ${aiDebugSections.actionSpace ? 'text-amber-300 border-amber-700 bg-amber-900/20' : 'text-slate-400 border-slate-700 bg-slate-900/40'}`}
+                  >
+                    {aiDebugSections.actionSpace ? 'Hide Action Space' : 'Show Action Space'}
+                  </button>
+                </div>
+              </div>
+
+              {aiDebugSections.htn && (
+                <div className="mt-3">
+                  <div className="font-bold text-white mb-1 underline">HTN State</div>
+                  <div className="text-[10px] space-y-0.5 bg-slate-800 p-2 rounded border border-slate-700">
+                    <div className="flex justify-between"><span className="text-slate-400">Active Goal</span><span className="text-emerald-300">{aiDebugInfo.behaviorParams?.activeGoal ?? 'n/a'}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">Combo Plan</span><span className="text-cyan-300">{aiDebugInfo.behaviorParams?.activeComboPlan?.id ?? 'none'}</span></div>
+                    {aiDebugInfo.behaviorParams?.activeComboPlan && (
+                      <div className="text-slate-300">
+                        Progress: {(aiDebugInfo.behaviorParams.activeComboPlan.index ?? 0) + 1}/{aiDebugInfo.behaviorParams.activeComboPlan.units?.length ?? 0}
+                      </div>
+                    )}
+                    {Array.isArray(aiDebugInfo.behaviorParams?.goals) && (
+                      <div className="pt-1 border-t border-slate-700">
+                        <div className="text-slate-400 mb-0.5">Goal Scores</div>
+                        {aiDebugInfo.behaviorParams.goals.map((g: any, i: number) => (
+                          <div key={i} className="flex justify-between">
+                            <span>{g.goal}</span>
+                            <span className="text-amber-300">{typeof g.score === 'number' ? g.score.toFixed(1) : g.score}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {Array.isArray(aiDebugInfo.behaviorParams?.recentRecruitHistory) && (
+                      <div className="pt-1 border-t border-slate-700">
+                        <div className="text-slate-400 mb-0.5">Recent Recruit Sequence</div>
+                        <div className="text-slate-300 break-words">
+                          {aiDebugInfo.behaviorParams.recentRecruitHistory.length > 0
+                            ? aiDebugInfo.behaviorParams.recentRecruitHistory.join(' -> ')
+                            : 'none'}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {aiDebugSections.reserve && (
+                <div className="mt-3">
+                  <div className="font-bold text-white mb-1 underline">Reserve Policy</div>
+                  <div className="text-[10px] space-y-0.5 bg-slate-800 p-2 rounded border border-slate-700">
+                    <div className="flex justify-between"><span className="text-slate-400">Warchest</span><span>{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.warchest ?? 0)}g</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">Target</span><span>{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.reserveTarget ?? 0)}g</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">Protected</span><span>{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.protectedReserve ?? 0)}g</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">Released</span><span>{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.releasedReserve ?? 0)}g</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">Liquidity Floor</span><span>{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.minLiquidityGold ?? 0)}g</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">Spendable</span><span className="text-emerald-300">{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.spendableGold ?? 0)}g</span></div>
+                    <div className="text-slate-500 pt-1 border-t border-slate-700">
+                      {aiDebugInfo.behaviorParams?.reservePolicy?.reason ?? 'No reserve policy emitted'}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {aiDebugSections.context && (
+                <div className="mt-3">
+                  <div className="font-bold text-white mb-1 underline">Context Signals</div>
+                  <div className="text-[10px] bg-slate-800 p-2 rounded border border-slate-700 grid grid-cols-2 gap-x-3 gap-y-1">
+                    {Object.entries(aiDebugInfo.behaviorParams?.context ?? {}).map(([key, val]) => (
+                      <React.Fragment key={key}>
+                        <span className="text-slate-400">{key}</span>
+                        <span className="text-slate-200 text-right">{String(val)}</span>
+                      </React.Fragment>
+                    ))}
+                    {Object.keys(aiDebugInfo.behaviorParams?.context ?? {}).length === 0 && (
+                      <span className="text-slate-500 col-span-2">No context payload emitted</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {aiDebugSections.actionSpace && (
+                <div className="mt-3">
+                  <div className="font-bold text-white mb-1 underline">Action Space</div>
+                  <div className="text-[10px] space-y-1 bg-slate-800 p-2 rounded border border-slate-700">
+                    <div className="text-slate-400">Legal Actions</div>
+                    {Object.entries(aiDebugInfo.behaviorParams?.actionSpace?.legalActions ?? {}).map(([key, val]) => (
+                      <div key={key} className="flex justify-between">
+                        <span>{key}</span>
+                        <span className={val ? 'text-emerald-300' : 'text-red-400'}>{val ? 'yes' : 'no'}</span>
+                      </div>
+                    ))}
+                    <div className="border-t border-slate-700 pt-1 mt-1 text-slate-400">Counts</div>
+                    {Object.entries(aiDebugInfo.behaviorParams?.actionSpace?.counts ?? {}).map(([key, val]) => (
+                      <div key={key} className="flex justify-between">
+                        <span>{key}</span>
+                        <span className="text-amber-300">{String(val)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="mt-3">
                 <div className="font-bold text-white mb-1 underline">Decision Pipeline</div>
                 <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">

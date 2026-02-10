@@ -2,6 +2,9 @@
 
 This roadmap defines how to add a new AI difficulty that keeps Smart AI economy perks but routes decisions through a fully modular AI endpoint so we can train and run ML policies (PPO + self-play).
 
+Detailed implementation spec for the ML coding agent:
+- `docs/ML_SELFPLAY_IMPLEMENTATION_SPEC.md`
+
 ## Goals
 
 - Add a new difficulty tier for ML policy control: `SMART_ML`.
@@ -258,4 +261,3 @@ Track per episode:
 3. Refactor `AIController` to call endpoint.
 4. Route `SMART_ML` to modular endpoint with Smart-equivalent rule policy first.
 5. Expose endpoint debug metadata in `App` debug view.
-
