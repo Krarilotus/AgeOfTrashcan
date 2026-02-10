@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ageoftrashcan.local/schemas/observation_schema.json",
+  "title": "AgeOfTrashcanObservation",
+  "type": "object",
+  "required": ["tick", "game_time", "static_state", "event_sequence", "action_mask"],
+  "properties": {
+    "tick": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "game_time": {
+      "type": "number",
+      "minimum": 0
+    },
+    "static_state": {
+      "type": "array",
+      "minItems": 48,
+      "maxItems": 128,
+      "items": {
+        "type": "number",
+        "minimum": -1.0,
+        "maximum": 1.0
+      }
+    },
+    "event_sequence": {
+      "type": "array",
+      "minItems": 240,
+      "maxItems": 240,
+      "items": {
+        "type": "array",
+        "minItems": 8,
+        "maxItems": 8,
+        "items": {
+          "type": "number",
+          "minimum": -1.0,
+          "maximum": 1.0
+        }
+      }
+    },
+    "action_mask": {
+      "type": "object",
+      "required": ["action_type_mask", "unit_mask", "turret_mask", "buy_slot_mask", "sell_slot_mask"],
+      "properties": {
+        "action_type_mask": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "items": { "type": "integer", "enum": [0, 1] }
+        },
+        "unit_mask": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "enum": [0, 1] }
+        },
+        "turret_mask": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "enum": [0, 1] }
+        },
+        "buy_slot_mask": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "type": "integer", "enum": [0, 1] }
+        },
+        "sell_slot_mask": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "type": "integer", "enum": [0, 1] }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

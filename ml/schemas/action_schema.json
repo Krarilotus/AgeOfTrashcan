@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ageoftrashcan.local/schemas/action_schema.json",
+  "title": "AgeOfTrashcanAction",
+  "type": "object",
+  "required": ["action_type"],
+  "properties": {
+    "action_type": {
+      "type": "string",
+      "enum": [
+        "WAIT",
+        "RECRUIT_UNIT",
+        "AGE_UP",
+        "UPGRADE_MANA",
+        "UPGRADE_TURRET_SLOTS",
+        "BUY_TURRET_ENGINE",
+        "SELL_TURRET_ENGINE",
+        "REPAIR_BASE"
+      ]
+    },
+    "unit_id": { "type": "string" },
+    "turret_id": { "type": "string" },
+    "slot_index": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+    "reasoning": { "type": "string", "maxLength": 512 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "action_type": { "const": "RECRUIT_UNIT" } } },
+      "then": { "required": ["unit_id"] }
+    },
+    {
+      "if": { "properties": { "action_type": { "const": "BUY_TURRET_ENGINE" } } },
+      "then": { "required": ["turret_id", "slot_index"] }
+    },
+    {
+      "if": { "properties": { "action_type": { "const": "SELL_TURRET_ENGINE" } } },
+      "then": { "required": ["slot_index"] }
+    }
+  ],
+  "additionalProperties": false
+}

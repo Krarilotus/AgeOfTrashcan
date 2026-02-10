@@ -40,7 +40,7 @@ import {
   type MountedTurretSlotState,
 } from './config/turrets';
 import { AIController, AIControllerFactory } from './ai/AIController';
-import { BalancedAI, SmartPlannerAI } from './ai/behaviors';
+import { BalancedAI, MLSelfPlayBehavior, SmartPlannerAI } from './ai/behaviors';
 import type { GameStateSnapshot, AIDecision, IAIBehavior, RecruitUnitParams } from './ai/AIBehavior';
 
 const FIXED_TIMESTEP = 1000 / 60; // ~16.67ms for 60 FPS
@@ -255,7 +255,10 @@ export class GameEngine {
   }
 
   private createBehaviorForDifficulty(difficulty: GameDifficulty): IAIBehavior {
-    if (difficulty === 'SMART' || difficulty === 'SMART_ML') {
+    if (difficulty === 'SMART_ML') {
+      return new MLSelfPlayBehavior();
+    }
+    if (difficulty === 'SMART') {
       return new SmartPlannerAI();
     }
     return new BalancedAI();

@@ -5,3 +5,4 @@
 
 export { BalancedAI } from './BalancedAI';
 export { SmartPlannerAI } from './SmartPlannerAI';
+export { MLSelfPlayBehavior } from './MLSelfPlayBehavior';

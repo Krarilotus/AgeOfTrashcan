@@ -8,6 +8,11 @@ This document replaces the previous architecture write-up and reflects the curre
 - Primary behavior: `BalancedAI`.
 - Smart planner behavior exists as `SmartPlannerAI` and is now used for Smart-tier profiles.
 - New difficulty scaffold: `SMART_ML` (Smart-economy parity, modular endpoint-ready).
+- `SmartPlannerAI` is an explicit HTN-style planner with:
+  - top-level tasks (`THREAT_CONTAIN`, `FORMATION_RECOVER`, `PRESS_WINDOW`, `TECH_TRANSITION`)
+  - method expansion into primitive game actions
+  - combo-wave sequencing by age (including frontline+backline counters)
+  - explicit action-space legality map in debug output
 - Deprecated assumptions from old docs:
   - Multiple behavior classes (`AggressiveAI`, `DefensiveAI`) are not active in this codebase.
   - Legacy action `BUILD_TURRET` is replaced by slot/engine actions.
