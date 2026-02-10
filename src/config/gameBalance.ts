@@ -45,7 +45,7 @@ export const PROGRESSION_CONFIG = {
   ageBaseHealthMultiplier: 2,
 } as const;
 
-export type GameDifficulty = 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER';
+export type GameDifficulty = 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER';
 export type EnemyPurchaseCategory = 'unit' | 'turret_upgrade' | 'turret_engine' | 'other';
 
 export const TURRET_BALANCE_CONFIG = {
@@ -172,6 +172,17 @@ export const DIFFICULTY_CONFIG = {
   },
   SMART: {
     // Smart planner keeps Medium macro-economy pressure but uses stronger unit-discount tempo.
+    goldMultiplier: 1.2,
+    manaIncomeMultiplier: 1.2,
+    killGoldMultiplier: 1.2,
+    unitDiscountMultiplier: 0.65,
+    turretUpgradeDiscountMultiplier: 0.8,
+    turretEngineDiscountMultiplier: 0.8,
+    stackSizeMultiplier: 3.0,
+    stackSizeMultiplierMax: 3.5,
+  },
+  SMART_ML: {
+    // ML endpoint difficulty parity profile: same economy profile as SMART.
     goldMultiplier: 1.2,
     manaIncomeMultiplier: 1.2,
     killGoldMultiplier: 1.2,

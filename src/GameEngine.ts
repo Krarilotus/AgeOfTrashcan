@@ -18,6 +18,9 @@ import {
   BASE_CONFIG,
   getAgeUpgradeCost,
   DIFFICULTY_CONFIG,
+  getEnemyPurchaseDiscountMultiplier,
+  type EnemyPurchaseCategory,
+  type GameDifficulty,
   getManaCost,
   getGoldIncome,
   getManaGeneration,
@@ -37,8 +40,8 @@ import {
   type MountedTurretSlotState,
 } from './config/turrets';
 import { AIController, AIControllerFactory } from './ai/AIController';
-import { BalancedAI } from './ai/behaviors';
-import type { GameStateSnapshot, AIDecision, RecruitUnitParams } from './ai/AIBehavior';
+import { BalancedAI, SmartPlannerAI } from './ai/behaviors';
+import type { GameStateSnapshot, AIDecision, IAIBehavior, RecruitUnitParams } from './ai/AIBehavior';
 
 const FIXED_TIMESTEP = 1000 / 60; // ~16.67ms for 60 FPS
 const baseHalfSize = 30; // Original half size
@@ -49,7 +52,7 @@ export { UNIT_DEFS };
 // OLD UNIT_DEFS REMOVED - All units now imported from config/units.ts
 
 export interface GameConfig {
-  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER';
+  difficulty: GameDifficulty;
   startingGold: number;
   startingMana: number;
   goldIncomeBase: number;
@@ -248,11 +251,21 @@ export class GameEngine {
     this.economySystem = new EconomySystem();
     this.skillSystem = new SkillSystem();
 
-    // Initialize AI controller with Balanced behavior
-    this.aiController = AIControllerFactory.createRuleBased(
-      config.difficulty,
+    this.aiController = this.createAIController(config.difficulty);
+  }
+
+  private createBehaviorForDifficulty(difficulty: GameDifficulty): IAIBehavior {
+    if (difficulty === 'SMART' || difficulty === 'SMART_ML') {
+      return new SmartPlannerAI();
+    }
+    return new BalancedAI();
+  }
+
+  private createAIController(difficulty: GameDifficulty): AIController {
+    return AIControllerFactory.createRuleBased(
+      difficulty,
       'BALANCED',
-      new BalancedAI()
+      this.createBehaviorForDifficulty(difficulty)
     );
   }
 
@@ -940,13 +953,14 @@ export class GameEngine {
     return owner === 'PLAYER' ? this.state.progression.player : this.state.progression.enemy;
   }
 
-  private getDiscountedGoldCostForOwner(owner: 'PLAYER' | 'ENEMY', baseCost: number): number {
+  private getDiscountedGoldCostForOwner(
+    owner: 'PLAYER' | 'ENEMY',
+    baseCost: number,
+    category: EnemyPurchaseCategory = 'unit'
+  ): number {
     if (owner !== 'ENEMY') return baseCost;
-    let finalCost = baseCost;
-    if (this.config.difficulty === 'MEDIUM') finalCost *= 0.8;
-    else if (this.config.difficulty === 'HARD') finalCost *= 0.65;
-    else if (this.config.difficulty === 'CHEATER') finalCost *= 0.5;
-    return Math.floor(finalCost);
+    const multiplier = getEnemyPurchaseDiscountMultiplier(this.config.difficulty, category);
+    return Math.floor(baseCost * multiplier);
   }
 
   queueTurretSlotUpgrade(owner: 'PLAYER' | 'ENEMY' = 'PLAYER'): boolean {
@@ -957,7 +971,11 @@ export class GameEngine {
     if (base.turretSlotsUnlocked >= MAX_TURRET_SLOTS) return false;
     if (queue.some((item) => item.kind === 'turret_slot')) return false;
 
-    const cost = this.getDiscountedGoldCostForOwner(owner, getTurretSlotUnlockCost(base.turretSlotsUnlocked));
+    const cost = this.getDiscountedGoldCostForOwner(
+      owner,
+      getTurretSlotUnlockCost(base.turretSlotsUnlocked),
+      'turret_upgrade'
+    );
     if (econ.gold < cost) return false;
     econ.gold -= cost;
 
@@ -993,7 +1011,7 @@ export class GameEngine {
     if (!engine) return false;
     if (engine.age > prog.age) return false;
 
-    let finalCost = this.getDiscountedGoldCostForOwner(owner, engine.cost);
+    let finalCost = this.getDiscountedGoldCostForOwner(owner, engine.cost, 'turret_engine');
     const finalManaCost = engine.manaCost ?? 0;
 
     if (econ.gold < finalCost) return false;
@@ -1091,7 +1109,7 @@ export class GameEngine {
       return score;
     };
 
-    const getDiscountedCost = (cost: number) => this.getDiscountedGoldCostForOwner('ENEMY', cost);
+    const getDiscountedCost = (cost: number) => this.getDiscountedGoldCostForOwner('ENEMY', cost, 'turret_engine');
     const canAfford = (engine: NonNullable<ReturnType<typeof getTurretEngineDef>>, goldOverride?: number) =>
       getDiscountedCost(engine.cost) <= (goldOverride ?? econ.gold) &&
       (engine.manaCost ?? 0) <= econ.mana;
@@ -1487,24 +1505,12 @@ export class GameEngine {
       // Reinitialize PRNG with restored seed
       this.prng = new PRNG(this.seed);
       
-      // Reinitialize AI controller
-      this.aiController = AIControllerFactory.createRuleBased(
-        this.config.difficulty,
-        'BALANCED',
-        new BalancedAI()
-      );
+      // Reinitialize AI controller for selected difficulty profile
+      this.aiController = this.createAIController(this.config.difficulty);
       
       // Restore AI state if available
       if (saveData.aiState) {
         this.aiController.restoreState(saveData.aiState);
-        // Correctly restore lastAgeUpTime to avoid massive warchest spikes on reload
-        // Since we don't save lastAgeUpTime in AIState explicitly yet, we can approximate 
-        // using lastAgingTime or assume 0 if start of game.
-        // BETTER: Use lastAgingTime from AIState which is saved.
-        const behavior = (this.aiController as any).config.behavior;
-        if (behavior instanceof BalancedAI && saveData.aiState.lastAgingTime) {
-             behavior.setLastAgeUpTime(saveData.aiState.lastAgingTime); 
-        }
       }
       
       // Ensure base positions are synced to battlefield dimensions
@@ -1542,7 +1548,7 @@ export class GameEngine {
    */
   static deleteSavedGame(): void {
     localStorage.removeItem(GameEngine.SAVE_KEY);
-    console.log('ðŸ—‘ï¸ Saved game deleted');
+    console.log('[SAVE] Saved game deleted');
   }
 }
 

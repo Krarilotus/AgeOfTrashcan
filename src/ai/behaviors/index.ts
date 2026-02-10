@@ -4,3 +4,4 @@
  */
 
 export { BalancedAI } from './BalancedAI';
+export { SmartPlannerAI } from './SmartPlannerAI';

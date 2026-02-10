@@ -6,9 +6,18 @@ This document replaces the previous architecture write-up and reflects the curre
 
 - Scope: Rule-based AI currently in production.
 - Primary behavior: `BalancedAI`.
+- Smart planner behavior exists as `SmartPlannerAI` and is now used for Smart-tier profiles.
+- New difficulty scaffold: `SMART_ML` (Smart-economy parity, modular endpoint-ready).
 - Deprecated assumptions from old docs:
   - Multiple behavior classes (`AggressiveAI`, `DefensiveAI`) are not active in this codebase.
   - Legacy action `BUILD_TURRET` is replaced by slot/engine actions.
+
+## ML Expansion Track
+
+- Roadmap document: `docs/ML_SELFPLAY_ROADMAP.md`.
+- AI controller now supports a modular endpoint abstraction:
+  - Rule endpoint wraps current symbolic behaviors.
+  - Future ML endpoint can plug in without changing action execution bridge.
 
 ## Source Map
 

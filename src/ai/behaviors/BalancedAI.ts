@@ -209,18 +209,18 @@ export class BalancedAI implements IAIBehavior {
     return score;
   }
 
-  private getEnemyDiscountedCost(baseCost: number, difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER'): number {
+  private getEnemyDiscountedCost(baseCost: number, difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER'): number {
     let finalCost = baseCost;
     if (difficulty === 'MEDIUM') finalCost *= 0.8;
     else if (difficulty === 'HARD') finalCost *= 0.65;
-    else if (difficulty === 'SMART') finalCost *= 0.8;
+    else if (difficulty === 'SMART' || difficulty === 'SMART_ML') finalCost *= 0.8;
     else if (difficulty === 'CHEATER') finalCost *= 0.5;
     return Math.floor(finalCost);
   }
 
-  private getEnemySellRefundMultiplier(difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER'): number {
+  private getEnemySellRefundMultiplier(difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER'): number {
     if (difficulty === 'EASY') return 0.5;
-    if (difficulty === 'MEDIUM' || difficulty === 'SMART') return 0.6;
+    if (difficulty === 'MEDIUM' || difficulty === 'SMART' || difficulty === 'SMART_ML') return 0.6;
     if (difficulty === 'HARD') return 0.8;
     return 1.0;
   }

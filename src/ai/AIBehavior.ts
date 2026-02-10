@@ -103,7 +103,7 @@ export interface GameStateSnapshot {
   lastEnemyBaseAttackTime: number; // Time in seconds when enemy base was last attacked
   
   // Difficulty
-  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER';
+  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER';
 }
 
 /**
@@ -899,7 +899,7 @@ export class AIBehaviorUtils {
   static calculateWarchest(
     state: GameStateSnapshot,
     timeSinceLastAgeUp: number,
-    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER'
+    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER'
   ): number {
     // No warchest needed at max age (Age 6 is max playable age)
     if (state.enemyAge >= 6) {
@@ -955,12 +955,13 @@ export class AIBehaviorUtils {
    * Get difficulty-based stack multiplier
    * Determines how much gold AI should accumulate before recruiting
    */
-  static getStackMultiplier(difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER', isAggressive: boolean): number {
+  static getStackMultiplier(difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER', isAggressive: boolean): number {
     const baseMultipliers = {
       EASY: { defensive: 2.0, aggressive: 2.5 },
       MEDIUM: { defensive: 2.5, aggressive: 3.0 },
       HARD: { defensive: 3.0, aggressive: 3.5 },
       SMART: { defensive: 2.6, aggressive: 3.1 },
+      SMART_ML: { defensive: 2.6, aggressive: 3.1 },
       CHEATER: { defensive: 3.5, aggressive: 4.0 },
     };
     
@@ -1038,7 +1039,7 @@ export class AIBehaviorUtils {
     state: GameStateSnapshot,
     composition: { frontline: number; ranged: number; support: number },
     minUnits: number,
-    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER'
+    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER'
   ): number {
     const availableUnits = getUnitsForAge(state.enemyAge);
     
@@ -1094,6 +1095,7 @@ export class AIBehaviorUtils {
       MEDIUM: 1.5,
       HARD: 2.0,
       SMART: 1.6,
+      SMART_ML: 1.6,
       CHEATER: 2.5,
     }[difficulty];
     
@@ -1106,7 +1108,7 @@ export class AIBehaviorUtils {
    */
   static calculateMinimumRecruitmentGold(
     state: GameStateSnapshot,
-    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER'
+    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER'
   ): number {
     const availableUnits = getUnitsForAge(state.enemyAge);
     

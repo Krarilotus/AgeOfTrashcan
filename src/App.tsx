@@ -418,6 +418,8 @@ export default function App() {
                 </div>
                 <div>
                   <div className="font-bold text-white mb-2 underline">Logic</div>
+                  <div>Endpoint: <span className="text-cyan-300">{aiDebugInfo.endpoint ?? 'n/a'}</span></div>
+                  <div className="text-[10px] text-slate-500">Policy Latency: {aiDebugInfo.lastEndpointLatencyMs ?? 0}ms</div>
                   <div title="Spendable / Total">Gold: <span className="text-yellow-400">{aiDebugInfo.behaviorParams?.gold}</span></div>
                   <div>Reserved: {aiDebugInfo.behaviorParams?.reserved}g</div>
                   <div className="text-[10px] text-slate-400 mt-1">{aiDebugInfo.behaviorParams?.comp}</div>

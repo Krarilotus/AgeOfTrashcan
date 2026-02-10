@@ -174,10 +174,13 @@ export function getSlotMountYOffsetUnits(slotIndex: number): number {
   return TURRET_SLOT_MOUNT_Y_OFFSETS_UNITS[slotIndex] ?? TURRET_SLOT_MOUNT_Y_OFFSETS_UNITS[TURRET_SLOT_MOUNT_Y_OFFSETS_UNITS.length - 1];
 }
 
-export function getTurretSellRefundMultiplier(isPlayer: boolean, difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER'): number {
+export function getTurretSellRefundMultiplier(
+  isPlayer: boolean,
+  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER'
+): number {
   if (isPlayer) return 0.5;
   if (difficulty === 'EASY') return 0.5;
-  if (difficulty === 'MEDIUM' || difficulty === 'SMART') return 0.6;
+  if (difficulty === 'MEDIUM' || difficulty === 'SMART' || difficulty === 'SMART_ML') return 0.6;
   if (difficulty === 'HARD') return 0.8;
   return 1.0;
 }

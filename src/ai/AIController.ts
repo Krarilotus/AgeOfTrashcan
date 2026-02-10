@@ -11,6 +11,7 @@ import {
   MLConfig,
   DEFAULT_ML_CONFIG,
 } from '../config/aiConfig';
+import type { GameDifficulty } from '../config/gameBalance';
 import {
   IAIBehavior,
   GameStateSnapshot,
@@ -20,14 +21,15 @@ import {
   AIBehaviorUtils,
   ThreatDetails,
 } from './AIBehavior';
+import { IAIEndpoint, RuleBehaviorEndpoint } from './endpoints';
 
 /**
  * AI Controller Configuration
  */
 export interface AIControllerConfig {
-  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER';
+  difficulty: GameDifficulty;
   personality: AIPersonality;
-  behavior: IAIBehavior;
+  endpoint: IAIEndpoint;
   mlConfig?: MLConfig;
   enableLearning?: boolean;
 }
@@ -58,6 +60,8 @@ export interface AIState {
   // Attack group planning
   plannedAttackGroup: { name: string; units: string[] } | null;
   attackGroupProgress: number; // 0.0 to 1.0
+  endpointName: string;
+  lastEndpointLatencyMs: number;
 }
 
 /**
@@ -82,6 +86,8 @@ export class AIController {
       recentRewards: [],
       plannedAttackGroup: null,
       attackGroupProgress: 0,
+      endpointName: config.endpoint.getName(),
+      lastEndpointLatencyMs: 0,
     };
   }
   
@@ -91,9 +97,17 @@ export class AIController {
   public makeDecision(gameState: GameStateSnapshot, currentTime: number): AIDecision {
     // Update strategic assessment
     this.updateStrategicState(gameState);
-    
-    // Delegate to behavior strategy
-    const decision = this.config.behavior.decide(gameState, this.config.personality);
+
+    // Delegate to modular endpoint (rule-based or ML)
+    const startMs = Date.now();
+    const decision = this.config.endpoint.decide({
+      state: gameState,
+      difficulty: this.config.difficulty,
+      personality: this.config.personality,
+      currentTime,
+    });
+    this.state.lastEndpointLatencyMs = Math.max(0, Date.now() - startMs);
+    this.state.endpointName = this.config.endpoint.getName();
     
     // Track decision for learning
     this.state.recentActions.push(decision);
@@ -106,7 +120,8 @@ export class AIController {
   }
   
   public getDebugInfo(): any {
-    const behaviorParams = this.config.behavior.getParameters ? this.config.behavior.getParameters() : {};
+    const endpointParams = this.config.endpoint.getParameters ? this.config.endpoint.getParameters() : {};
+    const behaviorParams = endpointParams.behaviorParams ?? {};
     const visibleActions = this.state.recentActions
       .filter((a) => a.action !== 'WAIT')
       .slice(-8)
@@ -115,19 +130,21 @@ export class AIController {
     // Fallback: If AIController has no group (legacy path), check if Behavior has one defined
     let activeGroup = this.state.plannedAttackGroup;
     if (!activeGroup && behaviorParams.currentGroupPlan) {
-        activeGroup = behaviorParams.currentGroupPlan;
+      activeGroup = behaviorParams.currentGroupPlan;
     }
 
     return {
-        ...this.state,
-        recentActions: visibleActions,
-        lastDecision: this.state.recentActions.length > 0 ? this.state.recentActions[this.state.recentActions.length - 1] : null,
-        plannedAttackGroup: activeGroup ? {
-            name: activeGroup.name,
-            units: activeGroup.units
-        } : null,
-        behavior: this.config.behavior.getName(),
-        behaviorParams
+      ...this.state,
+      recentActions: visibleActions,
+      lastDecision: this.state.recentActions.length > 0 ? this.state.recentActions[this.state.recentActions.length - 1] : null,
+      plannedAttackGroup: activeGroup ? {
+        name: activeGroup.name,
+        units: activeGroup.units
+      } : null,
+      endpoint: this.config.endpoint.getName(),
+      behavior: endpointParams.behavior ?? 'n/a',
+      behaviorParams,
+      endpointParams,
     };
   }
   
@@ -155,13 +172,14 @@ export class AIController {
     }
     
     // Update behavior if it supports learning
-    if (this.config.behavior.update && this.config.enableLearning) {
+    const maybeRuleBehavior = this.getRuleBehavior();
+    if (maybeRuleBehavior?.update && this.config.enableLearning) {
       // Provide average recent reward as signal
       const avgReward =
         this.state.recentRewards.reduce((a, b) => a + b, 0) /
         this.state.recentRewards.length;
       
-      this.config.behavior.update(null as any, avgReward);
+      maybeRuleBehavior.update(null as any, avgReward);
     }
   }
   
@@ -181,19 +199,18 @@ export class AIController {
       recentRewards: [],
       plannedAttackGroup: null,
       attackGroupProgress: 0,
+      endpointName: this.config.endpoint.getName(),
+      lastEndpointLatencyMs: 0,
     };
-    
-    if (this.config.behavior.reset) {
-      this.config.behavior.reset();
-    }
+    this.config.endpoint.reset?.();
   }
   
   /**
    * Get current AI state (for debugging)
    */
   public getState(): Readonly<AIState> & { behaviorParams?: any } {
-    const behaviorParams = this.config.behavior.getParameters ? this.config.behavior.getParameters() : {};
-    return { ...this.state, behaviorParams };
+    const endpointParams = this.config.endpoint.getParameters ? this.config.endpoint.getParameters() : {};
+    return { ...this.state, behaviorParams: endpointParams.behaviorParams ?? {} };
   }
 
   /**
@@ -203,11 +220,15 @@ export class AIController {
     const { behaviorParams, ...coreState } = savedState as any;
     
     // Restore core controller state
-    this.state = { ...coreState };
+    this.state = {
+      ...coreState,
+      endpointName: coreState.endpointName ?? this.config.endpoint.getName(),
+      lastEndpointLatencyMs: coreState.lastEndpointLatencyMs ?? 0,
+    };
 
     // Restore behavior-specific state if available
-    if (behaviorParams && this.config.behavior.setParameters) {
-        this.config.behavior.setParameters(behaviorParams);
+    if (behaviorParams && this.config.endpoint.setParameters) {
+      this.config.endpoint.setParameters(behaviorParams);
     }
   }
   
@@ -222,10 +243,26 @@ export class AIController {
    * Change AI behavior strategy
    */
   public setBehavior(behavior: IAIBehavior): void {
-    this.config.behavior = behavior;
-    if (behavior.reset) {
-      behavior.reset();
+    if (this.config.endpoint instanceof RuleBehaviorEndpoint) {
+      this.config.endpoint.setBehavior(behavior);
+      behavior.reset?.();
+      return;
     }
+    this.config.endpoint = new RuleBehaviorEndpoint(behavior);
+    behavior.reset?.();
+  }
+
+  public setEndpoint(endpoint: IAIEndpoint): void {
+    this.config.endpoint = endpoint;
+    endpoint.reset?.();
+    this.state.endpointName = endpoint.getName();
+  }
+
+  private getRuleBehavior(): IAIBehavior | null {
+    if (this.config.endpoint instanceof RuleBehaviorEndpoint) {
+      return this.config.endpoint.getBehavior();
+    }
+    return null;
   }
   
   /**
@@ -307,7 +344,7 @@ export class AIControllerFactory {
    * Create a standard rule-based AI
    */
   static createRuleBased(
-    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER',
+    difficulty: GameDifficulty,
     personalityName: keyof typeof AI_PERSONALITIES,
     behavior: IAIBehavior
   ): AIController {
@@ -316,7 +353,7 @@ export class AIControllerFactory {
     return new AIController({
       difficulty,
       personality,
-      behavior,
+      endpoint: new RuleBehaviorEndpoint(behavior),
       enableLearning: false,
     });
   }
@@ -325,7 +362,7 @@ export class AIControllerFactory {
    * Create an adaptive AI that learns during gameplay
    */
   static createAdaptive(
-    difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER',
+    difficulty: GameDifficulty,
     behavior: IAIBehavior,
     mlConfig?: MLConfig
   ): AIController {
@@ -334,7 +371,7 @@ export class AIControllerFactory {
     return new AIController({
       difficulty,
       personality,
-      behavior,
+      endpoint: new RuleBehaviorEndpoint(behavior),
       mlConfig: mlConfig || DEFAULT_ML_CONFIG,
       enableLearning: true,
     });

@@ -2,7 +2,7 @@
 
 import { UI_SYMBOLS } from './uiEmotes';
 
-export type Difficulty = 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'CHEATER';
+export type Difficulty = 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER';
 
 interface StartScreenProps {
   difficulty: Difficulty;
@@ -36,7 +36,7 @@ export function StartScreen({
       <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 w-full max-w-md">
         <div className="text-lg font-semibold mb-4 text-center">Select Difficulty</div>
         <div className="grid grid-cols-3 gap-3">
-          {(['EASY', 'MEDIUM', 'HARD', 'SMART', 'CHEATER'] as const).map((diff) => (
+          {(['EASY', 'MEDIUM', 'HARD', 'SMART', 'SMART_ML', 'CHEATER'] as const).map((diff) => (
             <button
               key={diff}
               onClick={() => onDifficultyChange(diff)}
@@ -50,6 +50,7 @@ export function StartScreen({
               {diff === 'MEDIUM' && 'Medium'}
               {diff === 'HARD' && 'Hard'}
               {diff === 'SMART' && 'Smart'}
+              {diff === 'SMART_ML' && 'Smart ML'}
               {diff === 'CHEATER' && 'Cheater'}
             </button>
           ))}
@@ -59,6 +60,7 @@ export function StartScreen({
           {difficulty === 'MEDIUM' && 'Balanced AI with moderate discounts and income.'}
           {difficulty === 'HARD' && 'Balanced AI with stronger economy and discounts.'}
           {difficulty === 'SMART' && 'Hierarchical planner AI with proactive wave + turret strategy.'}
+          {difficulty === 'SMART_ML' && 'Smart economy profile with modular ML-ready AI endpoint.'}
           {difficulty === 'CHEATER' && 'Ruthless AI with extreme economy and pressure.'}
         </div>
       </div>
