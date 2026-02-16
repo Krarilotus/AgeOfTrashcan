@@ -12,6 +12,8 @@ interface MLSelfPlayBehaviorOptions {
   fallbackBehavior?: IAIBehavior;
   policyEnabled?: boolean;
   sequenceLength?: number;
+  modelVersionOverride?: string;
+  selectedCheckpointId?: string;
 }
 
 interface MLDecisionDebugState {
@@ -36,6 +38,8 @@ export class MLSelfPlayBehavior implements IAIBehavior {
   private readonly history = new MLHistoryBuffer({ horizonSeconds: 120 });
   private readonly sequenceLength: number;
   private policyEnabled: boolean;
+  private modelVersionOverride: string | null;
+  private selectedCheckpointId: string | null;
   private totalDecisions = 0;
   private fallbackDecisions = 0;
   private policyDecisions = 0;
@@ -45,6 +49,8 @@ export class MLSelfPlayBehavior implements IAIBehavior {
     this.policy = options.policy ?? new HeuristicBootstrapPolicy();
     this.fallbackBehavior = options.fallbackBehavior ?? new SmartPlannerAI();
     this.policyEnabled = options.policyEnabled ?? true;
+    this.modelVersionOverride = options.modelVersionOverride ?? null;
+    this.selectedCheckpointId = options.selectedCheckpointId ?? null;
     this.sequenceLength = options.sequenceLength ?? 240;
     this.lastDebug = {
       policyName: this.policy.getName(),
@@ -115,6 +121,10 @@ export class MLSelfPlayBehavior implements IAIBehavior {
       fallbackReason = 'policy disabled by configuration';
     }
 
+    if (this.modelVersionOverride) {
+      modelVersion = this.modelVersionOverride;
+    }
+
     if (!selectedDecision) {
       selectedDecision = this.fallbackBehavior.decide(state, personality);
       if (!this.isDecisionLegal(selectedDecision, legalMask)) {
@@ -173,12 +183,23 @@ export class MLSelfPlayBehavior implements IAIBehavior {
       fallbackBehavior: this.fallbackBehavior.getName(),
       sequenceHorizonSeconds: 120,
       sequenceLength: this.sequenceLength,
+      modelVersionOverride: this.modelVersionOverride,
+      selectedCheckpointId: this.selectedCheckpointId,
     };
   }
 
   setParameters(params: Record<string, unknown>): void {
     if (typeof params.policyEnabled === 'boolean') {
       this.policyEnabled = params.policyEnabled;
+    }
+    if (typeof params.modelVersionOverride === 'string' && params.modelVersionOverride.trim().length > 0) {
+      this.modelVersionOverride = params.modelVersionOverride;
+    }
+    if (typeof params.selectedCheckpointId === 'string' && params.selectedCheckpointId.trim().length > 0) {
+      this.selectedCheckpointId = params.selectedCheckpointId;
+      if (!this.modelVersionOverride) {
+        this.modelVersionOverride = params.selectedCheckpointId;
+      }
     }
   }
 

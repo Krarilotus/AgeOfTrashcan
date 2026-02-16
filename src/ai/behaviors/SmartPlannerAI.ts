@@ -8,7 +8,7 @@ import {
 } from '../AIBehavior';
 import { AIPersonality } from '../../config/aiConfig';
 import { UNIT_DEFS, UnitDef, getUnitsForAge } from '../../config/units';
-import { getManaCost } from '../../config/gameBalance';
+import { getManaCost, QUEUE_CONFIG } from '../../config/gameBalance';
 import {
   estimateEngineDps,
   getTurretEngineDef,
@@ -140,6 +140,9 @@ interface PlannerContext {
   playerTurretSlotFill: number;
   decisionPulse: number;
   stallPressure: number;
+  lanePenetration: number;
+  ownAvgDpsPerUnit: number;
+  enemyStaticDefense: number;
 }
 
 interface ReservePolicy {
@@ -221,6 +224,27 @@ interface ComboManaPressure {
   remainingManaCost: number;
 }
 
+interface PlannedActionStep {
+  goal: GoalId;
+  stage: string;
+  detail: string;
+  decision: AIDecision;
+  createdAtSec: number;
+  expiresAtSec: number;
+}
+
+interface PlanAnchor {
+  createdAtSec: number;
+  age: number;
+  baseRisk: number;
+  offensiveWindow: number;
+  powerAdvantage: number;
+  ownUnitCount: number;
+  enemyUnitCount: number;
+  turretPressure: number;
+  goal: GoalId;
+}
+
 const AGE_FORMATION_TEMPLATES: Record<number, CompositionTarget> = {
   1: { frontline: 0.58, ranged: 0.37, support: 0.0, siege: 0.05 },
   2: { frontline: 0.52, ranged: 0.38, support: 0.0, siege: 0.1 },
@@ -267,6 +291,8 @@ export class SmartPlannerAI implements IAIBehavior {
   private activeGoal: GoalId = 'STABILIZE';
   private activeComboPlan: ActiveComboPlan | null = null;
   private recentRecruitHistory: string[] = [];
+  private actionPlan: PlannedActionStep[] = [];
+  private planAnchor: PlanAnchor | null = null;
   private debugData: Record<string, unknown> = {};
 
   getName(): string {
@@ -279,6 +305,8 @@ export class SmartPlannerAI implements IAIBehavior {
     this.activeGoal = 'STABILIZE';
     this.activeComboPlan = null;
     this.recentRecruitHistory = [];
+    this.actionPlan = [];
+    this.planAnchor = null;
     this.debugData = {};
   }
 
@@ -290,6 +318,8 @@ export class SmartPlannerAI implements IAIBehavior {
       pendingTurretReplacement: this.pendingTurretReplacement,
       activeComboPlan: this.activeComboPlan,
       recentRecruitHistory: this.recentRecruitHistory,
+      actionPlan: this.actionPlan,
+      planAnchor: this.planAnchor,
     };
   }
 
@@ -315,6 +345,32 @@ export class SmartPlannerAI implements IAIBehavior {
     const recent = params.recentRecruitHistory;
     if (Array.isArray(recent)) {
       this.recentRecruitHistory = recent.filter((v): v is string => typeof v === 'string').slice(-10);
+    }
+
+    const plan = params.actionPlan;
+    if (Array.isArray(plan)) {
+      this.actionPlan = plan
+        .map((item) => this.toPlannedActionStep(item))
+        .filter((item): item is PlannedActionStep => item !== null)
+        .slice(0, 8);
+    }
+
+    const anchor = params.planAnchor;
+    if (anchor && typeof anchor === 'object') {
+      const maybe = anchor as Partial<PlanAnchor>;
+      if (
+        typeof maybe.createdAtSec === 'number' &&
+        typeof maybe.age === 'number' &&
+        typeof maybe.baseRisk === 'number' &&
+        typeof maybe.offensiveWindow === 'number' &&
+        typeof maybe.powerAdvantage === 'number' &&
+        typeof maybe.ownUnitCount === 'number' &&
+        typeof maybe.enemyUnitCount === 'number' &&
+        typeof maybe.turretPressure === 'number' &&
+        (maybe.goal === 'SURVIVE' || maybe.goal === 'STABILIZE' || maybe.goal === 'PRESS' || maybe.goal === 'TECH')
+      ) {
+        this.planAnchor = maybe as PlanAnchor;
+      }
     }
   }
 
@@ -348,6 +404,27 @@ export class SmartPlannerAI implements IAIBehavior {
       goalScores.map((g) => `${g.goal}:${g.score.toFixed(1)}`).join(' | ')
     );
 
+    if (this.shouldInvalidatePlan(state, ctx, goalScores)) {
+      this.actionPlan = [];
+      this.planAnchor = null;
+      pushStage('0) Plan', 'skipped', 'Plan reset due to significant context drift');
+    }
+
+    const plannedDecision = this.tryConsumePlannedStep(state, ctx, reserve, stages);
+    if (plannedDecision) {
+      this.activeGoal = this.planAnchor?.goal ?? this.activeGoal;
+      this.commitDecision(
+        state,
+        plannedDecision,
+        stages,
+        reserve,
+        goalScores,
+        ctx,
+        `Execute planned step: ${plannedDecision.action}`
+      );
+      return plannedDecision;
+    }
+
     const htnTasks = this.buildTaskNetwork(goalScores, state, ctx);
     pushStage(
       '3) HTN Network',
@@ -364,8 +441,21 @@ export class SmartPlannerAI implements IAIBehavior {
     if (forcedAge) candidates.push(forcedAge);
 
     const normalizedCandidates = this.dedupeRecruitCandidates(candidates);
+    const filteredCandidates: Candidate[] = [];
+    for (const candidate of normalizedCandidates) {
+      if (this.shouldRejectCandidate(candidate, state, ctx, reserve)) {
+        pushStage(
+          `${candidate.goal} -> ${candidate.stage}`,
+          'skipped',
+          `${candidate.detail} | rejected by anti-feed gate`,
+          candidate.decision.action
+        );
+        continue;
+      }
+      filteredCandidates.push(candidate);
+    }
 
-    if (normalizedCandidates.length === 0) {
+    if (filteredCandidates.length === 0) {
       const emergencyFallbackAllowed = ctx.baseRisk >= 0.62 || ctx.immediatePressure >= 2;
       const fallbackBudget = emergencyFallbackAllowed ? state.enemyGold : reserve.spendableGold;
       const cheapestCost = this.getCheapestAvailableUnitCost(state);
@@ -380,8 +470,25 @@ export class SmartPlannerAI implements IAIBehavior {
               ? `Emergency fallback recruit ${fallback}`
               : `Fallback recruit ${fallback} within spendable budget`,
           };
-          this.commitDecision(state, decision, stages, reserve, goalScores, ctx, 'Fallback anti-passive recruit');
-          return decision;
+          if (!this.shouldRejectRecruitDecision(decision, emergencyFallbackAllowed ? 'SURVIVE' : this.activeGoal, state, ctx, reserve)) {
+            this.planFromSeed(
+              {
+                goal: emergencyFallbackAllowed ? 'SURVIVE' : this.activeGoal,
+                stage: 'Fallback',
+                utility: 35,
+                risk: emergencyFallbackAllowed ? 8 : 11,
+                detail: 'Fallback anti-passive recruit',
+                decision,
+              },
+              [],
+              state,
+              ctx
+            );
+            const plannedFallback = this.tryConsumePlannedStep(state, ctx, reserve, stages) ?? decision;
+            this.commitDecision(state, plannedFallback, stages, reserve, goalScores, ctx, 'Fallback anti-passive recruit');
+            return plannedFallback;
+          }
+          pushStage('Fallback', 'skipped', `Fallback ${fallback} blocked by anti-feed gate`, 'RECRUIT_UNIT');
         }
       }
 
@@ -395,7 +502,7 @@ export class SmartPlannerAI implements IAIBehavior {
       return waitDecision;
     }
 
-    for (const c of normalizedCandidates) {
+    for (const c of filteredCandidates) {
       pushStage(
         `${c.goal} -> ${c.stage}`,
         'candidate',
@@ -404,7 +511,7 @@ export class SmartPlannerAI implements IAIBehavior {
       );
     }
 
-    normalizedCandidates.sort((a, b) => {
+    filteredCandidates.sort((a, b) => {
       const aGoal = goalScoreMap.get(a.goal) ?? 0;
       const bGoal = goalScoreMap.get(b.goal) ?? 0;
       const aScore = a.utility - a.risk * 0.62 + aGoal * 0.16;
@@ -412,11 +519,394 @@ export class SmartPlannerAI implements IAIBehavior {
       return bScore - aScore;
     });
 
-    const chosen = normalizedCandidates[0];
+    const chosen = filteredCandidates[0];
     this.activeGoal = chosen.goal;
     pushStage(`${chosen.goal} -> ${chosen.stage}`, 'selected', chosen.detail, chosen.decision.action);
-    this.commitDecision(state, chosen.decision, stages, reserve, goalScores, ctx, chosen.detail);
-    return chosen.decision;
+    this.planFromSeed(chosen, filteredCandidates, state, ctx);
+    const plannedOrChosen = this.tryConsumePlannedStep(state, ctx, reserve, stages) ?? chosen.decision;
+    this.commitDecision(state, plannedOrChosen, stages, reserve, goalScores, ctx, chosen.detail);
+    return plannedOrChosen;
+  }
+
+  private toPlannedActionStep(raw: unknown): PlannedActionStep | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const value = raw as Partial<PlannedActionStep>;
+    if (
+      typeof value.goal !== 'string' ||
+      typeof value.stage !== 'string' ||
+      typeof value.detail !== 'string' ||
+      typeof value.createdAtSec !== 'number' ||
+      typeof value.expiresAtSec !== 'number'
+    ) {
+      return null;
+    }
+    if (value.goal !== 'SURVIVE' && value.goal !== 'STABILIZE' && value.goal !== 'PRESS' && value.goal !== 'TECH') {
+      return null;
+    }
+    const decision = value.decision as AIDecision | undefined;
+    if (!decision || typeof decision.action !== 'string') return null;
+    return {
+      goal: value.goal,
+      stage: value.stage,
+      detail: value.detail,
+      decision,
+      createdAtSec: value.createdAtSec,
+      expiresAtSec: value.expiresAtSec,
+    };
+  }
+
+  private shouldInvalidatePlan(state: GameStateSnapshot, ctx: PlannerContext, goals: GoalScore[]): boolean {
+    if (this.actionPlan.length === 0) return false;
+    if (!this.planAnchor) return true;
+
+    const anchor = this.planAnchor;
+    const topGoal = goals[0];
+    const anchorGoalScore = goals.find((g) => g.goal === anchor.goal)?.score ?? -Infinity;
+    const topGap = topGoal ? topGoal.score - anchorGoalScore : 0;
+    const turretPressure = ctx.enemyStaticDefense /
+      Math.max(1, ctx.ownArmy.sustainedDps + ctx.ownArmy.burstDps * 0.45 + state.enemyTurretDps + 20);
+
+    if (state.enemyAge !== anchor.age) return true;
+    if (state.gameTime - anchor.createdAtSec > 18) return true;
+    if (Math.abs(ctx.baseRisk - anchor.baseRisk) > 0.18) return true;
+    if (Math.abs(ctx.offensiveWindow - anchor.offensiveWindow) > 0.22) return true;
+    if (Math.abs(ctx.powerAdvantage - anchor.powerAdvantage) > 0.2) return true;
+    if (Math.abs(ctx.ownArmy.unitCount - anchor.ownUnitCount) >= 6) return true;
+    if (Math.abs(ctx.enemyArmy.unitCount - anchor.enemyUnitCount) >= 5) return true;
+    if (Math.abs(turretPressure - anchor.turretPressure) > 0.24) return true;
+    if (topGoal && topGoal.goal !== anchor.goal && topGap > 16) return true;
+
+    return false;
+  }
+
+  private planFromSeed(seed: Candidate, rankedCandidates: Candidate[], state: GameStateSnapshot, ctx: PlannerContext): void {
+    const includeNonRecruitBias = this.isTurretLockScenario(state, ctx) || ctx.stallPressure > 0.58;
+    const pipeline: Candidate[] = [seed, ...rankedCandidates.filter((candidate) => candidate !== seed)];
+    const reserve = this.computeReservePolicy(state, ctx);
+    const nextPlan: PlannedActionStep[] = [];
+    const seenSignatures = new Set<string>();
+    let recruitCount = 0;
+    let nonRecruitCount = 0;
+
+    for (const candidate of pipeline) {
+      if (nextPlan.length >= 4) break;
+      if (candidate.decision.action === 'WAIT') continue;
+      if (this.shouldRejectCandidate(candidate, state, ctx, reserve)) {
+        continue;
+      }
+
+      const signature = this.getDecisionSignature(candidate.decision);
+      if (seenSignatures.has(signature)) continue;
+
+      if (candidate.decision.action === 'RECRUIT_UNIT') {
+        const limit = includeNonRecruitBias ? 2 : 3;
+        if (recruitCount >= limit) continue;
+        const unitType = (candidate.decision.parameters as { unitType?: string } | undefined)?.unitType;
+        if (unitType && nextPlan.some((s) => (s.decision.parameters as { unitType?: string } | undefined)?.unitType === unitType)) {
+          continue;
+        }
+        recruitCount += 1;
+      } else {
+        nonRecruitCount += 1;
+      }
+
+      seenSignatures.add(signature);
+      nextPlan.push(this.makePlannedStep(candidate, state.gameTime));
+    }
+
+    if (includeNonRecruitBias && nonRecruitCount === 0) {
+      const nonRecruit = rankedCandidates.find((candidate) =>
+        candidate.decision.action !== 'RECRUIT_UNIT' &&
+        candidate.decision.action !== 'WAIT' &&
+        !this.shouldRejectCandidate(candidate, state, ctx, reserve)
+      );
+      if (nonRecruit) {
+        const step = this.makePlannedStep(nonRecruit, state.gameTime);
+        if (nextPlan.length === 0) {
+          nextPlan.push(step);
+        } else {
+          nextPlan.splice(1, 0, step);
+        }
+      }
+    }
+
+    this.actionPlan = nextPlan.slice(0, 5);
+    if (this.actionPlan.length === 0) {
+      this.planAnchor = null;
+      return;
+    }
+    const turretPressure = ctx.enemyStaticDefense /
+      Math.max(1, ctx.ownArmy.sustainedDps + ctx.ownArmy.burstDps * 0.45 + state.enemyTurretDps + 20);
+    this.planAnchor = {
+      createdAtSec: state.gameTime,
+      age: state.enemyAge,
+      baseRisk: ctx.baseRisk,
+      offensiveWindow: ctx.offensiveWindow,
+      powerAdvantage: ctx.powerAdvantage,
+      ownUnitCount: ctx.ownArmy.unitCount,
+      enemyUnitCount: ctx.enemyArmy.unitCount,
+      turretPressure,
+      goal: seed.goal,
+    };
+  }
+
+  private makePlannedStep(candidate: Candidate, nowSec: number): PlannedActionStep {
+    const ttlSec =
+      candidate.decision.action === 'AGE_UP' ? 8 :
+      candidate.decision.action === 'UPGRADE_TURRET_SLOTS' ? 10 :
+      candidate.decision.action === 'BUY_TURRET_ENGINE' ? 10 :
+      candidate.decision.action === 'SELL_TURRET_ENGINE' ? 6 :
+      candidate.decision.action === 'UPGRADE_MANA' ? 10 :
+      candidate.decision.action === 'REPAIR_BASE' ? 4 :
+      7;
+
+    return {
+      goal: candidate.goal,
+      stage: candidate.stage,
+      detail: candidate.detail,
+      decision: candidate.decision,
+      createdAtSec: nowSec,
+      expiresAtSec: nowSec + ttlSec,
+    };
+  }
+
+  private getDecisionSignature(decision: AIDecision): string {
+    const unitType = (decision.parameters as { unitType?: string } | undefined)?.unitType ?? '';
+    const turretId = (decision.parameters as { turretId?: string } | undefined)?.turretId ?? '';
+    const slotIndex = (decision.parameters as { slotIndex?: number } | undefined)?.slotIndex;
+    return `${decision.action}:${unitType}:${turretId}:${typeof slotIndex === 'number' ? slotIndex : ''}`;
+  }
+
+  private tryConsumePlannedStep(
+    state: GameStateSnapshot,
+    ctx: PlannerContext,
+    reserve: ReservePolicy,
+    stages: StageRow[]
+  ): AIDecision | null {
+    while (this.actionPlan.length > 0) {
+      const step = this.actionPlan[0];
+      if (state.gameTime > step.expiresAtSec) {
+        stages.push({
+          stage: '0) Plan Step',
+          status: 'skipped',
+          detail: `${step.decision.action} expired`,
+          action: step.decision.action,
+        });
+        this.actionPlan.shift();
+        continue;
+      }
+
+      if (step.decision.action === 'RECRUIT_UNIT' && this.shouldRejectRecruitDecision(step.decision, step.goal, state, ctx, reserve)) {
+        stages.push({
+          stage: '0) Plan Step',
+          status: 'skipped',
+          detail: `Blocked ${step.decision.action} by anti-feed gate`,
+          action: step.decision.action,
+        });
+        this.actionPlan.shift();
+        continue;
+      }
+
+      const executable = this.isDecisionExecutableNow(step.decision, step.goal, state, reserve, ctx);
+      if (!executable.ok) {
+        if (executable.waitForResources) {
+          stages.push({
+            stage: '0) Plan Step',
+            status: 'info',
+            detail: `Holding plan for ${step.decision.action}: ${executable.reason}`,
+            action: step.decision.action,
+          });
+          return { action: 'WAIT', reasoning: `Plan hold: ${step.decision.action} (${executable.reason})` };
+        }
+
+        stages.push({
+          stage: '0) Plan Step',
+          status: 'skipped',
+          detail: `${step.decision.action} dropped: ${executable.reason}`,
+          action: step.decision.action,
+        });
+        this.actionPlan.shift();
+        continue;
+      }
+
+      this.actionPlan.shift();
+      stages.push({
+        stage: '0) Plan Step',
+        status: 'selected',
+        detail: `${step.goal}:${step.stage} -> ${step.decision.action}`,
+        action: step.decision.action,
+      });
+      return step.decision;
+    }
+
+    if (this.actionPlan.length === 0) {
+      this.planAnchor = null;
+    }
+    return null;
+  }
+
+  private isDecisionExecutableNow(
+    decision: AIDecision,
+    goal: GoalId,
+    state: GameStateSnapshot,
+    reserve: ReservePolicy,
+    _ctx: PlannerContext
+  ): { ok: boolean; waitForResources: boolean; reason: string } {
+    const params = (decision.parameters ?? {}) as Record<string, unknown>;
+    const queueFull = state.enemyQueueSize >= QUEUE_CONFIG.maxQueueSize;
+    const spendable = goal === 'SURVIVE' ? state.enemyGold : reserve.spendableGold;
+
+    if (decision.action === 'WAIT') return { ok: true, waitForResources: false, reason: 'noop' };
+
+    if (decision.action === 'RECRUIT_UNIT') {
+      const unitType = typeof params.unitType === 'string' ? params.unitType : '';
+      const def = UNIT_DEFS[unitType];
+      if (!def) return { ok: false, waitForResources: false, reason: 'unknown unit' };
+      if ((def.age ?? 1) > state.enemyAge) return { ok: false, waitForResources: false, reason: 'age gated' };
+      if (queueFull) return { ok: false, waitForResources: true, reason: 'build queue full' };
+      const gold = this.getDiscountedCost(def.cost, state.difficulty, 'unit');
+      const mana = def.manaCost ?? 0;
+      if (mana > state.enemyMana) {
+        const canWait = state.enemyMana + state.enemyManaIncome * 5 >= mana;
+        return { ok: false, waitForResources: canWait, reason: 'insufficient mana' };
+      }
+      if (gold > spendable) {
+        const canWait = spendable + state.enemyGoldIncome * 5 >= gold && !queueFull;
+        return { ok: false, waitForResources: canWait, reason: 'insufficient spendable gold' };
+      }
+      return { ok: true, waitForResources: false, reason: 'ok' };
+    }
+
+    if (decision.action === 'AGE_UP') {
+      if (state.enemyAge >= 6) return { ok: false, waitForResources: false, reason: 'max age reached' };
+      if (queueFull) return { ok: false, waitForResources: true, reason: 'build queue full' };
+      if (state.enemyGold < state.enemyAgeCost) {
+        const canWait = state.enemyGold + state.enemyGoldIncome * 8 >= state.enemyAgeCost;
+        return { ok: false, waitForResources: canWait, reason: 'missing age-up gold' };
+      }
+      return { ok: true, waitForResources: false, reason: 'ok' };
+    }
+
+    if (decision.action === 'UPGRADE_MANA') {
+      const cost = getManaCost(state.enemyManaLevel);
+      if (queueFull) return { ok: false, waitForResources: true, reason: 'build queue full' };
+      if (cost > spendable) {
+        const canWait = spendable + state.enemyGoldIncome * 8 >= cost;
+        return { ok: false, waitForResources: canWait, reason: 'missing mana-upgrade gold' };
+      }
+      return { ok: true, waitForResources: false, reason: 'ok' };
+    }
+
+    if (decision.action === 'UPGRADE_TURRET_SLOTS') {
+      if (state.enemyTurretSlotsUnlocked >= 4) return { ok: false, waitForResources: false, reason: 'slots maxed' };
+      if (queueFull) return { ok: false, waitForResources: true, reason: 'build queue full' };
+      const cost = this.getDiscountedCost(getTurretSlotUnlockCost(state.enemyTurretSlotsUnlocked), state.difficulty, 'turret_upgrade');
+      if (cost > spendable) {
+        const canWait = spendable + state.enemyGoldIncome * 8 >= cost;
+        return { ok: false, waitForResources: canWait, reason: 'missing slot-upgrade gold' };
+      }
+      return { ok: true, waitForResources: false, reason: 'ok' };
+    }
+
+    if (decision.action === 'BUY_TURRET_ENGINE') {
+      const slotIndex = typeof params.slotIndex === 'number' ? params.slotIndex : -1;
+      const turretId = typeof params.turretId === 'string' ? params.turretId : '';
+      if (slotIndex < 0 || slotIndex >= state.enemyTurretSlotsUnlocked) return { ok: false, waitForResources: false, reason: 'invalid slot' };
+      const slot = state.enemyTurretSlots.find((s) => s.slotIndex === slotIndex);
+      if (!slot || slot.turretId) return { ok: false, waitForResources: false, reason: 'slot not empty' };
+      if (queueFull) return { ok: false, waitForResources: true, reason: 'build queue full' };
+      const def = getTurretEngineDef(turretId);
+      if (!def || def.age > state.enemyAge) return { ok: false, waitForResources: false, reason: 'invalid turret' };
+      const gold = this.getDiscountedCost(def.cost, state.difficulty, 'turret_engine');
+      const mana = def.manaCost ?? 0;
+      if (mana > state.enemyMana) {
+        const canWait = state.enemyMana + state.enemyManaIncome * 5 >= mana;
+        return { ok: false, waitForResources: canWait, reason: 'missing turret mana' };
+      }
+      if (gold > spendable) {
+        const canWait = spendable + state.enemyGoldIncome * 8 >= gold;
+        return { ok: false, waitForResources: canWait, reason: 'missing turret gold' };
+      }
+      return { ok: true, waitForResources: false, reason: 'ok' };
+    }
+
+    if (decision.action === 'SELL_TURRET_ENGINE') {
+      const slotIndex = typeof params.slotIndex === 'number' ? params.slotIndex : -1;
+      const slot = state.enemyTurretSlots.find((s) => s.slotIndex === slotIndex);
+      if (!slot?.turretId) return { ok: false, waitForResources: false, reason: 'slot already empty' };
+      return { ok: true, waitForResources: false, reason: 'ok' };
+    }
+
+    if (decision.action === 'REPAIR_BASE') {
+      if (state.enemyAge < 6) return { ok: false, waitForResources: false, reason: 'age requirement' };
+      if (state.enemyMana < 500) {
+        const canWait = state.enemyMana + state.enemyManaIncome * 6 >= 500;
+        return { ok: false, waitForResources: canWait, reason: 'missing repair mana' };
+      }
+      if (state.enemyBaseHealth >= state.enemyBaseMaxHealth) return { ok: false, waitForResources: false, reason: 'base healthy' };
+      return { ok: true, waitForResources: false, reason: 'ok' };
+    }
+
+    return { ok: false, waitForResources: false, reason: 'unsupported action' };
+  }
+
+  private shouldRejectCandidate(
+    candidate: Candidate,
+    state: GameStateSnapshot,
+    ctx: PlannerContext,
+    reserve: ReservePolicy
+  ): boolean {
+    if (candidate.decision.action === 'RECRUIT_UNIT') {
+      return this.shouldRejectRecruitDecision(candidate.decision, candidate.goal, state, ctx, reserve);
+    }
+    if (candidate.decision.action === 'AGE_UP') {
+      if (ctx.baseRisk > 0.86) return true;
+      if (state.enemyQueueSize >= Math.max(2, QUEUE_CONFIG.maxQueueSize - 1) && ctx.baseRisk > 0.55) return true;
+    }
+    return false;
+  }
+
+  private shouldRejectRecruitDecision(
+    decision: AIDecision,
+    goal: GoalId,
+    state: GameStateSnapshot,
+    ctx: PlannerContext,
+    _reserve: ReservePolicy
+  ): boolean {
+    const unitType = (decision.parameters as { unitType?: string } | undefined)?.unitType;
+    if (!unitType) return true;
+    const def = UNIT_DEFS[unitType];
+    if (!def) return true;
+
+    if (state.enemyQueueSize >= QUEUE_CONFIG.maxQueueSize - 1 && goal !== 'SURVIVE') return true;
+
+    const profile = this.buildUnitProfile(unitType, def, state.difficulty);
+    const turretLock = this.isTurretLockScenario(state, ctx);
+    const turretPressure = ctx.enemyStaticDefense /
+      Math.max(1, ctx.ownArmy.sustainedDps + ctx.ownArmy.burstDps * 0.45 + state.enemyTurretDps + 20);
+    const overstacked = ctx.ownArmy.unitCount >= Math.max(10, ctx.enemyArmy.unitCount + 5);
+    const lowBreakthrough = ctx.lanePenetration < 0.34 && ctx.offensiveWindow < 0.56;
+    const lowDpsPack = ctx.ownAvgDpsPerUnit < Math.max(7, state.enemyAge * 2.8);
+    const meleeFodder =
+      profile.range < Math.max(3.2, state.playerTurretAvgRange - 0.6) &&
+      profile.siegeWeight < 0.35 &&
+      profile.rangedWeight < 0.48 &&
+      profile.health < (state.enemyAge <= 2 ? 220 : 320);
+
+    if (goal !== 'SURVIVE' && (turretLock || turretPressure > 1.12 || ctx.stallPressure > 0.64) && overstacked && lowBreakthrough && meleeFodder) {
+      return true;
+    }
+
+    if (goal === 'PRESS' && lowDpsPack && ctx.stallPressure > 0.58 && meleeFodder) {
+      return true;
+    }
+
+    const recentSame = this.recentRecruitHistory.slice(-6).filter((u) => u === unitType).length;
+    if (goal !== 'SURVIVE' && recentSame >= 4) {
+      return true;
+    }
+
+    return false;
   }
 
   private commitDecision(
@@ -458,10 +948,30 @@ export class SmartPlannerAI implements IAIBehavior {
 
     const nextSlotsTarget = this.getTargetSlotsByAge(state.enemyAge, state.enemyMana, state.gameTime);
     const actionSpace = this.buildActionSpaceMap(state, reserve);
+    const futurePlan = this.actionPlan.slice(0, 5).map((step, idx) => {
+      const unitType = (step.decision.parameters as { unitType?: string } | undefined)?.unitType;
+      const slot = (step.decision.parameters as { slotIndex?: number } | undefined)?.slotIndex;
+      if (step.decision.action === 'RECRUIT_UNIT' && unitType) {
+        return `${idx + 1}. ${step.goal}:${step.stage} -> recruit ${unitType}`;
+      }
+      if (typeof slot === 'number') {
+        return `${idx + 1}. ${step.goal}:${step.stage} -> ${step.decision.action} (slot ${slot + 1})`;
+      }
+      return `${idx + 1}. ${step.goal}:${step.stage} -> ${step.decision.action}`;
+    });
+    const planSummary = futurePlan.length > 0
+      ? `${this.actionPlan[0].goal}:${this.actionPlan[0].stage} (${this.actionPlan.length} steps)`
+      : this.activeComboPlan
+        ? `combo:${this.activeComboPlan.id}`
+        : 'No active plan';
     this.debugData = {
       activeGoal: this.activeGoal,
+      plan: planSummary,
+      futurePlan,
       activeComboPlan: this.activeComboPlan,
       recentRecruitHistory: this.recentRecruitHistory,
+      actionPlan: this.actionPlan,
+      planAnchor: this.planAnchor,
       goals,
       reservePolicy: reserve,
       context: {
@@ -483,6 +993,9 @@ export class SmartPlannerAI implements IAIBehavior {
         playerTurretSlotFill: Number(ctx.playerTurretSlotFill.toFixed(3)),
         decisionPulse: Number(ctx.decisionPulse.toFixed(3)),
         stallPressure: Number(ctx.stallPressure.toFixed(3)),
+        lanePenetration: Number(ctx.lanePenetration.toFixed(3)),
+        ownAvgDpsPerUnit: Number(ctx.ownAvgDpsPerUnit.toFixed(3)),
+        enemyStaticDefense: Number(ctx.enemyStaticDefense.toFixed(3)),
       },
       compositionTarget: ctx.compositionTarget,
       compositionNeeds: ctx.compositionNeeds,
@@ -632,6 +1145,9 @@ export class SmartPlannerAI implements IAIBehavior {
       playerTurretSlotFill,
       decisionPulse,
       stallPressure,
+      lanePenetration,
+      ownAvgDpsPerUnit,
+      enemyStaticDefense,
     };
   }
 
@@ -2290,16 +2806,27 @@ export class SmartPlannerAI implements IAIBehavior {
     const units = getUnitsForAge(state.enemyAge);
     let bestUnit: string | null = null;
     let bestScore = -Infinity;
+    const fallbackGoal: GoalId = ctx.baseRisk >= 0.6 ? 'SURVIVE' : this.activeGoal;
+    const reserve = this.computeReservePolicy(state, ctx);
 
     for (const [unitId, def] of Object.entries(units)) {
       const cost = this.getDiscountedCost(def.cost, state.difficulty, 'unit');
       const manaCost = def.manaCost ?? 0;
       if (cost > maxGold || manaCost > state.enemyMana) continue;
 
+      const decision: AIDecision = {
+        action: 'RECRUIT_UNIT',
+        parameters: { unitType: unitId, priority: fallbackGoal === 'SURVIVE' ? 'emergency' : 'normal' },
+      };
+      if (this.shouldRejectRecruitDecision(decision, fallbackGoal, state, ctx, reserve)) continue;
+
       const profile = this.buildUnitProfile(unitId, def, state.difficulty);
       const onField = state.enemyUnits.filter((u) => u.unitId === unitId).length;
       const recentSame = this.recentRecruitHistory.slice(-5).filter((u) => u === unitId).length;
       const spamPenalty = onField * 3.5 + recentSame * 5.5;
+      const turretPressure = ctx.enemyStaticDefense /
+        Math.max(1, ctx.ownArmy.sustainedDps + ctx.ownArmy.burstDps * 0.45 + state.enemyTurretDps + 20);
+      const meleeFodder = profile.range < Math.max(3.1, state.playerTurretAvgRange - 0.6) && profile.siegeWeight < 0.35 && profile.rangedWeight < 0.48;
       const fallbackScore =
         profile.health * 0.15 +
         profile.frontlineWeight * 34 +
@@ -2308,6 +2835,7 @@ export class SmartPlannerAI implements IAIBehavior {
         cost * 0.15 -
         spamPenalty -
         (ctx.stallPressure > 0.58 && profile.range < 2.2 ? 18 : 0) +
+        (turretPressure > 1.08 && meleeFodder ? 24 : 0) +
         (ctx.enemyArmy.rangedMass && profile.range < 2.5 ? 10 : 0);
 
       if (fallbackScore > bestScore) {

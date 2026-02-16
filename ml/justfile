@@ -13,16 +13,43 @@ setup:
 doctor:
   selfplay-doctor --expect-cuda --min-vram-gb 7.0
 
+doctor-cpu:
+  selfplay-doctor --min-vram-gb 0
+
+install-torch-cuda:
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m pip uninstall -y torch torchvision torchaudio || true
+  {{python_cmd}} -m pip install --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}" torch torchvision torchaudio
+  {{python_cmd}} -c "import torch; print(torch.__version__); print('cuda=', torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO CUDA GPU')"
+
+sync-checkpoints:
+  selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+
 train-smoke:
   selfplay-doctor --expect-cuda --min-vram-gb 7.0
-  train-selfplay --total-steps 100000 --num-envs 4 --rollout-horizon 128 --device cuda --save-dir checkpoints/smoke
+  run_name="${RUN_NAME:-smoke_$(date +%Y%m%d_%H%M%S)}"; train-selfplay --run-name "$run_name" --save-dir checkpoints --total-steps 100000 --num-envs 4 --rollout-horizon 128 --device cuda --checkpoint-every 25000 --eval-every 50000 --eval-matches 50; selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
 
 train-overnight:
-  save_dir="checkpoints/overnight_$(date +%Y%m%d_%H%M%S)"; \
-  echo "[train] Checkpoints: ${save_dir}"; \
+  run_name="${RUN_NAME:-overnight_$(date +%Y%m%d_%H%M%S)}"; echo "[train] Run: ${run_name}"; \
   selfplay-doctor --expect-cuda --min-vram-gb 7.0; \
-  train-selfplay --total-steps 10000000 --num-envs 8 --rollout-horizon 256 --device cuda --save-dir "${save_dir}"
+  train-selfplay --run-name "$run_name" --save-dir checkpoints --total-steps 10000000 --num-envs 8 --rollout-horizon 256 --device cuda --checkpoint-every 100000 --eval-every 200000 --eval-matches 200 --milestone-fractions 0.2,0.4,0.6,0.8,1.0; \
+  selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
 
-train TOTAL_STEPS="10000000" NUM_ENVS="8" ROLLOUT_HORIZON="256" DEVICE="cuda" SAVE_DIR="checkpoints/custom":
+train:
+  run_name="${RUN_NAME:-custom_$(date +%Y%m%d_%H%M%S)}"; echo "[train] Run: ${run_name}"
   selfplay-doctor --expect-cuda --min-vram-gb 7.0
-  train-selfplay --total-steps {{TOTAL_STEPS}} --num-envs {{NUM_ENVS}} --rollout-horizon {{ROLLOUT_HORIZON}} --device {{DEVICE}} --save-dir {{SAVE_DIR}}
+  train-selfplay --run-name "$run_name" --save-dir checkpoints --total-steps "${TOTAL_STEPS:-10000000}" --num-envs "${NUM_ENVS:-8}" --rollout-horizon "${ROLLOUT_HORIZON:-256}" --device "${DEVICE:-cuda}" --checkpoint-every "${CHECKPOINT_EVERY:-100000}" --eval-every "${EVAL_EVERY:-200000}" --eval-matches "${EVAL_MATCHES:-200}" --milestone-fractions "${MILESTONE_FRACTIONS:-0.2,0.4,0.6,0.8,1.0}"
+  selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+
+train-resume:
+  if [ -z "${CHECKPOINT:-}" ]; then echo "CHECKPOINT env var is required. Example: CHECKPOINT=checkpoints/<run>/latest.pt just train-resume"; exit 2; fi
+  selfplay-doctor --expect-cuda --min-vram-gb 7.0
+  train-selfplay --resume-from "${CHECKPOINT}" --additional-steps "${ADDITIONAL_STEPS:-2000000}" --num-envs "${NUM_ENVS:-8}" --rollout-horizon "${ROLLOUT_HORIZON:-256}" --device "${DEVICE:-cuda}"
+  selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+
+train-resume-to:
+  if [ -z "${CHECKPOINT:-}" ]; then echo "CHECKPOINT env var is required. Example: CHECKPOINT=checkpoints/<run>/latest.pt TOTAL_STEPS=12000000 just train-resume-to"; exit 2; fi
+  if [ -z "${TOTAL_STEPS:-}" ]; then echo "TOTAL_STEPS env var is required for train-resume-to."; exit 2; fi
+  selfplay-doctor --expect-cuda --min-vram-gb 7.0
+  train-selfplay --resume-from "${CHECKPOINT}" --total-steps "${TOTAL_STEPS}" --num-envs "${NUM_ENVS:-8}" --rollout-horizon "${ROLLOUT_HORIZON:-256}" --device "${DEVICE:-cuda}"
+  selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json

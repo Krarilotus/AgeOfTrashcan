@@ -55,6 +55,34 @@ export class TurretSystem {
     };
   }
 
+  private applyTurretDamageToUnit(
+    state: GameState,
+    target: Entity,
+    rawDamage: number
+  ): number {
+    if (rawDamage <= 0 || target.health.current <= 0) return 0;
+
+    const protectionMultiplier = CombatUtils.getTowerProtectionMultiplier(target, state);
+    let actualDamage = rawDamage * protectionMultiplier;
+
+    const targetDef = UNIT_DEFS[target.unitId];
+    if (targetDef?.teleporter) {
+      actualDamage *= (1 - targetDef.teleporter.damageReduction);
+    }
+
+    if (targetDef?.manaShield) {
+      const ownerEcon = target.owner === 'PLAYER' ? state.economy.player : state.economy.enemy;
+      const shieldableDamage = Math.floor(actualDamage * 0.9);
+      const manaNeeded = Math.ceil(shieldableDamage / 2);
+      const manaUsed = Math.min(manaNeeded, ownerEcon.mana);
+      ownerEcon.mana -= manaUsed;
+      actualDamage = Math.max(1, actualDamage - (manaUsed * 2));
+    }
+
+    target.health.current -= actualDamage;
+    return actualDamage;
+  }
+
   public update(state: GameState, deltaSeconds: number): void {
     this.updateOilPatches(state, deltaSeconds);
 
@@ -109,16 +137,20 @@ export class TurretSystem {
         }
 
         if (engine.attackType === 'chain_lightning' && engine.chainLightning) {
-          this.castChainLightning(state, owner, base.x, mount, engine);
-          slot.cooldownRemaining = engine.chainLightning.cooldownSeconds;
-          consumeCastMana();
+          const casted = this.castChainLightning(state, owner, base.x, mount, engine);
+          if (casted) {
+            slot.cooldownRemaining = engine.chainLightning.cooldownSeconds;
+            consumeCastMana();
+          }
           continue;
         }
 
         if (engine.attackType === 'artillery_barrage' && engine.artillery) {
-          this.castArtilleryBarrage(state, owner, base.x, mount, engine);
-          slot.cooldownRemaining = engine.artillery.cooldownSeconds;
-          consumeCastMana();
+          const casted = this.castArtilleryBarrage(state, owner, base.x, mount, engine);
+          if (casted) {
+            slot.cooldownRemaining = engine.artillery.cooldownSeconds;
+            consumeCastMana();
+          }
           continue;
         }
 
@@ -199,8 +231,7 @@ export class TurretSystem {
             patch.forwardReachUnits,
             patch.backReachUnits
           )) continue;
-          entity.health.current -= patch.tickDamage;
-          tickTotalDamage += patch.tickDamage;
+          tickTotalDamage += this.applyTurretDamageToUnit(state, entity, patch.tickDamage);
         }
 
         if (tickTotalDamage > 0) {
@@ -331,9 +362,9 @@ export class TurretSystem {
     baseX: number,
     mount: { x: number; y: number },
     engine: TurretEngineDef
-  ): void {
+  ): boolean {
     const config = engine.chainLightning;
-    if (!config) return;
+    if (!config) return false;
 
     const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
     const inRangeTargets = Array.from(state.entities.values())
@@ -343,9 +374,10 @@ export class TurretSystem {
           entity.health.current > 0 &&
           Math.abs(entity.transform.x - baseX) <= engine.range
       );
-    if (inRangeTargets.length === 0) return;
+    if (inRangeTargets.length === 0) return false;
 
     const positions: Array<{ x: number; y: number }> = [];
+    let totalDamage = 0;
     let damage = config.initialDamage;
     let currentTarget: Entity | null = [...inRangeTargets].sort(
       (a, b) => Math.abs(a.transform.x - baseX) - Math.abs(b.transform.x - baseX)
@@ -356,7 +388,7 @@ export class TurretSystem {
       if (!currentTarget) break;
       if (currentTarget.health.current <= 0) break;
 
-      currentTarget.health.current -= damage;
+      totalDamage += this.applyTurretDamageToUnit(state, currentTarget, damage);
       positions.push({ x: currentTarget.transform.x, y: currentTarget.transform.laneY });
       damage *= config.falloffMultiplier;
 
@@ -379,7 +411,7 @@ export class TurretSystem {
       })[0] ?? null;
     }
 
-    if (positions.length === 0) return;
+    if (positions.length === 0) return false;
 
     state.vfx.push({
       id: state.nextVfxId++,
@@ -390,6 +422,11 @@ export class TurretSystem {
       lifeMs: 550,
       data: { turretAbility: 'chain_lightning', targetPositions: positions },
     });
+    if (totalDamage > 0) {
+      if (owner === 'PLAYER') state.stats.damageDealt.player += totalDamage;
+      else state.stats.damageDealt.enemy += totalDamage;
+    }
+    return true;
   }
 
   private castArtilleryBarrage(
@@ -398,11 +435,19 @@ export class TurretSystem {
     baseX: number,
     mount: { x: number; y: number },
     engine: TurretEngineDef
-  ): void {
+  ): boolean {
     const config = engine.artillery;
-    if (!config) return;
+    if (!config) return false;
 
     const direction = owner === 'PLAYER' ? 1 : -1;
+    const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+    const hasTargetsInCoverage = Array.from(state.entities.values()).some((entity) => {
+      if (entity.owner !== targetOwner || entity.health.current <= 0) return false;
+      const dx = (entity.transform.x - baseX) * direction;
+      if (dx < 0 || dx > config.spreadRange) return false;
+      return Math.abs(entity.transform.laneY) <= config.spreadLaneY * 0.5 + config.shellRadius;
+    });
+    if (!hasTargetsInCoverage) return false;
 
     state.vfx.push({
       id: state.nextVfxId++,
@@ -440,6 +485,7 @@ export class TurretSystem {
         trailAlpha: 0.35,
       });
     }
+    return true;
   }
 
   private castOilPour(state: GameState, owner: 'PLAYER' | 'ENEMY', baseX: number, engine: TurretEngineDef): boolean {
@@ -486,8 +532,7 @@ export class TurretSystem {
         forwardReachUnits,
         backReachUnits
       )) continue;
-      entity.health.current -= initialImpactDamage;
-      initialTotalDamage += initialImpactDamage;
+      initialTotalDamage += this.applyTurretDamageToUnit(state, entity, initialImpactDamage);
     }
 
     if (initialTotalDamage > 0) {
@@ -672,12 +717,10 @@ export class TurretSystem {
     const target = this.getManaSiphonTarget(state, owner, slotIndex, baseX, targetOwner, engine);
     if (!target) return false;
 
-    const protectionMultiplier = CombatUtils.getTowerProtectionMultiplier(target, state);
     const tickDamage = Math.max(0, config.tickDamage);
-    const actualDamage = tickDamage * protectionMultiplier;
+    const actualDamage = this.applyTurretDamageToUnit(state, target, tickDamage);
     if (actualDamage <= 0) return false;
 
-    target.health.current -= actualDamage;
     const ownerEcon = owner === 'PLAYER' ? state.economy.player : state.economy.enemy;
     ownerEcon.mana += actualDamage * Math.max(0, config.manaLeechFraction);
 
@@ -739,10 +782,7 @@ export class TurretSystem {
       if (dx < -0.4 || dx > range) continue;
       if (Math.abs(entity.transform.laneY - aimLaneY) > width) continue;
       hasEnemyInCone = true;
-      const protectionMultiplier = CombatUtils.getTowerProtectionMultiplier(entity, state);
-      const damage = config.damage * protectionMultiplier;
-      entity.health.current -= damage;
-      totalDamage += damage;
+      totalDamage += this.applyTurretDamageToUnit(state, entity, config.damage);
       hitCount++;
     }
 
@@ -801,6 +841,7 @@ export class TurretSystem {
     const pulseDurationMs = Math.max(260, config.pulseDurationMs ?? 500);
     let totalDamage = 0;
     let hitCount = 0;
+    let unitHitCount = 0;
     let farthestHitX = mount.x + direction * range;
 
     for (const entity of state.entities.values()) {
@@ -808,13 +849,14 @@ export class TurretSystem {
       const dx = (entity.transform.x - mount.x) * direction;
       if (dx < 0 || dx > range) continue;
       if (Math.abs(entity.transform.laneY) > laneThickness) continue;
-      const protectionMultiplier = CombatUtils.getTowerProtectionMultiplier(entity, state);
-      const damage = config.damage * protectionMultiplier;
-      entity.health.current -= damage;
-      totalDamage += damage;
+      totalDamage += this.applyTurretDamageToUnit(state, entity, config.damage);
       hitCount++;
+      unitHitCount++;
       farthestHitX = direction === 1 ? Math.max(farthestHitX, entity.transform.x) : Math.min(farthestHitX, entity.transform.x);
     }
+
+    // Only cast/pulse when at least one enemy unit is actually inside beam coverage.
+    if (unitHitCount === 0) return false;
 
     const enemyBase = owner === 'PLAYER' ? state.enemyBase : state.playerBase;
     const baseForward = (enemyBase.x - mount.x) * direction;

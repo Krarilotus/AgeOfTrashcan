@@ -13,6 +13,7 @@ dependencies = [
 [project.scripts]
 train-selfplay = "train_selfplay:main"
 selfplay-doctor = "selfplay.doctor:main"
+selfplay-export-registry = "selfplay.checkpoint_registry:main"
 
 [tool.setuptools]
 package-dir = {"" = "."}

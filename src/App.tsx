@@ -13,11 +13,12 @@ import {
   calculateTurretDefenseStats,
 } from './config/turrets';
 import { GameOverOverlay } from './ui/GameOverOverlay';
-import { StartScreen, type Difficulty } from './ui/StartScreen';
+import { StartScreen, type AISelectionValue, type Difficulty, type MLCheckpointOption, type StartMode } from './ui/StartScreen';
 import { UnitTrainingPanel } from './ui/UnitTrainingPanel';
 import { UI_EMOTES, UI_SYMBOLS } from './ui/uiEmotes';
 
 type Winner = 'PLAYER' | 'ENEMY';
+type AIOwner = 'PLAYER' | 'ENEMY';
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -29,18 +30,34 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [difficulty, setDifficulty] = useState<Difficulty>('MEDIUM');
+  const [startMode, setStartMode] = useState<StartMode>('PLAY');
+  const [activeMode, setActiveMode] = useState<StartMode>('PLAY');
+  const [watchPlayerSelection, setWatchPlayerSelection] = useState<AISelectionValue>('SMART');
+  const [watchEnemySelection, setWatchEnemySelection] = useState<AISelectionValue>('SMART_ML');
+  const [mlCheckpointOptions, setMLCheckpointOptions] = useState<MLCheckpointOption[]>([]);
+  const [latestMlCheckpointId, setLatestMlCheckpointId] = useState<string | null>(null);
+  const [latestMlCheckpointLabel, setLatestMlCheckpointLabel] = useState<string>('latest');
   const [showAIDebug, setShowAIDebug] = useState(false);
-  const [aiDebugInfo, setAIDebugInfo] = useState<any>(null);
-  const [aiDebugSections, setAIDebugSections] = useState({
-    htn: true,
-    reserve: true,
-    context: true,
-    actionSpace: true,
+  const [aiDebugBySide, setAIDebugBySide] = useState<Record<AIOwner, any | null>>({
+    PLAYER: null,
+    ENEMY: null,
   });
   const [shouldLoadSavedGame, setShouldLoadSavedGame] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
 
   const hasSavedGame = GameEngine.hasSavedGame();
+  const playerControlledByAI = gameState?.sideControl?.PLAYER?.control === 'AI';
+  const debugOwners: AIOwner[] = playerControlledByAI ? ['PLAYER', 'ENEMY'] : ['ENEMY'];
+
+  const parseAISelection = (selection: AISelectionValue): { difficulty: Difficulty; mlCheckpointId?: string } => {
+    if (selection.startsWith('SMART_ML::')) {
+      return {
+        difficulty: 'SMART_ML',
+        mlCheckpointId: selection.slice('SMART_ML::'.length),
+      };
+    }
+    return { difficulty: selection as Difficulty };
+  };
 
   const startNewGame = () => {
     if (gameRef.current) {
@@ -52,6 +69,21 @@ export default function App() {
     setGameState(null);
     setShouldLoadSavedGame(false);
     setIsPaused(false);
+    setActiveMode('PLAY');
+    setIsRunning(true);
+  };
+
+  const startWatchGame = () => {
+    if (gameRef.current) {
+      gameRef.current.stop();
+      gameRef.current = null;
+    }
+    GameEngine.deleteSavedGame();
+    setGameOver(null);
+    setGameState(null);
+    setShouldLoadSavedGame(false);
+    setIsPaused(false);
+    setActiveMode('WATCH');
     setIsRunning(true);
   };
 
@@ -79,6 +111,52 @@ export default function App() {
   };
 
   useEffect(() => {
+    let cancelled = false;
+    const loadCheckpointRegistry = async () => {
+      try {
+        const response = await fetch(`/ml/checkpoints/index.json?t=${Date.now()}`, { cache: 'no-store' });
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (cancelled) return;
+        const options: MLCheckpointOption[] = Array.isArray(payload?.checkpoints)
+          ? payload.checkpoints
+              .map((checkpoint: any) => {
+                const id = typeof checkpoint?.id === 'string' ? checkpoint.id : '';
+                const label = typeof checkpoint?.label === 'string' ? checkpoint.label : id;
+                if (!id) return null;
+                return { id, label } as MLCheckpointOption;
+              })
+              .filter((item: MLCheckpointOption | null): item is MLCheckpointOption => item !== null)
+          : [];
+        setMLCheckpointOptions(options);
+
+        const latestId = typeof payload?.latestCheckpointId === 'string' ? payload.latestCheckpointId : '';
+        if (latestId) {
+          setLatestMlCheckpointId(latestId);
+          const latestOption = options.find((option) => option.id === latestId);
+          setLatestMlCheckpointLabel(latestOption?.label ?? latestId);
+        } else if (options.length > 0) {
+          setLatestMlCheckpointId(options[0].id);
+          setLatestMlCheckpointLabel(options[0].label);
+        } else {
+          setLatestMlCheckpointId(null);
+          setLatestMlCheckpointLabel('latest');
+        }
+      } catch {
+        if (!cancelled) {
+          setMLCheckpointOptions([]);
+          setLatestMlCheckpointId(null);
+          setLatestMlCheckpointLabel('latest');
+        }
+      }
+    };
+    loadCheckpointRegistry();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isRunning || gameRef.current) return;
 
     const timeout = setTimeout(() => {
@@ -87,14 +165,40 @@ export default function App() {
         return;
       }
 
+      const isWatchMode = activeMode === 'WATCH';
+      const watchPlayerConfig = parseAISelection(watchPlayerSelection);
+      const watchEnemyConfig = parseAISelection(watchEnemySelection);
+      const enemyDifficulty = isWatchMode ? watchEnemyConfig.difficulty : difficulty;
       const config = {
-        difficulty,
+        difficulty: enemyDifficulty,
+        mode: activeMode,
         startingGold: BASE_CONFIG.startingGold,
         startingMana: BASE_CONFIG.startingMana,
         goldIncomeBase: INCOME_CONFIG.baseGoldPerSecond,
         manaIncomeBase: BASE_CONFIG.baseManaPerSecond,
         laneLength: 50,
         basePositions: { player: 0, enemy: 50 },
+        sideControl: isWatchMode
+          ? {
+              PLAYER: {
+                control: 'AI' as const,
+                difficulty: watchPlayerConfig.difficulty,
+                mlCheckpointId: watchPlayerConfig.mlCheckpointId,
+              },
+              ENEMY: {
+                control: 'AI' as const,
+                difficulty: watchEnemyConfig.difficulty,
+                mlCheckpointId: watchEnemyConfig.mlCheckpointId,
+              },
+            }
+          : {
+              PLAYER: { control: 'HUMAN' as const },
+              ENEMY: {
+                control: 'AI' as const,
+                difficulty,
+                mlCheckpointId: difficulty === 'SMART_ML' ? (latestMlCheckpointId ?? undefined) : undefined,
+              },
+            },
       };
 
       const game = new GameEngine(config, Math.floor(Math.random() * 1e6), {
@@ -129,16 +233,18 @@ export default function App() {
     }, 0);
 
     return () => clearTimeout(timeout);
-  }, [difficulty, isRunning, shouldLoadSavedGame]);
+  }, [activeMode, difficulty, isRunning, latestMlCheckpointId, shouldLoadSavedGame, watchEnemySelection, watchPlayerSelection]);
 
   useEffect(() => {
     if (!showAIDebug || !gameRef.current || !gameState) return;
 
     try {
-      const info = gameRef.current.getAIController().getDebugInfo();
-      setAIDebugInfo(info);
+      setAIDebugBySide({
+        PLAYER: gameRef.current.getAIController('PLAYER')?.getDebugInfo() ?? null,
+        ENEMY: gameRef.current.getAIController('ENEMY')?.getDebugInfo() ?? null,
+      });
     } catch {
-      setAIDebugInfo(null);
+      setAIDebugBySide({ PLAYER: null, ENEMY: null });
     }
   }, [gameState, showAIDebug]);
 
@@ -166,34 +272,42 @@ export default function App() {
   }, []);
 
   const handleSpawnUnit = (unitId: string) => {
+    if (playerControlledByAI) return;
     gameRef.current?.spawnUnit(unitId);
   };
 
   const handleCancelQueueItem = (index: number) => {
+    if (playerControlledByAI) return;
     gameRef.current?.cancelQueueItem(index);
   };
 
   const handleUpgradeAge = () => {
+    if (playerControlledByAI) return;
     gameRef.current?.upgradeAge();
   };
 
   const handleQueueTurretSlotUpgrade = () => {
+    if (playerControlledByAI) return;
     gameRef.current?.queueTurretSlotUpgrade();
   };
 
   const handleQueueTurretEngine = (slotIndex: number, turretId: string) => {
+    if (playerControlledByAI) return;
     gameRef.current?.queueTurretEngine('PLAYER', slotIndex, turretId);
   };
 
   const handleSellTurretEngine = (slotIndex: number) => {
+    if (playerControlledByAI) return;
     gameRef.current?.sellTurretEngine('PLAYER', slotIndex);
   };
 
   const handleUpgradeManaGeneration = () => {
+    if (playerControlledByAI) return;
     gameRef.current?.upgradeManaGeneration();
   };
 
   const handleHealBase = () => {
+    if (playerControlledByAI) return;
     gameRef.current?.healBase();
   };
 
@@ -212,10 +326,6 @@ export default function App() {
   const handleTogglePause = () => {
     if (!gameRef.current || gameOver) return;
     setIsPaused(gameRef.current.togglePause());
-  };
-
-  const toggleAIDebugSection = (section: 'htn' | 'reserve' | 'context' | 'actionSpace') => {
-    setAIDebugSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
 
   const handleSaveGame = () => {
@@ -267,11 +377,20 @@ export default function App() {
   if (!isRunning) {
     return (
       <StartScreen
+        mode={startMode}
         difficulty={difficulty}
+        watchPlayerSelection={watchPlayerSelection}
+        watchEnemySelection={watchEnemySelection}
+        mlCheckpointOptions={mlCheckpointOptions}
+        latestMlCheckpointLabel={latestMlCheckpointLabel}
         hasSavedGame={hasSavedGame}
         onStartNewGame={startNewGame}
+        onStartWatchGame={startWatchGame}
         onContinueGame={continueSavedGame}
+        onModeChange={setStartMode}
         onDifficultyChange={setDifficulty}
+        onWatchPlayerSelectionChange={setWatchPlayerSelection}
+        onWatchEnemySelectionChange={setWatchEnemySelection}
         onClearSavedGame={handleClearSavedGame}
       />
     );
@@ -288,6 +407,11 @@ export default function App() {
             <div className="bg-amber-700 text-white px-3 py-1 rounded-full text-sm">
               Age {gameState?.progression?.player?.age || 1}
             </div>
+            {playerControlledByAI && (
+              <div className="bg-cyan-700 text-white px-3 py-1 rounded-full text-sm">
+                Watch Mode
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-4">
             <button onClick={() => setAudioEnabled(!audioEnabled)} className="text-slate-400 hover:text-white" title="Toggle audio">
@@ -355,12 +479,14 @@ export default function App() {
             {gameOver && <GameOverOverlay winner={gameOver.winner} onPlayAgain={handleRestart} />}
           </div>
 
-          <UnitTrainingPanel
-            gameState={gameState}
-            onSpawnUnit={handleSpawnUnit}
-            onQueueTurretEngine={handleQueueTurretEngine}
-            onCancelQueueItem={handleCancelQueueItem}
-          />
+          {!playerControlledByAI && (
+            <UnitTrainingPanel
+              gameState={gameState}
+              onSpawnUnit={handleSpawnUnit}
+              onQueueTurretEngine={handleQueueTurretEngine}
+              onCancelQueueItem={handleCancelQueueItem}
+            />
+          )}
 
           <div className="mt-2 text-right">
             <button onClick={() => setShowAIDebug(!showAIDebug)} className="text-xs text-slate-500 hover:text-slate-300 underline">
@@ -368,288 +494,144 @@ export default function App() {
             </button>
           </div>
 
-          {showAIDebug && aiDebugInfo && (
-            <div className="mt-2 bg-slate-900 border border-slate-600 rounded p-4 text-xs font-mono text-green-400 overflow-hidden">
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <div className="font-bold text-white mb-2 underline">Threat Analysis</div>
-                  <div className="flex justify-between items-center">
-                    <span>Level:</span>
-                    <span className={`font-bold ${aiDebugInfo.threatLevel === 'HIGH' || aiDebugInfo.threatLevel === 'CRITICAL' ? 'text-red-500' : 'text-green-400'}`}>
-                      {aiDebugInfo.threatLevel}
-                    </span>
-                  </div>
-                  <div className="mt-2 text-[10px] space-y-0.5 bg-slate-800 p-1 rounded">
-                    {aiDebugInfo.threatDetails && aiDebugInfo.threatDetails.FACTORS ? (
-                      <>
-                        <div className="flex justify-between text-slate-400"><span>Units (P vs AI):</span> <span className="text-white">{Math.round(aiDebugInfo.threatDetails.FACTORS.unitScoreP)} vs {Math.round(aiDebugInfo.threatDetails.FACTORS.unitScoreE)}</span></div>
-                        <div className="flex justify-between text-slate-400">
-                          <span>Gold Adv:</span>
-                          <span className={aiDebugInfo.threatDetails.FACTORS.goldThreat > 0 ? 'text-red-400' : 'text-green-400'}>
-                            {aiDebugInfo.threatDetails.FACTORS.goldThreat > 0 ? '+' : ''}{Math.round(aiDebugInfo.threatDetails.FACTORS.goldThreat)}
-                          </span>
-                        </div>
-                        <div className="flex justify-between text-slate-400"><span>Turrets:</span> <span>{Math.round(aiDebugInfo.threatDetails.FACTORS.turretThreatP)} vs {Math.round(aiDebugInfo.threatDetails.FACTORS.turretThreatE)}</span></div>
-                        <div className="border-t border-slate-600 my-1"></div>
-                        <div className="flex justify-between font-bold">
-                          <span>Total Power:</span>
-                          <span>{Math.round(aiDebugInfo.threatDetails.playerScore)} vs {Math.round(aiDebugInfo.threatDetails.enemyScore)}</span>
-                        </div>
-                        <div className="text-right text-slate-300">Ratio: {aiDebugInfo.threatDetails.ratio.toFixed(2)}</div>
-                      </>
-                    ) : (
-                      <div className="italic text-slate-500">Waiting for tick...</div>
-                    )}
-                  </div>
-                  <div className="mt-1">Strat: {aiDebugInfo.behaviorParams?.activeGoal ?? aiDebugInfo.strategicState}</div>
-                  {aiDebugInfo.behaviorParams?.activeGoal && (
-                    <div className="text-[10px] text-slate-500">Controller Strat: {aiDebugInfo.strategicState}</div>
-                  )}
-                  <div title={aiDebugInfo.behaviorParams?.plan} className="text-[9px] text-slate-500 truncate mt-1">
-                    {aiDebugInfo.behaviorParams?.plan}
-                  </div>
-                </div>
-                <div>
-                  <div className="font-bold text-white mb-2 underline">Economy ({aiDebugInfo.behaviorParams?.difficulty})</div>
-                  <div className="text-[10px] space-y-0.5 bg-slate-800 p-1 rounded mb-2">
-                    <div className="flex justify-between text-slate-400">
-                      <span>Enemy Age:</span>
-                      <span className="font-bold text-red-400">{gameState?.progression?.enemy?.age ?? 1}</span>
-                    </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Turret Slots:</span>
-                      <span className="font-bold text-red-400">{gameState?.enemyBase?.turretSlotsUnlocked ?? 1} / {gameState?.enemyBase?.maxTurretSlots ?? 4}</span>
-                    </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Gold/Mana:</span>
-                      <span className="font-bold text-red-400">{Math.floor(gameState?.economy?.enemy?.gold ?? 0)} / {Math.floor(gameState?.economy?.enemy?.mana ?? 0)}</span>
-                    </div>
-                  </div>
-                  <div>Warchest: {aiDebugInfo.behaviorParams?.warchest ?? aiDebugInfo.warchest}g / {aiDebugInfo.behaviorParams?.wcTarget}g</div>
-                  <div className="text-xs text-slate-500">AgeTime: {aiDebugInfo.behaviorParams?.timeSinceAge} | Tax: {aiDebugInfo.behaviorParams?.taxRate}</div>
-                  <div>Income: +{aiDebugInfo.behaviorParams?.income}/s</div>
-                </div>
-                <div>
-                  <div className="font-bold text-white mb-2 underline">Logic</div>
-                  <div>Endpoint: <span className="text-cyan-300">{aiDebugInfo.endpoint ?? 'n/a'}</span></div>
-                  <div className="text-[10px] text-slate-500">Policy Latency: {aiDebugInfo.lastEndpointLatencyMs ?? 0}ms</div>
-                  <div title="Spendable / Total">Gold: <span className="text-yellow-400">{aiDebugInfo.behaviorParams?.gold}</span></div>
-                  <div>Reserved: {aiDebugInfo.behaviorParams?.reserved}g</div>
-                  <div className="text-[10px] text-slate-400 mt-1">{aiDebugInfo.behaviorParams?.comp}</div>
-                  <div className="mt-1 text-[10px] text-slate-300">
-                    Next: <span className="text-emerald-300">{aiDebugInfo.behaviorParams?.nextAction ?? 'N/A'}</span>
-                  </div>
-                  <div className="text-[10px] text-slate-500 truncate" title={aiDebugInfo.behaviorParams?.nextReason}>
-                    {aiDebugInfo.behaviorParams?.nextReason}
-                  </div>
-                  {aiDebugInfo.behaviorParams?.decisionOutcome && (
-                    <div className="mt-1 text-[10px] bg-slate-800 p-1 rounded border border-slate-700">
-                      <div className="text-slate-300">
-                        Outcome: <span className="text-emerald-300">{aiDebugInfo.behaviorParams.decisionOutcome.action}</span>
-                      </div>
-                      <div className="text-slate-500 truncate" title={aiDebugInfo.behaviorParams.decisionOutcome.reason}>
-                        {aiDebugInfo.behaviorParams.decisionOutcome.reason}
-                      </div>
-                    </div>
-                  )}
-                  {aiDebugInfo.behaviorParams?.pushEst && (
-                    <div className="text-[10px] text-cyan-400 mt-1" title="Attack Feasibility (Required HP)">Push: {aiDebugInfo.behaviorParams?.pushEst}</div>
-                  )}
-                </div>
-              </div>
-              <div className="mt-3">
-                <div className="font-bold text-white mb-1 underline">Debug Controls</div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => toggleAIDebugSection('htn')}
-                    className={`text-[10px] px-2 py-1 rounded border ${aiDebugSections.htn ? 'text-emerald-300 border-emerald-700 bg-emerald-900/20' : 'text-slate-400 border-slate-700 bg-slate-900/40'}`}
-                  >
-                    {aiDebugSections.htn ? 'Hide HTN' : 'Show HTN'}
-                  </button>
-                  <button
-                    onClick={() => toggleAIDebugSection('reserve')}
-                    className={`text-[10px] px-2 py-1 rounded border ${aiDebugSections.reserve ? 'text-cyan-300 border-cyan-700 bg-cyan-900/20' : 'text-slate-400 border-slate-700 bg-slate-900/40'}`}
-                  >
-                    {aiDebugSections.reserve ? 'Hide Reserve' : 'Show Reserve'}
-                  </button>
-                  <button
-                    onClick={() => toggleAIDebugSection('context')}
-                    className={`text-[10px] px-2 py-1 rounded border ${aiDebugSections.context ? 'text-purple-300 border-purple-700 bg-purple-900/20' : 'text-slate-400 border-slate-700 bg-slate-900/40'}`}
-                  >
-                    {aiDebugSections.context ? 'Hide Context' : 'Show Context'}
-                  </button>
-                  <button
-                    onClick={() => toggleAIDebugSection('actionSpace')}
-                    className={`text-[10px] px-2 py-1 rounded border ${aiDebugSections.actionSpace ? 'text-amber-300 border-amber-700 bg-amber-900/20' : 'text-slate-400 border-slate-700 bg-slate-900/40'}`}
-                  >
-                    {aiDebugSections.actionSpace ? 'Hide Action Space' : 'Show Action Space'}
-                  </button>
-                </div>
-              </div>
+          {showAIDebug && debugOwners.some((owner) => Boolean(aiDebugBySide[owner])) && (
+            <div className="mt-2 bg-slate-900 border border-slate-600 rounded p-3 text-[10px] font-mono text-green-400 overflow-hidden">
+              <div className="text-[11px] text-slate-300 mb-2">Dual AI Debug (compact)</div>
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                {debugOwners.map((owner) => {
+                  const aiDebugInfo = aiDebugBySide[owner];
+                  const sideEconomy = owner === 'PLAYER' ? gameState?.economy?.player : gameState?.economy?.enemy;
+                  const sideProgression = owner === 'PLAYER' ? gameState?.progression?.player : gameState?.progression?.enemy;
+                  const sideBase = owner === 'PLAYER' ? gameState?.playerBase : gameState?.enemyBase;
+                  const sideTelemetry = gameState?.telemetry?.bySide?.[owner];
 
-              {aiDebugSections.htn && (
-                <div className="mt-3">
-                  <div className="font-bold text-white mb-1 underline">HTN State</div>
-                  <div className="text-[10px] space-y-0.5 bg-slate-800 p-2 rounded border border-slate-700">
-                    <div className="flex justify-between"><span className="text-slate-400">Active Goal</span><span className="text-emerald-300">{aiDebugInfo.behaviorParams?.activeGoal ?? 'n/a'}</span></div>
-                    <div className="flex justify-between"><span className="text-slate-400">Combo Plan</span><span className="text-cyan-300">{aiDebugInfo.behaviorParams?.activeComboPlan?.id ?? 'none'}</span></div>
-                    {aiDebugInfo.behaviorParams?.activeComboPlan && (
-                      <div className="text-slate-300">
-                        Progress: {(aiDebugInfo.behaviorParams.activeComboPlan.index ?? 0) + 1}/{aiDebugInfo.behaviorParams.activeComboPlan.units?.length ?? 0}
+                  if (!aiDebugInfo) {
+                    return (
+                      <div key={owner} className="bg-slate-950/60 border border-slate-700 rounded p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="font-bold text-white">{owner}</div>
+                          <span className="text-[10px] text-slate-500">No AI controller</span>
+                        </div>
+                        <div className="text-slate-500">This side is currently human-controlled or has no debug endpoint.</div>
                       </div>
-                    )}
-                    {Array.isArray(aiDebugInfo.behaviorParams?.goals) && (
-                      <div className="pt-1 border-t border-slate-700">
-                        <div className="text-slate-400 mb-0.5">Goal Scores</div>
-                        {aiDebugInfo.behaviorParams.goals.map((g: any, i: number) => (
-                          <div key={i} className="flex justify-between">
-                            <span>{g.goal}</span>
-                            <span className="text-amber-300">{typeof g.score === 'number' ? g.score.toFixed(1) : g.score}</span>
+                    );
+                  }
+
+                  const threat = aiDebugInfo.threatLevel ?? 'UNKNOWN';
+                  const threatClass = threat === 'HIGH' || threat === 'CRITICAL' ? 'text-red-400' : 'text-emerald-300';
+                  const decisionStages = Array.isArray(aiDebugInfo.behaviorParams?.decisionStages)
+                    ? aiDebugInfo.behaviorParams.decisionStages.slice(-4).reverse()
+                    : [];
+                  const recentActions = Array.isArray(aiDebugInfo.recentActions)
+                    ? aiDebugInfo.recentActions.slice().reverse().slice(0, 5)
+                    : [];
+                  const contextEntries = Object.entries(aiDebugInfo.behaviorParams?.context ?? {}).slice(0, 8);
+                  const unitEntries = Object.entries(sideTelemetry?.unitBuildCounts ?? {})
+                    .sort((a: any, b: any) => (b[1] as number) - (a[1] as number))
+                    .slice(0, 3);
+                  const telemetryActions = Array.isArray(sideTelemetry?.actionTimeline)
+                    ? sideTelemetry.actionTimeline.slice(-3).reverse()
+                    : [];
+
+                  return (
+                    <div key={owner} className="bg-slate-950/60 border border-slate-700 rounded p-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="font-bold text-white">{owner}</div>
+                        <div className="text-[10px] text-cyan-300">
+                          {aiDebugInfo.behaviorParams?.difficulty ?? aiDebugInfo.endpoint ?? 'AI'}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px]">
+                        <div className="text-slate-400">Threat: <span className={threatClass}>{threat}</span></div>
+                        <div className="text-slate-400">Age: <span className="text-amber-300">{sideProgression?.age ?? 1}</span></div>
+                        <div className="text-slate-400">Gold/Mana: <span className="text-yellow-300">{Math.floor(sideEconomy?.gold ?? 0)}</span> / <span className="text-blue-300">{Math.floor(sideEconomy?.mana ?? 0)}</span></div>
+                        <div className="text-slate-400">Slots: <span className="text-cyan-300">{sideBase?.turretSlotsUnlocked ?? 1}/{sideBase?.maxTurretSlots ?? 4}</span></div>
+                        <div className="text-slate-400">Warchest: <span className="text-emerald-300">{Math.floor(aiDebugInfo.behaviorParams?.warchest ?? aiDebugInfo.warchest ?? 0)}g</span></div>
+                        <div className="text-slate-400">Latency: <span className="text-purple-300">{aiDebugInfo.lastEndpointLatencyMs ?? 0}ms</span></div>
+                      </div>
+
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                        <div className="bg-slate-800/60 border border-slate-700 rounded p-2">
+                          <div className="text-slate-300 mb-1">Decision Pipeline</div>
+                          <div className="space-y-0.5 max-h-24 overflow-y-auto">
+                            {decisionStages.length > 0 ? (
+                              decisionStages.map((stage: any, i: number) => (
+                                <div key={i} className="text-slate-400 truncate" title={stage.detail}>
+                                  {stage.stage} {UI_SYMBOLS.middleDot} {stage.status}{stage.action ? ` ${UI_SYMBOLS.middleDot} ${stage.action}` : ''}
+                                </div>
+                              ))
+                            ) : (
+                              <div className="text-slate-600 italic">No pipeline stages emitted yet</div>
+                            )}
                           </div>
-                        ))}
-                      </div>
-                    )}
-                    {Array.isArray(aiDebugInfo.behaviorParams?.recentRecruitHistory) && (
-                      <div className="pt-1 border-t border-slate-700">
-                        <div className="text-slate-400 mb-0.5">Recent Recruit Sequence</div>
-                        <div className="text-slate-300 break-words">
-                          {aiDebugInfo.behaviorParams.recentRecruitHistory.length > 0
-                            ? aiDebugInfo.behaviorParams.recentRecruitHistory.join(' -> ')
-                            : 'none'}
+                        </div>
+                        <div className="bg-slate-800/60 border border-slate-700 rounded p-2">
+                          <div className="text-slate-300 mb-1">Recent Actions</div>
+                          <div className="space-y-0.5 max-h-24 overflow-y-auto">
+                            {recentActions.length > 0 ? (
+                              recentActions.map((a: string, i: number) => (
+                                <div key={i} className="text-slate-400 truncate" title={a}>- {a}</div>
+                              ))
+                            ) : (
+                              <div className="text-slate-600 italic">No non-wait actions in recent history</div>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    )}
-                  </div>
-                </div>
-              )}
 
-              {aiDebugSections.reserve && (
-                <div className="mt-3">
-                  <div className="font-bold text-white mb-1 underline">Reserve Policy</div>
-                  <div className="text-[10px] space-y-0.5 bg-slate-800 p-2 rounded border border-slate-700">
-                    <div className="flex justify-between"><span className="text-slate-400">Warchest</span><span>{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.warchest ?? 0)}g</span></div>
-                    <div className="flex justify-between"><span className="text-slate-400">Target</span><span>{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.reserveTarget ?? 0)}g</span></div>
-                    <div className="flex justify-between"><span className="text-slate-400">Protected</span><span>{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.protectedReserve ?? 0)}g</span></div>
-                    <div className="flex justify-between"><span className="text-slate-400">Released</span><span>{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.releasedReserve ?? 0)}g</span></div>
-                    <div className="flex justify-between"><span className="text-slate-400">Liquidity Floor</span><span>{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.minLiquidityGold ?? 0)}g</span></div>
-                    <div className="flex justify-between"><span className="text-slate-400">Spendable</span><span className="text-emerald-300">{Math.floor(aiDebugInfo.behaviorParams?.reservePolicy?.spendableGold ?? 0)}g</span></div>
-                    <div className="text-slate-500 pt-1 border-t border-slate-700">
-                      {aiDebugInfo.behaviorParams?.reservePolicy?.reason ?? 'No reserve policy emitted'}
+                      <div className="bg-slate-800/60 border border-slate-700 rounded p-2">
+                        <div className="text-slate-300 mb-1">Context + Next</div>
+                        <div className="text-slate-400 mb-1">
+                          Goal: <span className="text-emerald-300">{aiDebugInfo.behaviorParams?.activeGoal ?? aiDebugInfo.strategicState ?? 'n/a'}</span>
+                          {' '}{UI_SYMBOLS.middleDot} Next: <span className="text-cyan-300">{aiDebugInfo.behaviorParams?.nextAction ?? 'N/A'}</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+                          {contextEntries.length > 0 ? (
+                            contextEntries.map(([key, val]) => (
+                              <React.Fragment key={key}>
+                                <span className="text-slate-500">{key}</span>
+                                <span className="text-slate-300 text-right truncate" title={String(val)}>{String(val)}</span>
+                              </React.Fragment>
+                            ))
+                          ) : (
+                            <span className="text-slate-600 col-span-2">No context payload emitted</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {sideTelemetry && (
+                        <div className="bg-slate-800/60 border border-slate-700 rounded p-2">
+                          <div className="text-slate-300 mb-1">Telemetry</div>
+                          <div className="text-slate-400">
+                            Age Ups: {sideTelemetry.ageUpTimes?.length ? sideTelemetry.ageUpTimes.map((t: number) => `${t.toFixed(1)}s`).join(', ') : 'none'}
+                          </div>
+                          <div className="text-slate-400">
+                            Units: {unitEntries.length > 0 ? unitEntries.map(([id, count]) => `${id} x${count}`).join(', ') : 'none'}
+                          </div>
+                          <div className="text-slate-400">
+                            Mana Upgrades: {sideTelemetry.manaUpgradeCount ?? 0} | Turret Slots: {sideTelemetry.turretSlotUpgradeCount ?? 0}
+                          </div>
+                          <div className="mt-1 space-y-0.5">
+                            {telemetryActions.length > 0 ? (
+                              telemetryActions.map((entry: any, idx: number) => (
+                                <div key={idx} className="text-slate-500 truncate">
+                                  {entry.gameTime?.toFixed?.(1) ?? '0.0'}s {UI_SYMBOLS.middleDot} {entry.action} {UI_SYMBOLS.middleDot} g{Math.floor(entry.gold ?? 0)} m{Math.floor(entry.mana ?? 0)}
+                                </div>
+                              ))
+                            ) : (
+                              <div className="text-slate-600">No action snapshots yet</div>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                </div>
-              )}
-
-              {aiDebugSections.context && (
-                <div className="mt-3">
-                  <div className="font-bold text-white mb-1 underline">Context Signals</div>
-                  <div className="text-[10px] bg-slate-800 p-2 rounded border border-slate-700 grid grid-cols-2 gap-x-3 gap-y-1">
-                    {Object.entries(aiDebugInfo.behaviorParams?.context ?? {}).map(([key, val]) => (
-                      <React.Fragment key={key}>
-                        <span className="text-slate-400">{key}</span>
-                        <span className="text-slate-200 text-right">{String(val)}</span>
-                      </React.Fragment>
-                    ))}
-                    {Object.keys(aiDebugInfo.behaviorParams?.context ?? {}).length === 0 && (
-                      <span className="text-slate-500 col-span-2">No context payload emitted</span>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {aiDebugSections.actionSpace && (
-                <div className="mt-3">
-                  <div className="font-bold text-white mb-1 underline">Action Space</div>
-                  <div className="text-[10px] space-y-1 bg-slate-800 p-2 rounded border border-slate-700">
-                    <div className="text-slate-400">Legal Actions</div>
-                    {Object.entries(aiDebugInfo.behaviorParams?.actionSpace?.legalActions ?? {}).map(([key, val]) => (
-                      <div key={key} className="flex justify-between">
-                        <span>{key}</span>
-                        <span className={val ? 'text-emerald-300' : 'text-red-400'}>{val ? 'yes' : 'no'}</span>
-                      </div>
-                    ))}
-                    <div className="border-t border-slate-700 pt-1 mt-1 text-slate-400">Counts</div>
-                    {Object.entries(aiDebugInfo.behaviorParams?.actionSpace?.counts ?? {}).map(([key, val]) => (
-                      <div key={key} className="flex justify-between">
-                        <span>{key}</span>
-                        <span className="text-amber-300">{String(val)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="mt-3">
-                <div className="font-bold text-white mb-1 underline">Decision Pipeline</div>
-                <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
-                  {Array.isArray(aiDebugInfo.behaviorParams?.decisionStages) && aiDebugInfo.behaviorParams.decisionStages.length > 0 ? (
-                    aiDebugInfo.behaviorParams.decisionStages.map((stage: any, i: number) => (
-                      <div key={i} className="bg-slate-800/80 border border-slate-700 rounded px-2 py-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-slate-200">{stage.stage}</span>
-                          <span
-                            className={`text-[10px] px-1.5 py-0.5 rounded border ${
-                              stage.status === 'selected'
-                                ? 'text-emerald-300 border-emerald-700 bg-emerald-900/30'
-                                : stage.status === 'candidate'
-                                  ? 'text-yellow-300 border-yellow-700 bg-yellow-900/30'
-                                  : stage.status === 'info'
-                                    ? 'text-cyan-300 border-cyan-700 bg-cyan-900/30'
-                                    : 'text-slate-400 border-slate-700 bg-slate-900/40'
-                            }`}
-                          >
-                            {stage.status}
-                            {stage.action ? ` ${UI_SYMBOLS.middleDot} ${stage.action}` : ''}
-                          </span>
-                        </div>
-                        <div className="text-[10px] text-slate-500" title={stage.detail}>{stage.detail}</div>
-                      </div>
-                    ))
-                  ) : (
-                    <span className="text-slate-600 text-[10px] italic">No pipeline stages emitted yet</span>
-                  )}
-                </div>
-              </div>
-              <div className="mt-3">
-                <div className="font-bold text-white mb-1 underline">Strategy & Planning</div>
-                <div>Composition: <span className="text-purple-300">{aiDebugInfo.behaviorParams?.plan}</span></div>
-                {aiDebugInfo.plannedAttackGroup ? (
-                  <div className="mt-1 border-t border-slate-700 pt-1">
-                    <div className="text-yellow-300">EXEC: {aiDebugInfo.plannedAttackGroup.name}</div>
-                    <div className="text-slate-400 break-words">{aiDebugInfo.plannedAttackGroup.units.join(', ')}</div>
-                  </div>
-                ) : (
-                  <div className="text-slate-600 text-[10px] italic">No active group execution</div>
-                )}
-              </div>
-              <div className="mt-3">
-                <div className="font-bold text-white mb-1 underline">Foreseeable Plan</div>
-                <div className="flex flex-col gap-0.5 max-h-24 overflow-y-auto">
-                  {Array.isArray(aiDebugInfo.behaviorParams?.futurePlan) && aiDebugInfo.behaviorParams.futurePlan.length > 0 ? (
-                    aiDebugInfo.behaviorParams.futurePlan.map((item: string, i: number) => (
-                      <span key={i} className="text-slate-400">- {item}</span>
-                    ))
-                  ) : (
-                    <span className="text-slate-600 text-[10px] italic">No projected plan available yet</span>
-                  )}
-                </div>
-              </div>
-              <div className="mt-3">
-                <div className="font-bold text-white mb-1 underline">Recent Actions</div>
-                <div className="flex flex-col gap-0.5 max-h-24 overflow-y-auto">
-                  {aiDebugInfo.recentActions.length > 0 ? (
-                    aiDebugInfo.recentActions.slice().reverse().map((a: string, i: number) => (
-                      <span key={i} className="text-slate-400">- {a}</span>
-                    ))
-                  ) : (
-                    <span className="text-slate-600 text-[10px] italic">No non-wait actions in recent history</span>
-                  )}
-                </div>
+                  );
+                })}
               </div>
             </div>
           )}
         </div>
-
         <div className="w-full lg:w-80 flex flex-col gap-4">
           <div className="bg-slate-800 border border-slate-700 rounded-xl p-6">
             <h3 className="text-sm text-slate-400 mb-4">Your Battle Stats</h3>
@@ -738,7 +720,7 @@ export default function App() {
                     <button
                       onClick={handleUpgradeManaGeneration}
                       className="w-full px-3 py-2 text-sm bg-blue-900 hover:bg-blue-800 border border-blue-700 rounded font-semibold disabled:opacity-50 disabled:cursor-not-started transition-all"
-                      disabled={(gameState?.economy?.player?.gold ?? 0) < nextCost}
+                      disabled={playerControlledByAI || (gameState?.economy?.player?.gold ?? 0) < nextCost}
                     >
                       {UI_EMOTES.mana} Upgrade Mana Pool (Lv.{level}) - {nextCost}g
                     </button>
@@ -765,7 +747,7 @@ export default function App() {
                 <button
                   onClick={handleHealBase}
                   className="w-full px-3 py-2 text-sm bg-green-900 hover:bg-green-800 border border-green-700 rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                  disabled={(gameState?.economy?.player?.mana ?? 0) < 500 || (gameState?.playerBase?.health ?? 0) >= (gameState?.playerBase?.maxHealth ?? 200)}
+                  disabled={playerControlledByAI || (gameState?.economy?.player?.mana ?? 0) < 500 || (gameState?.playerBase?.health ?? 0) >= (gameState?.playerBase?.maxHealth ?? 200)}
                 >
                   {UI_EMOTES.heal} Heal Base (+200 HP) - 500 mana
                 </button>
@@ -792,7 +774,7 @@ export default function App() {
                   <button
                     onClick={handleQueueTurretSlotUpgrade}
                     className="w-full px-3 py-2 text-sm bg-amber-900 hover:bg-amber-800 border border-amber-700 rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                    disabled={!canUnlock}
+                    disabled={playerControlledByAI || !canUnlock}
                   >
                     {unlockLabel}
                   </button>
@@ -809,7 +791,7 @@ export default function App() {
                         <div className="text-slate-300">Slot {idx + 1}</div>
                         <div className="text-slate-400">{turret?.name ?? (slot.turretId ? slot.turretId : 'Empty')}</div>
                       </div>
-                      {slot.turretId ? (
+                      {slot.turretId && !playerControlledByAI ? (
                         <button
                           onClick={() => handleSellTurretEngine(idx)}
                           className="px-2 py-1 text-xs bg-rose-900 hover:bg-rose-800 border border-rose-700 rounded"
@@ -832,7 +814,7 @@ export default function App() {
               <button
                 onClick={handleUpgradeAge}
                 className="w-full px-4 py-2 bg-gradient-to-r from-amber-600 to-purple-600 hover:from-amber-700 hover:to-purple-700 text-white rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                disabled={!(gameState?.progression?.player?.ageProgress?.canUpgrade) || (gameState?.economy?.player?.gold ?? 0) < (gameState?.progression?.player?.ageProgress?.costGold ?? 500)}
+                disabled={playerControlledByAI || !(gameState?.progression?.player?.ageProgress?.canUpgrade) || (gameState?.economy?.player?.gold ?? 0) < (gameState?.progression?.player?.ageProgress?.costGold ?? 500)}
               >
                 {UI_EMOTES.ageUp} Advance to Age {Math.min((gameState?.progression?.player?.age ?? 1) + 1, PROGRESSION_CONFIG.maxAge)}
                 <span className="ml-2 text-sm opacity-75">({gameState?.progression?.player?.ageProgress?.costGold ?? 500}g)</span>

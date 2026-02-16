@@ -145,3 +145,13 @@ Thumbs.db
 
 # Windows
 $RECYCLE.BIN/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*/.venv/
+ml/**/__pycache__/
+ml/**/*.pyc
