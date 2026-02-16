@@ -54,11 +54,14 @@ class PPOUpdater:
         optimizer: torch.optim.Optimizer,
         cfg: PPOConfig,
         device: torch.device,
+        mixed_precision: bool = True,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.cfg = cfg
         self.device = device
+        self.use_amp = bool(mixed_precision and device.type == "cuda")
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
     def _masked_logprob_entropy(
         self, logits: torch.Tensor, mask: torch.Tensor, actions: torch.Tensor
@@ -67,8 +70,40 @@ class PPOUpdater:
         dist = torch.distributions.Categorical(logits=masked_logits)
         return dist.log_prob(actions), dist.entropy()
 
+    def _combine_hierarchical_terms(
+        self,
+        action_indices: torch.Tensor,
+        action_logp: torch.Tensor,
+        unit_logp: torch.Tensor,
+        turret_logp: torch.Tensor,
+        buy_slot_logp: torch.Tensor,
+        sell_slot_logp: torch.Tensor,
+        action_ent: torch.Tensor,
+        unit_ent: torch.Tensor,
+        turret_ent: torch.Tensor,
+        buy_slot_ent: torch.Tensor,
+        sell_slot_ent: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        recruit_mask = (action_indices == 1).float()
+        buy_turret_mask = (action_indices == 5).float()
+        sell_turret_mask = (action_indices == 6).float()
+        combined_log_prob = (
+            action_logp
+            + recruit_mask * unit_logp
+            + buy_turret_mask * (turret_logp + buy_slot_logp)
+            + sell_turret_mask * sell_slot_logp
+        )
+        combined_entropy = (
+            action_ent
+            + recruit_mask * unit_ent
+            + buy_turret_mask * (turret_ent + buy_slot_ent)
+            + sell_turret_mask * sell_slot_ent
+        )
+        return combined_log_prob, combined_entropy
+
     def update(self, batch: RolloutBatch) -> Dict[str, float]:
         batch_size = batch.returns.shape[0]
+        minibatch_size = max(1, min(self.cfg.minibatch_size, batch_size))
         advantages = batch.advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -83,55 +118,93 @@ class PPOUpdater:
 
         for _ in range(self.cfg.ppo_epochs):
             indices = torch.randperm(batch_size, device=self.device)
-            for start in range(0, batch_size, self.cfg.minibatch_size):
-                mb_idx = indices[start : start + self.cfg.minibatch_size]
-                outputs = self.model(batch.static_state[mb_idx], batch.event_sequence[mb_idx])
+            for start in range(0, batch_size, minibatch_size):
+                mb_idx = indices[start : start + minibatch_size]
+                try:
+                    with torch.autocast(
+                        device_type=self.device.type,
+                        dtype=torch.float16,
+                        enabled=self.use_amp,
+                    ):
+                        outputs = self.model(batch.static_state[mb_idx], batch.event_sequence[mb_idx])
 
-                action_logp, action_ent = self._masked_logprob_entropy(
-                    outputs.action_logits,
-                    batch.masks["action_type"][mb_idx],
-                    batch.actions["action"][mb_idx],
-                )
-                unit_logp, unit_ent = self._masked_logprob_entropy(
-                    outputs.unit_logits,
-                    batch.masks["unit"][mb_idx],
-                    batch.actions["unit"][mb_idx],
-                )
-                turret_logp, turret_ent = self._masked_logprob_entropy(
-                    outputs.turret_logits,
-                    batch.masks["turret"][mb_idx],
-                    batch.actions["turret"][mb_idx],
-                )
-                buy_slot_logp, buy_slot_ent = self._masked_logprob_entropy(
-                    outputs.buy_slot_logits,
-                    batch.masks["buy_slot"][mb_idx],
-                    batch.actions["buy_slot"][mb_idx],
-                )
-                sell_slot_logp, sell_slot_ent = self._masked_logprob_entropy(
-                    outputs.sell_slot_logits,
-                    batch.masks["sell_slot"][mb_idx],
-                    batch.actions["sell_slot"][mb_idx],
-                )
+                        action_logp, action_ent = self._masked_logprob_entropy(
+                            outputs.action_logits,
+                            batch.masks["action_type"][mb_idx],
+                            batch.actions["action"][mb_idx],
+                        )
+                        unit_logp, unit_ent = self._masked_logprob_entropy(
+                            outputs.unit_logits,
+                            batch.masks["unit"][mb_idx],
+                            batch.actions["unit"][mb_idx],
+                        )
+                        turret_logp, turret_ent = self._masked_logprob_entropy(
+                            outputs.turret_logits,
+                            batch.masks["turret"][mb_idx],
+                            batch.actions["turret"][mb_idx],
+                        )
+                        buy_slot_logp, buy_slot_ent = self._masked_logprob_entropy(
+                            outputs.buy_slot_logits,
+                            batch.masks["buy_slot"][mb_idx],
+                            batch.actions["buy_slot"][mb_idx],
+                        )
+                        sell_slot_logp, sell_slot_ent = self._masked_logprob_entropy(
+                            outputs.sell_slot_logits,
+                            batch.masks["sell_slot"][mb_idx],
+                            batch.actions["sell_slot"][mb_idx],
+                        )
 
-                new_log_prob = action_logp + unit_logp + turret_logp + buy_slot_logp + sell_slot_logp
-                old_log_prob = batch.old_log_probs[mb_idx]
-                ratio = torch.exp(new_log_prob - old_log_prob)
+                        new_log_prob, combined_entropy = self._combine_hierarchical_terms(
+                            batch.actions["action"][mb_idx],
+                            action_logp,
+                            unit_logp,
+                            turret_logp,
+                            buy_slot_logp,
+                            sell_slot_logp,
+                            action_ent,
+                            unit_ent,
+                            turret_ent,
+                            buy_slot_ent,
+                            sell_slot_ent,
+                        )
+                        old_log_prob = batch.old_log_probs[mb_idx]
+                        ratio = torch.exp(new_log_prob - old_log_prob)
 
-                unclipped = ratio * advantages[mb_idx]
-                clipped = torch.clamp(ratio, 1.0 - self.cfg.clip_epsilon, 1.0 + self.cfg.clip_epsilon) * advantages[mb_idx]
-                policy_loss = -torch.mean(torch.min(unclipped, clipped))
+                        unclipped = ratio * advantages[mb_idx]
+                        clipped = torch.clamp(
+                            ratio,
+                            1.0 - self.cfg.clip_epsilon,
+                            1.0 + self.cfg.clip_epsilon,
+                        ) * advantages[mb_idx]
+                        policy_loss = -torch.mean(torch.min(unclipped, clipped))
 
-                value_pred = outputs.value
-                value_target = batch.returns[mb_idx]
-                value_loss = F.mse_loss(value_pred, value_target)
+                        value_pred = outputs.value
+                        value_target = batch.returns[mb_idx]
+                        value_loss = F.mse_loss(value_pred, value_target)
 
-                entropy = torch.mean(action_ent + unit_ent + turret_ent + buy_slot_ent + sell_slot_ent)
-                loss = policy_loss + self.cfg.value_coef * value_loss - self.cfg.entropy_coef * entropy
+                        entropy = torch.mean(combined_entropy)
+                        loss = policy_loss + self.cfg.value_coef * value_loss - self.cfg.entropy_coef * entropy
+                except torch.OutOfMemoryError as exc:
+                    if self.device.type == "cuda":
+                        self.optimizer.zero_grad(set_to_none=True)
+                        torch.cuda.empty_cache()
+                        raise RuntimeError(
+                            "CUDA OOM during PPO update. Lower --minibatch-size (e.g. 32 or 16), "
+                            "or lower --num-envs / --rollout-horizon."
+                        ) from exc
+                    raise
 
                 self.optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
-                self.optimizer.step()
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
+                    self.optimizer.step()
 
                 with torch.no_grad():
                     approx_kl = torch.mean(old_log_prob - new_log_prob).item()

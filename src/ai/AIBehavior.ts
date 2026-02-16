@@ -74,17 +74,86 @@ export interface GameStateSnapshot {
     health: number;
     maxHealth: number;
     position: number;
+    laneY?: number;
     damage: number;
     range: number;
+    speed?: number;
+    attackCooldownRemaining?: number;
+    skillCooldownRemaining?: number;
   }>;
   enemyUnits: Array<{
     unitId: string;
     health: number;
     maxHealth: number;
     position: number;
+    laneY?: number;
     damage: number;
     range: number;
+    speed?: number;
+    attackCooldownRemaining?: number;
+    skillCooldownRemaining?: number;
   }>;
+
+  // Optional high-fidelity tactical state used by ML observation encoders.
+  projectiles?: Array<{
+    owner: 'SELF' | 'OPPONENT';
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    damage: number;
+    lifeMs: number;
+    splashRadius: number;
+    isFalling: boolean;
+    hasDroneGuidance: boolean;
+  }>;
+  activeAbilityEffects?: Array<{
+    owner: 'SELF' | 'OPPONENT' | 'UNKNOWN';
+    type: 'ability_cast' | 'ability_impact' | 'flamethrower';
+    x: number;
+    y: number;
+    lifeMs: number;
+  }>;
+  unitCatalogDiagnostics?: Array<{
+    unitId: string;
+    ageRequired: number;
+    goldCost: number;
+    manaCost: number;
+    legalNow: boolean;
+    ageLocked: boolean;
+    queueBlocked: boolean;
+    goldShortfall: number;
+    manaShortfall: number;
+    scorePower: number;
+  }>;
+  turretCatalogDiagnostics?: Array<{
+    turretId: string;
+    ageRequired: number;
+    goldCost: number;
+    manaCost: number;
+    legalNow: boolean;
+    ageLocked: boolean;
+    queueBlocked: boolean;
+    slotBlocked: boolean;
+    goldShortfall: number;
+    manaShortfall: number;
+    scorePower: number;
+  }>;
+  actionConstraintSummary?: {
+    queueRemaining: number;
+    emptyUnlockedTurretSlots: number;
+    legalUnits: number;
+    legalTurrets: number;
+    unitBlockedByAge: number;
+    unitBlockedByGold: number;
+    unitBlockedByMana: number;
+    unitBlockedByQueue: number;
+    turretBlockedByAge: number;
+    turretBlockedByGold: number;
+    turretBlockedByMana: number;
+    turretBlockedBySlot: number;
+    turretBlockedByQueue: number;
+  };
   
   // Queues
   playerQueueSize: number;

@@ -11,11 +11,19 @@ export interface MLCheckpointOption {
   label: string;
 }
 
+export interface MLFeaturedAgentOption {
+  alias: string;
+  id: string;
+  label: string;
+}
+
 interface StartScreenProps {
   mode: StartMode;
   difficulty: Difficulty;
+  playSmartMlSelection: AISelectionValue;
   watchPlayerSelection: AISelectionValue;
   watchEnemySelection: AISelectionValue;
+  mlFeaturedOptions: MLFeaturedAgentOption[];
   mlCheckpointOptions: MLCheckpointOption[];
   latestMlCheckpointLabel: string;
   hasSavedGame: boolean;
@@ -24,6 +32,7 @@ interface StartScreenProps {
   onContinueGame: () => void;
   onModeChange: (mode: StartMode) => void;
   onDifficultyChange: (difficulty: Difficulty) => void;
+  onPlaySmartMlSelectionChange: (selection: AISelectionValue) => void;
   onWatchPlayerSelectionChange: (selection: AISelectionValue) => void;
   onWatchEnemySelectionChange: (selection: AISelectionValue) => void;
   onClearSavedGame: () => void;
@@ -32,8 +41,10 @@ interface StartScreenProps {
 export function StartScreen({
   mode,
   difficulty,
+  playSmartMlSelection,
   watchPlayerSelection,
   watchEnemySelection,
+  mlFeaturedOptions,
   mlCheckpointOptions,
   latestMlCheckpointLabel,
   hasSavedGame,
@@ -42,19 +53,27 @@ export function StartScreen({
   onContinueGame,
   onModeChange,
   onDifficultyChange,
+  onPlaySmartMlSelectionChange,
   onWatchPlayerSelectionChange,
   onWatchEnemySelectionChange,
   onClearSavedGame,
 }: StartScreenProps) {
   const allDifficulties = ['EASY', 'MEDIUM', 'HARD', 'SMART', 'SMART_ML', 'CHEATER'] as const;
   const watchBaseDifficulties = allDifficulties.filter((diff) => diff !== 'SMART_ML');
-  const mlSelectionOptions: Array<{ value: AISelectionValue; label: string }> = [
+  const mlSelectionOptionsRaw: Array<{ value: AISelectionValue; label: string }> = [
     { value: 'SMART_ML', label: `SMART_ML (latest: ${latestMlCheckpointLabel})` },
+    ...mlFeaturedOptions.map((option) => ({
+      value: `SMART_ML::${option.id}` as AISelectionValue,
+      label: option.label,
+    })),
     ...mlCheckpointOptions.map((option) => ({
       value: `SMART_ML::${option.id}` as AISelectionValue,
       label: `SMART_ML ${UI_SYMBOLS.arrowRight} ${option.label}`,
     })),
   ];
+  const mlSelectionOptions = mlSelectionOptionsRaw.filter(
+    (option, index) => mlSelectionOptionsRaw.findIndex((candidate) => candidate.value === option.value) === index
+  );
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center gap-6 p-8">
@@ -124,6 +143,22 @@ export function StartScreen({
               {difficulty === 'SMART_ML' && `Smart economy profile with modular ML-ready AI endpoint (latest: ${latestMlCheckpointLabel}).`}
               {difficulty === 'CHEATER' && 'Ruthless AI with extreme economy and pressure.'}
             </div>
+            {difficulty === 'SMART_ML' && (
+              <div className="mt-4">
+                <div className="text-sm text-slate-400 mb-1">Smart ML Enemy Variant</div>
+                <select
+                  value={playSmartMlSelection}
+                  onChange={(event) => onPlaySmartMlSelectionChange(event.target.value as AISelectionValue)}
+                  className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-slate-100"
+                >
+                  {mlSelectionOptions.map((option) => (
+                    <option key={`play-${option.value}`} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </>
         )}
 

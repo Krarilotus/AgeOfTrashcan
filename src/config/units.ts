@@ -99,10 +99,10 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
 
   // ===== AGE 2: Bronze Age =====
   bronze_spearman: {
-    cost: 20,
+    cost: 28,
     role: ['TANK', 'FRONTLINE'],
-    health: 65,
-    damage: 10,
+    health: 72,
+    damage: 13,
     speed: 5.5,
     range: 1,
     trainingMs: 1100,
@@ -111,7 +111,7 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   bronze_archer: {
     cost: 30,
     role: ['RANGED_DPS'],
-    health: 22,
+    health: 23,
     damage: 10,
     speed: 5.8,
     range: 8,
@@ -122,16 +122,16 @@ export const UNIT_DEFS: Record<string, UnitDef> = {
   },
   bronze_catapult: {
     cost: 150,
-    role: ['RANGED_DPS', 'SIEGE', 'TANK'],
-    health: 120,
-    damage: 30,
+    role: ['RANGED_DPS', 'SIEGE', 'TANK','FRONTLINE'],
+    health: 160,
+    damage: 25,
     speed: 2.8,
     range: 10,
     trainingMs: 4000,
     age: 2,
     visualScale: 1.3,   
     width: 1.3,
-    skill: { type: 'aoe', manaCost: 15, cooldownMs: 15000, power: 4, radius: 4, damage: 25, range: 6 },
+    skill: { type: 'aoe', manaCost: 15, cooldownMs: 15000, power: 4, radius: 4, damage: 28, range: 6 },
     projectile: { speed: 24, curvature: 0, radiusPx: 7, color: '#fb923c', glowColor: 'rgba(251,146,60,0.8)', trailAlpha: 0.45 },
   },
 

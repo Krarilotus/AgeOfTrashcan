@@ -40,7 +40,10 @@ just setup
 just install-torch-cuda
 just doctor
 just train-smoke
+just train-quick10
 just train-overnight
+just serve-inference
+just clean-checkpoints
 just sync-checkpoints
 ```
 
@@ -50,17 +53,35 @@ Other useful targets:
 just doctor
 just doctor-cpu
 just install-torch-cuda
-RUN_NAME=my_experiment TOTAL_STEPS=5000000 NUM_ENVS=8 ROLLOUT_HORIZON=256 DEVICE=cuda just train
+ENV_BACKEND=auto RUN_NAME=my_experiment TOTAL_STEPS=5000000 NUM_ENVS=8 ROLLOUT_HORIZON=256 DEVICE=cuda just train
+ENV_BACKEND=game OPPONENT_DIFFICULTY=SMART SELF_DIFFICULTY=SMART_ML DECISION_FRAMES=30 just train-smoke
+ENV_BACKEND=game just train-quick10
+DEVICE=cuda just serve-inference
+HOST=0.0.0.0 PORT=8765 DEVICE=cpu just serve-inference-public
 CHECKPOINT=checkpoints/my_experiment/latest.pt ADDITIONAL_STEPS=2000000 just train-resume
 CHECKPOINT=checkpoints/my_experiment/latest.pt TOTAL_STEPS=12000000 just train-resume-to
+REWARD_DENSE_END=0.05 REWARD_TERMINAL_END=4.0 REWARD_CURRICULUM_STEPS=7000000 just train-overnight
+MINIBATCH_SIZE=32 just train-smoke
+just clean-checkpoints
+just clean-run my_experiment
 just sync-checkpoints
 ```
 
 Important usage note for Git Bash:
 
 - Use env vars inline before `just` (for example `RUN_NAME=... just train`).
+- `just` recipes now enforce Git Bash (`MSYSTEM` check) and will fail fast if run from WSL bash.
 - `just train-overnight`, `just train-smoke`, `just train-resume`, and `just train-resume-to` automatically refresh the UI checkpoint registry at the end.
 - If you trained outside `just`, run `just sync-checkpoints` manually.
+- `python -m train_selfplay` now also exports the UI checkpoint registry at run end by default (disable with `--no-export-registry`).
+- Non-resume training runs are clean by default: if `RUN_NAME` already exists, that run directory is deleted first.
+- `just train-quick10` is a tiny-network, short-step sanity probe for behavior checks before overnight runs.
+- `just serve-inference` binds local-only (`127.0.0.1`) by default; `just serve-inference-public` binds `0.0.0.0` for LAN/server use.
+
+Cleanup helpers:
+
+- `just clean-checkpoints` removes all local checkpoint runs and rebuilds an empty UI registry.
+- `just clean-run <run_name>` removes one run directory and refreshes UI registry.
 
 ## Checkpoint Layout + Naming
 
@@ -75,12 +96,94 @@ Each run writes to `ml/checkpoints/<run_name>/` with:
 
 Default milestones are at 20/40/60/80/100% of `total_steps`.
 
+UI registry (`public/ml/checkpoints/index.json`) now includes:
+
+- `latestCheckpointId` for play-mode `SMART_ML`.
+- `featuredAgents` (up to 5 diverse strategy agents) for quick named opponents like `SMART_ML_<CODENAME>`.
+- Full `checkpoints` list for watch-mode matchup testing.
+
+## Inference Serving (Play/Watch with Real Weights)
+
+`SMART_ML` can run live checkpoint inference through the HTTP inference server.
+
+Run server (local GPU):
+
+```bash
+cd ml
+DEVICE=cuda just serve-inference
+```
+
+Run server (Debian/CPU):
+
+```bash
+cd ml
+DEVICE=cpu HOST=0.0.0.0 PORT=8765 just serve-inference-public
+```
+
+Frontend endpoint selection priority:
+
+1. `VITE_ML_INFERENCE_URL` (build-time env)
+2. `window.__AOT_ML_INFERENCE_URL__`
+3. URL query: `?mlInferenceUrl=http://host:8765`
+4. `localStorage['aot.ml.inferenceUrl']`
+
+Checkpoint IDs sent by UI watch/play map to files under `ml/checkpoints/` (via `public/ml/checkpoints/index.json`).
+
+Important:
+
+- CPU inference works, but GPU is strongly recommended for multi-user latency.
+- Training requires GPU for practical overnight throughput.
+- In watch mode, all exported checkpoints are selectable; in play mode, `SMART_ML` uses `latestCheckpointId`.
+
+## Debian Server Deployment (Minimal)
+
+1. Build and serve frontend:
+
+```bash
+npm run build
+# serve dist/ with nginx or another static server
+```
+
+2. Start inference service:
+
+```bash
+cd ml
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+DEVICE=cpu HOST=127.0.0.1 PORT=8765 just serve-inference
+```
+
+3. Configure frontend to use inference URL:
+
+- Build-time: `VITE_ML_INFERENCE_URL=http://127.0.0.1:8765`
+- Or runtime query/localStorage for testing.
+
+4. Keep checkpoint registry current:
+
+```bash
+cd ml
+just sync-checkpoints
+```
+
+Optional: run inference under `systemd` and reverse proxy `/infer` through nginx.
+
 ## Resume / Continue Training
 
 - Continue by additional steps:
   - `CHECKPOINT=checkpoints/<run_name>/latest.pt ADDITIONAL_STEPS=2000000 just train-resume`
 - Continue to an absolute final step:
   - `CHECKPOINT=checkpoints/<run_name>/latest.pt TOTAL_STEPS=12000000 just train-resume-to`
+
+## Environment Backend
+
+- `ENV_BACKEND=auto` (default in `just` recipes):
+  - Tries the real headless game bridge first.
+  - Falls back to mock env if bridge setup fails.
+- `ENV_BACKEND=game`:
+  - Force real game bridge env (`GameEngine` headless stepping via Node bridge).
+- `ENV_BACKEND=mock`:
+  - Force deterministic mock env (fastest smoke/debug).
 
 ## Training Parameters Explained
 
@@ -95,6 +198,20 @@ Default milestones are at 20/40/60/80/100% of `total_steps`.
   - With `NUM_ENVS=8`, each training loop adds `8 * ROLLOUT_HORIZON` steps.
 - `DEVICE`
   - `cuda` for GPU training, `cpu` for fallback/debug.
+- `MODEL_PRESET`
+  - `tiny`, `base`, `large` model size presets.
+  - `tiny` is intended for quick behavioral smoke tests.
+- `ENV_BACKEND`
+  - `auto`, `game`, or `mock` backend selection.
+- `OPPONENT_DIFFICULTY`, `SELF_DIFFICULTY`
+  - Difficulty profile used by game bridge backend for opponent and controlled side.
+- `EPISODE_SECONDS`
+  - Per-episode timeout in seconds when using game bridge backend.
+- `DECISION_FRAMES`
+  - Number of 60Hz game frames per policy action step in game bridge backend.
+- `MINIBATCH_SIZE`
+  - PPO micro-batch size per optimizer step.
+  - Main GPU-memory control knob. Lower values reduce VRAM use.
 - `CHECKPOINT_EVERY`
   - Save interval in steps for periodic checkpoints.
 - `EVAL_EVERY`
@@ -102,29 +219,114 @@ Default milestones are at 20/40/60/80/100% of `total_steps`.
 - `EVAL_MATCHES`
   - Number of matches per evaluation pass.
   - Higher gives stabler metrics but slows training wall-clock.
+- `EVAL_WORKERS`
+  - Number of parallel eval workers.
+  - `0` uses auto mode (`min(NUM_ENVS, EVAL_MATCHES)`).
 - `MILESTONE_FRACTIONS`
   - Extra checkpoint targets as fractions of `TOTAL_STEPS` (default `0.2,0.4,0.6,0.8,1.0`).
+- `REWARD_DENSE_START`, `REWARD_DENSE_END`
+  - Scale for intermediate dense reward terms from start to end of training.
+- `REWARD_DENSE_DECAY_INTERVAL`, `REWARD_DENSE_DECAY_FACTOR`
+  - Stepwise dense reward decay controls (default: every 20% multiply dense rewards by 0.9).
+- `REWARD_TERMINAL_START`, `REWARD_TERMINAL_END`
+  - Scale for terminal win/loss reward from start to end of training.
+- `REWARD_CURRICULUM_STEPS`
+  - Steps used for reward annealing; `0` means full `TOTAL_STEPS`.
 - `RUN_NAME`
   - Folder name under `ml/checkpoints/` for one experiment.
 - `CHECKPOINT` + `ADDITIONAL_STEPS` / `TOTAL_STEPS`
   - Resume controls for continue training.
+- `LEAGUE_KEEP_TOP`
+  - Number of strongest agents always retained.
+- `LEAGUE_KEEP_DIVERSE`
+  - Extra slots for distinct strategy archetypes.
+- `LEAGUE_MAX_AGENTS`
+  - Total active league roster cap (target 5-10).
+- `LEAGUE_MIN_PROMOTE_WINRATE`
+  - Standard promotion gate.
+- `LEAGUE_ARCHETYPE_WINRATE_FLOOR`
+  - Lower gate for best-in-archetype specialists.
+- `DEAD_UNIT_REVIVAL` (`--dead-unit-revival` / `--no-dead-unit-revival`)
+  - Conservative revival of provably dead output neurons.
+- `DEAD_UNIT_CHECK_EVERY`
+  - Check interval in PPO updates.
+- `DEAD_UNIT_ZERO_EPSILON`
+  - Absolute near-zero threshold (very small; safety-clamped).
+- `DEAD_UNIT_STREAK`
+  - Required consecutive zero checks before reinit.
 
 ## Recommended Defaults (GTX 1080 / 8 GB)
 
 - `NUM_ENVS=8`
 - `ROLLOUT_HORIZON=256`
+- `MINIBATCH_SIZE=32`
 - `TOTAL_STEPS=10000000`
 - `CHECKPOINT_EVERY=100000`
 - `EVAL_EVERY=200000`
 - `EVAL_MATCHES=200`
 
-These are the same defaults used by `just train-overnight`.
+These are the same defaults used by `just train-overnight` in the `justfile`.
+
+## Reward Design (Current)
+
+Game bridge reward is now intentionally sparse and anti-hack oriented:
+
+- No continuous reward for unit kills or lane-control drift.
+- One-time base HP milestone rewards when opponent crosses:
+  - 75%, 50%, 25% (awarded once each per episode).
+- Symmetric one-time penalties when your own base crosses those thresholds.
+- Age-up bonus is retained (small compared to terminal).
+- Illegal actions are penalized.
+- Win/loss terminal reward is dominant (large magnitude).
+- Dense terms are automatically downweighted over training with 20%-interval milestone decay.
+- Runtime logs now include eval progress with ETA (`[eval-progress] ... eta=...`) during evaluation phases.
+- Dead-unit revival is intentionally strict:
+  - immediate revive for any non-finite (NaN/Inf) output row
+  - revive only after long consecutive checks when a row is effectively zeroed
+  - applied only to policy/value output heads, not full trunk layers.
+
+## Diversity League (Current)
+
+- Checkpoints are profiled by rollout behavior and tagged with strategy archetype:
+  - `swarm`, `raider`, `techer`, `scaler`, `fortress`, `turtle`, `balanced`, `passive`
+- Promotion keeps:
+  - strongest global agents
+  - strongest per-archetype specialists
+  - novel outliers (diversity slots)
+- Active league roster is capped (default 10).
+- Opponent sampling is weighted by quality + novelty + archetype underrepresentation.
+- Checkpoint labels include generated codenames (for UI/watch selection readability).
 
 ## Runtime Note (Important)
 
-Current trainer runs on `MockSelfPlayEnv` and is not tied to real-time rendering, so rollout happens as fast as CPU/GPU allow.
+With `ENV_BACKEND=game`, trainer uses `GameBridgeEnv` and steps the real `GameEngine` headlessly (fixed 60Hz, 30 frames per decision by default) without rendering.
 
-`GameBridgeEnv` is still a contract stub and must be implemented for true in-engine accelerated self-play against the full game simulation.
+With `ENV_BACKEND=mock`, trainer uses `MockSelfPlayEnv` for fast deterministic smoke runs.
+
+## 10-Minute Behavior Check
+
+Use this before long runs:
+
+```bash
+ENV_BACKEND=game just train-quick10
+```
+
+Default quick profile:
+
+- tiny model preset
+- `TOTAL_STEPS=6000`
+- `NUM_ENVS=2`
+- `ROLLOUT_HORIZON=64`
+- `MINIBATCH_SIZE=16`
+- `DECISION_FRAMES=8`
+- `CHECKPOINT_EVERY=1200`
+- `EVAL_EVERY=3000`
+- `EVAL_MATCHES=8`
+
+Note:
+
+- With `ENV_BACKEND=game`, low GPU utilization is normal because the bottleneck is game simulation + bridge IPC, not matrix compute.
+- If you want higher GPU utilization, use `ENV_BACKEND=mock` for stress tests.
 
 ## Troubleshooting: `PyTorch ... +cpu` and `CUDA available: False`
 
@@ -137,14 +339,52 @@ just install-torch-cuda
 just doctor
 ```
 
+`just doctor` now checks CUDA architecture compatibility too, so unsupported wheel/device combinations fail fast.
+
+## Troubleshooting: CUDA OOM on GTX 1080
+
+If training fails with `torch.OutOfMemoryError`, reduce micro-batch size first:
+
+```bash
+MINIBATCH_SIZE=16 just train-smoke
+MINIBATCH_SIZE=16 just train-overnight
+```
+
+Notes:
+
+- `just` recipes set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` by default.
+- PPO now uses CUDA mixed precision by default; disable only for debugging:
+  - `python -m train_selfplay ... --no-mixed-precision`
+
 If needed, pick a specific PyTorch CUDA index:
 
 ```bash
 TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 just install-torch-cuda
 ```
 
+GPU stack selection is now automatic:
+
+- `just install-torch-cuda` inspects GPU compute capability via `nvidia-smi`.
+- For older GPUs (for example GTX 1080, `sm_61`) it installs a legacy-safe stack:
+  - `torch==2.5.1+cu118`
+  - `torchvision==0.20.1+cu118`
+  - `torchaudio==2.5.1+cu118`
+- For newer GPUs (for example RTX 4090) it installs modern CUDA wheels (`cu128`) without pinning exact torch versions.
+- If compute capability cannot be detected, installer defaults to the legacy-safe stack.
+- Override manually if needed:
+  - `TORCH_STACK=legacy just install-torch-cuda`
+  - `TORCH_STACK=modern just install-torch-cuda`
+  - `TORCH_VERSION=... TORCHVISION_VERSION=... TORCHAUDIO_VERSION=... just install-torch-cuda`
+- If you previously installed an incompatible wheel and saw `sm_61` warnings, rerun:
+
+```bash
+just install-torch-cuda
+just doctor
+```
+
 ## Overnight Config (Defaults)
 
+- `static_dim=112` (includes richer tactical + affordability diagnostics)
 - `d_model=256`, `n_layers=8`, `n_heads=8`, `ffn_dim=1024`
 - `sequence_len=240`
 - `rollout_horizon=256`
@@ -152,5 +392,6 @@ TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 just install-torch-cuda
 - `total_steps=10_000_000`
 - `checkpoint_every=100_000`
 - `eval_every=200_000`
+- dense reward decay: every 20% x0.9 (`REWARD_DENSE_DECAY_INTERVAL=0.2`, `REWARD_DENSE_DECAY_FACTOR=0.9`)
 
 Adjust in `selfplay/config.py`.

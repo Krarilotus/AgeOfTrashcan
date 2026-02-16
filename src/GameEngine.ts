@@ -267,6 +267,7 @@ export class GameEngine {
   private lastUpdateTime = 0;
   private aiAccumulatorsMs: Record<Owner, number> = { PLAYER: 0, ENEMY: 0 };
   private sideControl: Record<Owner, SideControlConfig>;
+  private aiDecisionEnabled: Record<Owner, boolean> = { PLAYER: true, ENEMY: true };
   private aiControllers: Partial<Record<Owner, AIController>> = {};
   private telemetry: MatchTelemetry;
   private lastTelemetrySampleTimeSec = 0;
@@ -452,6 +453,7 @@ export class GameEngine {
     this.aiAccumulatorsMs = { PLAYER: 0, ENEMY: 0 };
     for (const owner of ['PLAYER', 'ENEMY'] as const) {
       const side = this.sideControl[owner];
+      this.aiDecisionEnabled[owner] = side.control === 'AI';
       if (side.control === 'AI') {
         const difficulty = side.difficulty ?? this.config.difficulty;
         this.aiControllers[owner] = this.createAIController(difficulty, side);
@@ -463,12 +465,17 @@ export class GameEngine {
     return this.sideControl[owner].control;
   }
 
+  public setAIDecisionEnabled(owner: Owner, enabled: boolean): void {
+    if (this.getControlMode(owner) !== 'AI') return;
+    this.aiDecisionEnabled[owner] = enabled;
+  }
+
   private isAISide(owner: Owner): boolean {
-    return this.getControlMode(owner) === 'AI';
+    return this.getControlMode(owner) === 'AI' && this.aiDecisionEnabled[owner];
   }
 
   private getDifficultyForOwner(owner: Owner): GameDifficulty | null {
-    if (!this.isAISide(owner)) return null;
+    if (this.getControlMode(owner) !== 'AI') return null;
     return this.sideControl[owner].difficulty ?? this.config.difficulty;
   }
 
@@ -780,6 +787,12 @@ export class GameEngine {
     console.log('Game started (core loop 60Hz)');
   }
 
+  startHeadless(): void {
+    if (this.isRunning) return;
+    this.isRunning = true;
+    this.isPaused = false;
+  }
+
   stop(): void {
     if (!this.isRunning) return;
     this.isRunning = false;
@@ -787,6 +800,21 @@ export class GameEngine {
     if (this.coreLoop) {
       this.coreLoop.stop();
       this.coreLoop = null;
+    }
+  }
+
+  stopHeadless(): void {
+    this.stop();
+  }
+
+  stepHeadless(frames: number = 1): void {
+    if (!this.isRunning) {
+      this.startHeadless();
+    }
+    const boundedFrames = Math.max(1, Math.floor(frames));
+    for (let i = 0; i < boundedFrames; i++) {
+      if (!this.isRunning) break;
+      this.update(FIXED_TIMESTEP);
     }
   }
 
@@ -984,6 +1012,13 @@ export class GameEngine {
     this.entitySystem.update(this.state, deltaSeconds, this.projectileSystem);
   }
 
+  public getAISnapshot(owner: Owner = 'ENEMY'): GameStateSnapshot {
+    return this.extractGameStateForAI(owner);
+  }
+
+  public applyAIDecision(decision: AIDecision, owner: Owner = 'ENEMY'): boolean {
+    return this.executeAIDecision(decision, owner);
+  }
 
 
   // Extract complete game state for AI decision-making in owner-relative perspective.
@@ -1003,14 +1038,129 @@ export class GameEngine {
     const ownUnitsRaw = Array.from(this.state.entities.values()).filter((entity) => entity.owner === owner);
     const opponentUnitsRaw = Array.from(this.state.entities.values()).filter((entity) => entity.owner === opponent);
     const mirrorX = (x: number) => (mirror ? width - x : x);
+    const mirrorVx = (vx: number) => (mirror ? -vx : vx);
     const mapUnit = (entity: Entity) => ({
       unitId: entity.unitId,
       health: entity.health.current,
       maxHealth: entity.health.max,
       position: mirrorX(entity.transform.x),
+      laneY: entity.transform.laneY,
       damage: entity.attack.damage,
       range: entity.attack.range,
+      speed: Math.abs(entity.kinematics.vx),
+      attackCooldownRemaining: entity.attack.cooldownRemaining,
+      skillCooldownRemaining: entity.skillCooldownRemaining ?? 0,
     });
+
+    const queue = this.getQueueForOwner(owner);
+    const queueBlocked = queue.length >= QUEUE_CONFIG.maxQueueSize;
+    const sideDifficulty = this.getDifficultyForOwner(owner);
+    const discountedCost = (baseCost: number, category: EnemyPurchaseCategory): number => {
+      if (!sideDifficulty) return baseCost;
+      return Math.floor(baseCost * getEnemyPurchaseDiscountMultiplier(sideDifficulty, category));
+    };
+
+    const emptyUnlockedTurretSlots = ownBase.turretSlots.filter(
+      (slot) => slot.slotIndex < ownBase.turretSlotsUnlocked && !slot.turretId
+    ).length;
+
+    const unitCatalogDiagnostics = Object.entries(UNIT_DEFS).map(([unitId, def]) => {
+      const ageRequired = def.age ?? 1;
+      const goldCost = discountedCost(def.cost, 'unit');
+      const manaCost = def.manaCost ?? 0;
+      const ageLocked = ageRequired > ownProg.age;
+      const goldShortfall = Math.max(0, goldCost - ownEcon.gold);
+      const manaShortfall = Math.max(0, manaCost - ownEcon.mana);
+      const legalNow = !ageLocked && !queueBlocked && goldShortfall <= 0 && manaShortfall <= 0;
+      const scorePower = def.damage * 6 + def.health * 0.6 + (def.range ?? 1) * 5 + def.speed * 2;
+      return {
+        unitId,
+        ageRequired,
+        goldCost,
+        manaCost,
+        legalNow,
+        ageLocked,
+        queueBlocked,
+        goldShortfall,
+        manaShortfall,
+        scorePower,
+      };
+    });
+
+    const turretCatalogDiagnostics = Object.entries(TURRET_ENGINES).map(([turretId, def]) => {
+      const ageRequired = def.age;
+      const goldCost = discountedCost(def.cost, 'turret_engine');
+      const manaCost = def.manaCost ?? 0;
+      const ageLocked = ageRequired > ownProg.age;
+      const goldShortfall = Math.max(0, goldCost - ownEcon.gold);
+      const manaShortfall = Math.max(0, manaCost - ownEcon.mana);
+      const slotBlocked = emptyUnlockedTurretSlots <= 0;
+      const legalNow = !ageLocked && !queueBlocked && !slotBlocked && goldShortfall <= 0 && manaShortfall <= 0;
+      return {
+        turretId,
+        ageRequired,
+        goldCost,
+        manaCost,
+        legalNow,
+        ageLocked,
+        queueBlocked,
+        slotBlocked,
+        goldShortfall,
+        manaShortfall,
+        scorePower: estimateEngineDps(def),
+      };
+    });
+
+    const actionConstraintSummary = {
+      queueRemaining: Math.max(0, QUEUE_CONFIG.maxQueueSize - queue.length),
+      emptyUnlockedTurretSlots,
+      legalUnits: unitCatalogDiagnostics.filter((item) => item.legalNow).length,
+      legalTurrets: turretCatalogDiagnostics.filter((item) => item.legalNow).length,
+      unitBlockedByAge: unitCatalogDiagnostics.filter((item) => item.ageLocked).length,
+      unitBlockedByGold: unitCatalogDiagnostics.filter((item) => !item.ageLocked && item.goldShortfall > 0).length,
+      unitBlockedByMana: unitCatalogDiagnostics.filter((item) => !item.ageLocked && item.manaShortfall > 0).length,
+      unitBlockedByQueue: unitCatalogDiagnostics.filter((item) => !item.ageLocked && item.queueBlocked).length,
+      turretBlockedByAge: turretCatalogDiagnostics.filter((item) => item.ageLocked).length,
+      turretBlockedByGold: turretCatalogDiagnostics.filter((item) => !item.ageLocked && item.goldShortfall > 0).length,
+      turretBlockedByMana: turretCatalogDiagnostics.filter((item) => !item.ageLocked && item.manaShortfall > 0).length,
+      turretBlockedBySlot: turretCatalogDiagnostics.filter((item) => !item.ageLocked && item.slotBlocked).length,
+      turretBlockedByQueue: turretCatalogDiagnostics.filter((item) => !item.ageLocked && item.queueBlocked).length,
+    };
+
+    const projectiles = this.state.projectiles.map((projectile) => ({
+      owner: projectile.owner === owner ? ('SELF' as const) : ('OPPONENT' as const),
+      x: mirrorX(projectile.x),
+      y: projectile.y,
+      vx: mirrorVx(projectile.vx),
+      vy: projectile.vy,
+      damage: projectile.damage,
+      lifeMs: projectile.lifeMs,
+      splashRadius: projectile.splashRadius ?? 0,
+      isFalling: Boolean(projectile.isFalling),
+      hasDroneGuidance: Boolean(projectile.droneState),
+    }));
+
+    const activeAbilityEffects = this.state.vfx
+      .map((vfx) => {
+        if (vfx.type !== 'ability_cast' && vfx.type !== 'ability_impact' && vfx.type !== 'flamethrower') {
+          return null;
+        }
+        return {
+          owner:
+            vfx.x > width * 0.5
+              ? mirror
+                ? ('OPPONENT' as const)
+                : ('SELF' as const)
+              : mirror
+                ? ('SELF' as const)
+                : ('OPPONENT' as const),
+          type: vfx.type,
+          x: mirrorX(vfx.x),
+          y: vfx.y,
+          lifeMs: vfx.lifeMs,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
 
     const ownTurretStats = calculateTurretDefenseStats(ownBase);
     const opponentTurretStats = calculateTurretDefenseStats(opponentBase);
@@ -1069,6 +1219,11 @@ export class GameEngine {
       enemyUnitCount: ownUnits.length,
       playerUnits: opponentUnits,
       enemyUnits: ownUnits,
+      projectiles,
+      activeAbilityEffects,
+      unitCatalogDiagnostics,
+      turretCatalogDiagnostics,
+      actionConstraintSummary,
       playerQueueSize: this.getQueueForOwner(opponent).length,
       enemyQueueSize: this.getQueueForOwner(owner).length,
       playerTurretQueueCount: this.getQueueForOwner(opponent).filter((q) => q.kind !== 'unit').length,
@@ -1084,7 +1239,7 @@ export class GameEngine {
   }
 
   // Execute AI decision from AIController
-  private executeAIDecision(decision: AIDecision, owner: Owner = 'ENEMY'): void {
+  private executeAIDecision(decision: AIDecision, owner: Owner = 'ENEMY'): boolean {
     const params = (decision.parameters ?? {}) as Record<string, any>;
     this.recordActionSnapshot(owner, decision.action, 'DECISION', true, params, decision.reasoning);
     let success = false;
@@ -1095,7 +1250,7 @@ export class GameEngine {
         const unitType = (decision.parameters as any)?.unitType;
         if (unitType) {
           const unit = UNIT_DEFS[unitType];
-          if (!unit) return;
+          if (!unit) return false;
           success = this.queueUnit(owner, unitType);
         }
         break;
@@ -1154,6 +1309,7 @@ export class GameEngine {
         break;
     }
     this.recordActionSnapshot(owner, decision.action, 'EXECUTED', success, params, decision.reasoning);
+    return success;
   }
 
   private updateAISides(deltaTime: number): void {
@@ -1679,6 +1835,11 @@ export class GameEngine {
   // ============================================================================
   
   private static readonly SAVE_KEY = 'ageOfWar_saveGame';
+
+  private static getStorage(): Storage | null {
+    if (typeof localStorage === 'undefined') return null;
+    return localStorage;
+  }
   
   /**
    * Save complete game state to localStorage
@@ -1686,6 +1847,8 @@ export class GameEngine {
    */
   saveGameState(): void {
     try {
+      const storage = GameEngine.getStorage();
+      if (!storage) return;
       // Convert Map to array for JSON serialization
       const entitiesArray = Array.from(this.state.entities.values());
       
@@ -1713,7 +1876,7 @@ export class GameEngine {
         timestamp: Date.now(),
       };
       
-      localStorage.setItem(GameEngine.SAVE_KEY, JSON.stringify(saveData));
+      storage.setItem(GameEngine.SAVE_KEY, JSON.stringify(saveData));
       console.log('[SAVE] Game saved successfully:', {
         entities: entitiesArray.length,
         playerGold: this.state.economy.player.gold,
@@ -1732,7 +1895,9 @@ export class GameEngine {
    */
   loadGameState(): boolean {
     try {
-      const saved = localStorage.getItem(GameEngine.SAVE_KEY);
+      const storage = GameEngine.getStorage();
+      if (!storage) return false;
+      const saved = storage.getItem(GameEngine.SAVE_KEY);
       if (!saved) {
         console.log('No saved game found');
         return false;
@@ -1861,14 +2026,18 @@ export class GameEngine {
    * Check if a saved game exists
    */
   static hasSavedGame(): boolean {
-    return !!localStorage.getItem(GameEngine.SAVE_KEY);
+    const storage = GameEngine.getStorage();
+    if (!storage) return false;
+    return !!storage.getItem(GameEngine.SAVE_KEY);
   }
   
   /**
    * Delete saved game
    */
   static deleteSavedGame(): void {
-    localStorage.removeItem(GameEngine.SAVE_KEY);
+    const storage = GameEngine.getStorage();
+    if (!storage) return;
+    storage.removeItem(GameEngine.SAVE_KEY);
     console.log('[SAVE] Saved game deleted');
   }
 }

@@ -149,6 +149,21 @@ class TransformerActorCritic(nn.Module):
         sell_slot_idx, sell_slot_log_prob, sell_slot_entropy = sample_head("sell_slot", outputs.sell_slot_logits)
         action_log_prob = action_dist.log_prob(action_idx)
         action_entropy = action_dist.entropy()
+        recruit_mask = (action_idx == 1).float()
+        buy_turret_mask = (action_idx == 5).float()
+        sell_turret_mask = (action_idx == 6).float()
+        combined_log_prob = (
+            action_log_prob
+            + recruit_mask * unit_log_prob
+            + buy_turret_mask * (turret_log_prob + buy_slot_log_prob)
+            + sell_turret_mask * sell_slot_log_prob
+        )
+        combined_entropy = (
+            action_entropy
+            + recruit_mask * unit_entropy
+            + buy_turret_mask * (turret_entropy + buy_slot_entropy)
+            + sell_turret_mask * sell_slot_entropy
+        )
 
         return {
             "action": action_idx,
@@ -162,14 +177,6 @@ class TransformerActorCritic(nn.Module):
             "turret_log_prob": turret_log_prob,
             "buy_slot_log_prob": buy_slot_log_prob,
             "sell_slot_log_prob": sell_slot_log_prob,
-            "combined_log_prob": action_log_prob
-            + unit_log_prob
-            + turret_log_prob
-            + buy_slot_log_prob
-            + sell_slot_log_prob,
-            "action_entropy": action_entropy
-            + unit_entropy
-            + turret_entropy
-            + buy_slot_entropy
-            + sell_slot_entropy,
+            "combined_log_prob": combined_log_prob,
+            "action_entropy": combined_entropy,
         }

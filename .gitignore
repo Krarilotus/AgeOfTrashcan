@@ -155,3 +155,11 @@ venv/
 */.venv/
 ml/**/__pycache__/
 ml/**/*.pyc
+ml/checkpoints/
+ml/bridge/dist/
+ml/.bridge_test_cjs/
+ml/.bridge_test_dist/
+ml/*.egg-info/
+*.egg-info/
+ml/pip-wheel-metadata/
+ml/.pytest_cache/

@@ -58,6 +58,15 @@ def main() -> None:
                 failures.append(
                     f"VRAM {vram_gb:.2f} GB is below expected minimum {args.min_vram_gb:.2f} GB"
                 )
+            capability = torch.cuda.get_device_capability(0)
+            arch = f"sm_{capability[0]}{capability[1]}"
+            arch_list = set(torch.cuda.get_arch_list())
+            arch_supported = arch in arch_list
+            print(f"[{_ok(arch_supported)}] CUDA arch support: device={arch}, torch={sorted(arch_list)}")
+            if not arch_supported:
+                failures.append(
+                    f"Torch build does not support GPU arch {arch}. Install a compatible CUDA wheel."
+                )
 
     if failures:
         print("[doctor] Training environment is NOT ready.")

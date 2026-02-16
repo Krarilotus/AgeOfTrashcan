@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.26,<3",
-  "torch>=2.3,<2.8",
+  "torch>=2.3,<3",
   "typing-extensions>=4.10,<5"
 ]
 
@@ -14,6 +14,8 @@ dependencies = [
 train-selfplay = "train_selfplay:main"
 selfplay-doctor = "selfplay.doctor:main"
 selfplay-export-registry = "selfplay.checkpoint_registry:main"
+selfplay-install-torch = "selfplay.torch_install:main"
+selfplay-serve-inference = "selfplay.inference_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "."}

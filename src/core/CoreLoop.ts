@@ -1,5 +1,5 @@
 export class CoreLoop {
-  private intervalId: number | null = null;
+  private intervalId: ReturnType<typeof globalThis.setInterval> | null = null;
   private tickMs: number;
 
   constructor(private tickRateHz: number, private onTick: (dtMs: number) => void) {
@@ -8,12 +8,12 @@ export class CoreLoop {
 
   start(): void {
     if (this.intervalId !== null) return;
-    this.intervalId = window.setInterval(() => this.onTick(this.tickMs), this.tickMs);
+    this.intervalId = globalThis.setInterval(() => this.onTick(this.tickMs), this.tickMs);
   }
 
   stop(): void {
     if (this.intervalId !== null) {
-      clearInterval(this.intervalId);
+      globalThis.clearInterval(this.intervalId);
       this.intervalId = null;
     }
   }

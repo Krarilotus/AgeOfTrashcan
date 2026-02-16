@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { GameEngine } from './GameEngine';
 import {
   BASE_CONFIG,
@@ -13,7 +13,14 @@ import {
   calculateTurretDefenseStats,
 } from './config/turrets';
 import { GameOverOverlay } from './ui/GameOverOverlay';
-import { StartScreen, type AISelectionValue, type Difficulty, type MLCheckpointOption, type StartMode } from './ui/StartScreen';
+import {
+  StartScreen,
+  type AISelectionValue,
+  type Difficulty,
+  type MLCheckpointOption,
+  type MLFeaturedAgentOption,
+  type StartMode,
+} from './ui/StartScreen';
 import { UnitTrainingPanel } from './ui/UnitTrainingPanel';
 import { UI_EMOTES, UI_SYMBOLS } from './ui/uiEmotes';
 
@@ -32,8 +39,10 @@ export default function App() {
   const [difficulty, setDifficulty] = useState<Difficulty>('MEDIUM');
   const [startMode, setStartMode] = useState<StartMode>('PLAY');
   const [activeMode, setActiveMode] = useState<StartMode>('PLAY');
+  const [playSmartMlSelection, setPlaySmartMlSelection] = useState<AISelectionValue>('SMART_ML');
   const [watchPlayerSelection, setWatchPlayerSelection] = useState<AISelectionValue>('SMART');
   const [watchEnemySelection, setWatchEnemySelection] = useState<AISelectionValue>('SMART_ML');
+  const [mlFeaturedOptions, setMLFeaturedOptions] = useState<MLFeaturedAgentOption[]>([]);
   const [mlCheckpointOptions, setMLCheckpointOptions] = useState<MLCheckpointOption[]>([]);
   const [latestMlCheckpointId, setLatestMlCheckpointId] = useState<string | null>(null);
   const [latestMlCheckpointLabel, setLatestMlCheckpointLabel] = useState<string>('latest');
@@ -56,10 +65,66 @@ export default function App() {
         mlCheckpointId: selection.slice('SMART_ML::'.length),
       };
     }
+    if (selection === 'SMART_ML' && latestMlCheckpointId) {
+      return {
+        difficulty: 'SMART_ML',
+        mlCheckpointId: latestMlCheckpointId,
+      };
+    }
     return { difficulty: selection as Difficulty };
   };
 
+  const loadCheckpointRegistry = useCallback(async () => {
+    try {
+      const response = await fetch(`/ml/checkpoints/index.json?t=${Date.now()}`, { cache: 'no-store' });
+      if (!response.ok) return;
+      const payload = await response.json();
+      const featured: MLFeaturedAgentOption[] = Array.isArray(payload?.featuredAgents)
+        ? payload.featuredAgents
+            .map((agent: any) => {
+              const id = typeof agent?.id === 'string' ? agent.id : '';
+              const alias = typeof agent?.alias === 'string' ? agent.alias : '';
+              const label = typeof agent?.label === 'string' ? agent.label : alias;
+              if (!id || !alias) return null;
+              return { id, alias, label } as MLFeaturedAgentOption;
+            })
+            .filter((item: MLFeaturedAgentOption | null): item is MLFeaturedAgentOption => item !== null)
+        : [];
+      setMLFeaturedOptions(featured);
+      const options: MLCheckpointOption[] = Array.isArray(payload?.checkpoints)
+        ? payload.checkpoints
+            .map((checkpoint: any) => {
+              const id = typeof checkpoint?.id === 'string' ? checkpoint.id : '';
+              const label = typeof checkpoint?.label === 'string' ? checkpoint.label : id;
+              if (!id) return null;
+              return { id, label } as MLCheckpointOption;
+            })
+            .filter((item: MLCheckpointOption | null): item is MLCheckpointOption => item !== null)
+        : [];
+      setMLCheckpointOptions(options);
+
+      const latestId = typeof payload?.latestCheckpointId === 'string' ? payload.latestCheckpointId : '';
+      if (latestId) {
+        setLatestMlCheckpointId(latestId);
+        const latestOption = options.find((option) => option.id === latestId);
+        setLatestMlCheckpointLabel(latestOption?.label ?? latestId);
+      } else if (options.length > 0) {
+        setLatestMlCheckpointId(options[0].id);
+        setLatestMlCheckpointLabel(options[0].label);
+      } else {
+        setLatestMlCheckpointId(null);
+        setLatestMlCheckpointLabel('latest');
+      }
+    } catch {
+      setMLFeaturedOptions([]);
+      setMLCheckpointOptions([]);
+      setLatestMlCheckpointId(null);
+      setLatestMlCheckpointLabel('latest');
+    }
+  }, []);
+
   const startNewGame = () => {
+
     if (gameRef.current) {
       gameRef.current.stop();
       gameRef.current = null;
@@ -111,50 +176,16 @@ export default function App() {
   };
 
   useEffect(() => {
-    let cancelled = false;
-    const loadCheckpointRegistry = async () => {
-      try {
-        const response = await fetch(`/ml/checkpoints/index.json?t=${Date.now()}`, { cache: 'no-store' });
-        if (!response.ok) return;
-        const payload = await response.json();
-        if (cancelled) return;
-        const options: MLCheckpointOption[] = Array.isArray(payload?.checkpoints)
-          ? payload.checkpoints
-              .map((checkpoint: any) => {
-                const id = typeof checkpoint?.id === 'string' ? checkpoint.id : '';
-                const label = typeof checkpoint?.label === 'string' ? checkpoint.label : id;
-                if (!id) return null;
-                return { id, label } as MLCheckpointOption;
-              })
-              .filter((item: MLCheckpointOption | null): item is MLCheckpointOption => item !== null)
-          : [];
-        setMLCheckpointOptions(options);
+    void loadCheckpointRegistry();
+  }, [loadCheckpointRegistry]);
 
-        const latestId = typeof payload?.latestCheckpointId === 'string' ? payload.latestCheckpointId : '';
-        if (latestId) {
-          setLatestMlCheckpointId(latestId);
-          const latestOption = options.find((option) => option.id === latestId);
-          setLatestMlCheckpointLabel(latestOption?.label ?? latestId);
-        } else if (options.length > 0) {
-          setLatestMlCheckpointId(options[0].id);
-          setLatestMlCheckpointLabel(options[0].label);
-        } else {
-          setLatestMlCheckpointId(null);
-          setLatestMlCheckpointLabel('latest');
-        }
-      } catch {
-        if (!cancelled) {
-          setMLCheckpointOptions([]);
-          setLatestMlCheckpointId(null);
-          setLatestMlCheckpointLabel('latest');
-        }
-      }
-    };
-    loadCheckpointRegistry();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  useEffect(() => {
+    if (isRunning) return;
+    const intervalId = window.setInterval(() => {
+      void loadCheckpointRegistry();
+    }, 10000);
+    return () => window.clearInterval(intervalId);
+  }, [isRunning, loadCheckpointRegistry]);
 
   useEffect(() => {
     if (!isRunning || gameRef.current) return;
@@ -166,9 +197,10 @@ export default function App() {
       }
 
       const isWatchMode = activeMode === 'WATCH';
+      const playEnemyConfig = difficulty === 'SMART_ML' ? parseAISelection(playSmartMlSelection) : null;
       const watchPlayerConfig = parseAISelection(watchPlayerSelection);
       const watchEnemyConfig = parseAISelection(watchEnemySelection);
-      const enemyDifficulty = isWatchMode ? watchEnemyConfig.difficulty : difficulty;
+      const enemyDifficulty = isWatchMode ? watchEnemyConfig.difficulty : (playEnemyConfig?.difficulty ?? difficulty);
       const config = {
         difficulty: enemyDifficulty,
         mode: activeMode,
@@ -196,7 +228,7 @@ export default function App() {
               ENEMY: {
                 control: 'AI' as const,
                 difficulty,
-                mlCheckpointId: difficulty === 'SMART_ML' ? (latestMlCheckpointId ?? undefined) : undefined,
+                mlCheckpointId: difficulty === 'SMART_ML' ? (playEnemyConfig?.mlCheckpointId ?? latestMlCheckpointId ?? undefined) : undefined,
               },
             },
       };
@@ -233,7 +265,7 @@ export default function App() {
     }, 0);
 
     return () => clearTimeout(timeout);
-  }, [activeMode, difficulty, isRunning, latestMlCheckpointId, shouldLoadSavedGame, watchEnemySelection, watchPlayerSelection]);
+  }, [activeMode, difficulty, isRunning, latestMlCheckpointId, playSmartMlSelection, shouldLoadSavedGame, watchEnemySelection, watchPlayerSelection]);
 
   useEffect(() => {
     if (!showAIDebug || !gameRef.current || !gameState) return;
@@ -379,8 +411,10 @@ export default function App() {
       <StartScreen
         mode={startMode}
         difficulty={difficulty}
+        playSmartMlSelection={playSmartMlSelection}
         watchPlayerSelection={watchPlayerSelection}
         watchEnemySelection={watchEnemySelection}
+        mlFeaturedOptions={mlFeaturedOptions}
         mlCheckpointOptions={mlCheckpointOptions}
         latestMlCheckpointLabel={latestMlCheckpointLabel}
         hasSavedGame={hasSavedGame}
@@ -389,6 +423,7 @@ export default function App() {
         onContinueGame={continueSavedGame}
         onModeChange={setStartMode}
         onDifficultyChange={setDifficulty}
+        onPlaySmartMlSelectionChange={setPlaySmartMlSelection}
         onWatchPlayerSelectionChange={setWatchPlayerSelection}
         onWatchEnemySelectionChange={setWatchEnemySelection}
         onClearSavedGame={handleClearSavedGame}

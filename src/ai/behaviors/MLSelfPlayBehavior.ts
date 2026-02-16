@@ -5,7 +5,7 @@ import { getActionTypeIndex, getTurretIndex, getUnitIndex } from '../ml/actionCa
 import { MLHistoryBuffer } from '../ml/historyBuffer';
 import { buildLegalActionMask } from '../ml/legalActionMask';
 import { encodeObservation, summarizeActionMask } from '../ml/observationEncoder';
-import { decodePolicyOutput, HeuristicBootstrapPolicy, type IMLPolicy } from '../ml/policy';
+import { decodePolicyOutput, HybridRemotePolicy, type IMLPolicy } from '../ml/policy';
 
 interface MLSelfPlayBehaviorOptions {
   policy?: IMLPolicy;
@@ -46,7 +46,7 @@ export class MLSelfPlayBehavior implements IAIBehavior {
   private lastDebug: MLDecisionDebugState;
 
   constructor(options: MLSelfPlayBehaviorOptions = {}) {
-    this.policy = options.policy ?? new HeuristicBootstrapPolicy();
+    this.policy = options.policy ?? new HybridRemotePolicy();
     this.fallbackBehavior = options.fallbackBehavior ?? new SmartPlannerAI();
     this.policyEnabled = options.policyEnabled ?? true;
     this.modelVersionOverride = options.modelVersionOverride ?? null;
@@ -98,6 +98,7 @@ export class MLSelfPlayBehavior implements IAIBehavior {
         observation,
         rawState: state,
         deterministic: true,
+        checkpointId: this.selectedCheckpointId ?? undefined,
       });
       if (policyOutput) {
         modelVersion = policyOutput.modelVersion ?? 'unknown';

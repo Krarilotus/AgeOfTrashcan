@@ -1,55 +1,99 @@
 set shell := ["sh", "-eu", "-o", "pipefail", "-c"]
 python_cmd := `if command -v python >/dev/null 2>&1; then printf 'python'; elif command -v python3 >/dev/null 2>&1; then printf 'python3'; elif command -v py >/dev/null 2>&1; then printf 'py -3'; elif [ -x /c/Windows/py.exe ]; then printf '/c/Windows/py.exe -3'; elif [ -x '/c/Program Files/Python311/python.exe' ]; then printf '/c/Program\\ Files/Python311/python.exe'; else printf ''; fi`
+require_git_bash := `if [ -n "${MSYSTEM:-}" ] && printf '%s' "${MSYSTEM}" | grep -Eq '^MINGW|^MSYS'; then printf 'ok'; else printf ''; fi`
 
 default:
   @just --list
 
-setup:
+_guard-git-bash:
+  if [ -z "{{require_git_bash}}" ]; then echo "Run this justfile from Git Bash (MINGW/MSYS), not WSL bash."; exit 2; fi
+
+setup: _guard-git-bash
   if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
   {{python_cmd}} -m pip install --upgrade pip
   {{python_cmd}} -m pip install -e .
-  selfplay-doctor --expect-cuda --min-vram-gb 7.0
+  {{python_cmd}} -m selfplay.doctor --expect-cuda --min-vram-gb 7.0
 
-doctor:
-  selfplay-doctor --expect-cuda --min-vram-gb 7.0
-
-doctor-cpu:
-  selfplay-doctor --min-vram-gb 0
-
-install-torch-cuda:
+doctor: _guard-git-bash
   if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
-  {{python_cmd}} -m pip uninstall -y torch torchvision torchaudio || true
-  {{python_cmd}} -m pip install --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}" torch torchvision torchaudio
-  {{python_cmd}} -c "import torch; print(torch.__version__); print('cuda=', torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO CUDA GPU')"
+  {{python_cmd}} -m selfplay.doctor --expect-cuda --min-vram-gb 7.0
 
-sync-checkpoints:
-  selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+doctor-cpu: _guard-git-bash
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m selfplay.doctor --min-vram-gb 0
 
-train-smoke:
-  selfplay-doctor --expect-cuda --min-vram-gb 7.0
-  run_name="${RUN_NAME:-smoke_$(date +%Y%m%d_%H%M%S)}"; train-selfplay --run-name "$run_name" --save-dir checkpoints --total-steps 100000 --num-envs 4 --rollout-horizon 128 --device cuda --checkpoint-every 25000 --eval-every 50000 --eval-matches 50; selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+install-torch-cuda: _guard-git-bash
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m selfplay.torch_install --stack "${TORCH_STACK:-auto}"
 
-train-overnight:
+serve-inference: _guard-git-bash
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m selfplay.inference_server --host "${HOST:-127.0.0.1}" --port "${PORT:-8765}" --device "${DEVICE:-auto}" --checkpoints-dir "${CHECKPOINTS_DIR:-checkpoints}" --max-loaded "${MAX_LOADED:-3}" ${ALLOW_ABSOLUTE:+--allow-absolute-checkpoints}
+
+serve-inference-public: _guard-git-bash
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m selfplay.inference_server --host "${HOST:-0.0.0.0}" --port "${PORT:-8765}" --device "${DEVICE:-auto}" --checkpoints-dir "${CHECKPOINTS_DIR:-checkpoints}" --max-loaded "${MAX_LOADED:-3}" ${ALLOW_ABSOLUTE:+--allow-absolute-checkpoints}
+
+sync-checkpoints: _guard-git-bash
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m selfplay.checkpoint_registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+
+clean-checkpoints: _guard-git-bash
+  rm -rf checkpoints
+  mkdir -p checkpoints
+  mkdir -p ../public/ml/checkpoints
+  rm -f ../public/ml/checkpoints/index.json
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m selfplay.checkpoint_registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+
+clean-run RUN_NAME: _guard-git-bash
+  if [ -z "{{RUN_NAME}}" ]; then echo "Usage: just clean-run <run_name>"; exit 2; fi
+  rm -rf "checkpoints/{{RUN_NAME}}"
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m selfplay.checkpoint_registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+
+train-smoke: _guard-git-bash
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m selfplay.doctor --expect-cuda --min-vram-gb 7.0
+  run_name="${RUN_NAME:-smoke_$(date +%Y%m%d_%H%M%S)}"; export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"; {{python_cmd}} -m train_selfplay --run-name "$run_name" --save-dir checkpoints --model-preset "${MODEL_PRESET:-base}" --env-backend "${ENV_BACKEND:-auto}" --opponent-difficulty "${OPPONENT_DIFFICULTY:-SMART}" --self-difficulty "${SELF_DIFFICULTY:-SMART_ML}" --episode-seconds "${EPISODE_SECONDS:-1200}" --decision-frames "${DECISION_FRAMES:-30}" --clean-run --total-steps 100000 --num-envs 4 --rollout-horizon 128 --device cuda --minibatch-size "${MINIBATCH_SIZE:-32}" --checkpoint-every 25000 --eval-every 50000 --eval-matches 50 --eval-workers "${EVAL_WORKERS:-0}" --reward-dense-start "${REWARD_DENSE_START:-1.0}" --reward-dense-end "${REWARD_DENSE_END:-1.0}" --reward-dense-decay-interval "${REWARD_DENSE_DECAY_INTERVAL:-0.2}" --reward-dense-decay-factor "${REWARD_DENSE_DECAY_FACTOR:-0.9}" --reward-terminal-start "${REWARD_TERMINAL_START:-1.0}" --reward-terminal-end "${REWARD_TERMINAL_END:-5.0}" --reward-curriculum-steps "${REWARD_CURRICULUM_STEPS:-0}" --league-keep-top "${LEAGUE_KEEP_TOP:-5}" --league-keep-diverse "${LEAGUE_KEEP_DIVERSE:-5}" --league-max-agents "${LEAGUE_MAX_AGENTS:-10}" --league-min-promote-winrate "${LEAGUE_MIN_PROMOTE_WINRATE:-0.55}" --league-archetype-winrate-floor "${LEAGUE_ARCHETYPE_WINRATE_FLOOR:-0.52}"; {{python_cmd}} -m selfplay.checkpoint_registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+
+train-overnight: _guard-git-bash
   run_name="${RUN_NAME:-overnight_$(date +%Y%m%d_%H%M%S)}"; echo "[train] Run: ${run_name}"; \
-  selfplay-doctor --expect-cuda --min-vram-gb 7.0; \
-  train-selfplay --run-name "$run_name" --save-dir checkpoints --total-steps 10000000 --num-envs 8 --rollout-horizon 256 --device cuda --checkpoint-every 100000 --eval-every 200000 --eval-matches 200 --milestone-fractions 0.2,0.4,0.6,0.8,1.0; \
-  selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi; \
+  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"; \
+  {{python_cmd}} -m selfplay.doctor --expect-cuda --min-vram-gb 7.0; \
+  {{python_cmd}} -m train_selfplay --run-name "$run_name" --save-dir checkpoints --model-preset "${MODEL_PRESET:-base}" --env-backend "${ENV_BACKEND:-auto}" --opponent-difficulty "${OPPONENT_DIFFICULTY:-SMART}" --self-difficulty "${SELF_DIFFICULTY:-SMART_ML}" --episode-seconds "${EPISODE_SECONDS:-1200}" --decision-frames "${DECISION_FRAMES:-30}" --clean-run --total-steps 10000000 --num-envs 8 --rollout-horizon 256 --device cuda --minibatch-size "${MINIBATCH_SIZE:-32}" --checkpoint-every 100000 --eval-every 200000 --eval-matches 200 --eval-workers "${EVAL_WORKERS:-0}" --milestone-fractions 0.2,0.4,0.6,0.8,1.0 --reward-dense-start "${REWARD_DENSE_START:-1.0}" --reward-dense-end "${REWARD_DENSE_END:-1.0}" --reward-dense-decay-interval "${REWARD_DENSE_DECAY_INTERVAL:-0.2}" --reward-dense-decay-factor "${REWARD_DENSE_DECAY_FACTOR:-0.9}" --reward-terminal-start "${REWARD_TERMINAL_START:-1.0}" --reward-terminal-end "${REWARD_TERMINAL_END:-5.0}" --reward-curriculum-steps "${REWARD_CURRICULUM_STEPS:-0}" --league-keep-top "${LEAGUE_KEEP_TOP:-5}" --league-keep-diverse "${LEAGUE_KEEP_DIVERSE:-5}" --league-max-agents "${LEAGUE_MAX_AGENTS:-10}" --league-min-promote-winrate "${LEAGUE_MIN_PROMOTE_WINRATE:-0.55}" --league-archetype-winrate-floor "${LEAGUE_ARCHETYPE_WINRATE_FLOOR:-0.52}"; \
+  {{python_cmd}} -m selfplay.checkpoint_registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
 
-train:
-  run_name="${RUN_NAME:-custom_$(date +%Y%m%d_%H%M%S)}"; echo "[train] Run: ${run_name}"
-  selfplay-doctor --expect-cuda --min-vram-gb 7.0
-  train-selfplay --run-name "$run_name" --save-dir checkpoints --total-steps "${TOTAL_STEPS:-10000000}" --num-envs "${NUM_ENVS:-8}" --rollout-horizon "${ROLLOUT_HORIZON:-256}" --device "${DEVICE:-cuda}" --checkpoint-every "${CHECKPOINT_EVERY:-100000}" --eval-every "${EVAL_EVERY:-200000}" --eval-matches "${EVAL_MATCHES:-200}" --milestone-fractions "${MILESTONE_FRACTIONS:-0.2,0.4,0.6,0.8,1.0}"
-  selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+train: _guard-git-bash
+  run_name="${RUN_NAME:-custom_$(date +%Y%m%d_%H%M%S)}"; echo "[train] Run: ${run_name}"; \
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi; \
+  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"; \
+  {{python_cmd}} -m selfplay.doctor --expect-cuda --min-vram-gb 7.0; \
+  {{python_cmd}} -m train_selfplay --run-name "$run_name" --save-dir checkpoints --model-preset "${MODEL_PRESET:-base}" --env-backend "${ENV_BACKEND:-auto}" --opponent-difficulty "${OPPONENT_DIFFICULTY:-SMART}" --self-difficulty "${SELF_DIFFICULTY:-SMART_ML}" --episode-seconds "${EPISODE_SECONDS:-1200}" --decision-frames "${DECISION_FRAMES:-30}" --clean-run --total-steps "${TOTAL_STEPS:-10000000}" --num-envs "${NUM_ENVS:-8}" --rollout-horizon "${ROLLOUT_HORIZON:-256}" --device "${DEVICE:-cuda}" --minibatch-size "${MINIBATCH_SIZE:-32}" --checkpoint-every "${CHECKPOINT_EVERY:-100000}" --eval-every "${EVAL_EVERY:-200000}" --eval-matches "${EVAL_MATCHES:-200}" --eval-workers "${EVAL_WORKERS:-0}" --milestone-fractions "${MILESTONE_FRACTIONS:-0.2,0.4,0.6,0.8,1.0}" --reward-dense-start "${REWARD_DENSE_START:-1.0}" --reward-dense-end "${REWARD_DENSE_END:-1.0}" --reward-dense-decay-interval "${REWARD_DENSE_DECAY_INTERVAL:-0.2}" --reward-dense-decay-factor "${REWARD_DENSE_DECAY_FACTOR:-0.9}" --reward-terminal-start "${REWARD_TERMINAL_START:-1.0}" --reward-terminal-end "${REWARD_TERMINAL_END:-5.0}" --reward-curriculum-steps "${REWARD_CURRICULUM_STEPS:-0}" --league-keep-top "${LEAGUE_KEEP_TOP:-5}" --league-keep-diverse "${LEAGUE_KEEP_DIVERSE:-5}" --league-max-agents "${LEAGUE_MAX_AGENTS:-10}" --league-min-promote-winrate "${LEAGUE_MIN_PROMOTE_WINRATE:-0.55}" --league-archetype-winrate-floor "${LEAGUE_ARCHETYPE_WINRATE_FLOOR:-0.52}"; \
+  {{python_cmd}} -m selfplay.checkpoint_registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
 
-train-resume:
+train-quick10: _guard-git-bash
+  run_name="${RUN_NAME:-quick10_$(date +%Y%m%d_%H%M%S)}"; echo "[train] Quick run: ${run_name}"; \
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi; \
+  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"; \
+  {{python_cmd}} -m selfplay.doctor --expect-cuda --min-vram-gb 7.0; \
+  {{python_cmd}} -m train_selfplay --run-name "$run_name" --save-dir checkpoints --model-preset tiny --env-backend "${ENV_BACKEND:-game}" --opponent-difficulty "${OPPONENT_DIFFICULTY:-SMART}" --self-difficulty "${SELF_DIFFICULTY:-SMART_ML}" --episode-seconds "${EPISODE_SECONDS:-600}" --decision-frames "${DECISION_FRAMES:-8}" --clean-run --total-steps "${TOTAL_STEPS:-6000}" --num-envs "${NUM_ENVS:-2}" --rollout-horizon "${ROLLOUT_HORIZON:-64}" --device "${DEVICE:-cuda}" --minibatch-size "${MINIBATCH_SIZE:-16}" --checkpoint-every "${CHECKPOINT_EVERY:-1200}" --eval-every "${EVAL_EVERY:-3000}" --eval-matches "${EVAL_MATCHES:-8}" --eval-workers "${EVAL_WORKERS:-0}" --milestone-fractions "${MILESTONE_FRACTIONS:-0.2,0.4,0.6,0.8,1.0}" --reward-dense-start "${REWARD_DENSE_START:-1.0}" --reward-dense-end "${REWARD_DENSE_END:-1.0}" --reward-dense-decay-interval "${REWARD_DENSE_DECAY_INTERVAL:-0.2}" --reward-dense-decay-factor "${REWARD_DENSE_DECAY_FACTOR:-0.9}" --reward-terminal-start "${REWARD_TERMINAL_START:-1.0}" --reward-terminal-end "${REWARD_TERMINAL_END:-5.0}" --reward-curriculum-steps "${REWARD_CURRICULUM_STEPS:-0}" --league-keep-top "${LEAGUE_KEEP_TOP:-5}" --league-keep-diverse "${LEAGUE_KEEP_DIVERSE:-5}" --league-max-agents "${LEAGUE_MAX_AGENTS:-10}" --league-min-promote-winrate "${LEAGUE_MIN_PROMOTE_WINRATE:-0.55}" --league-archetype-winrate-floor "${LEAGUE_ARCHETYPE_WINRATE_FLOOR:-0.52}"; \
+  {{python_cmd}} -m selfplay.checkpoint_registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+
+train-resume: _guard-git-bash
   if [ -z "${CHECKPOINT:-}" ]; then echo "CHECKPOINT env var is required. Example: CHECKPOINT=checkpoints/<run>/latest.pt just train-resume"; exit 2; fi
-  selfplay-doctor --expect-cuda --min-vram-gb 7.0
-  train-selfplay --resume-from "${CHECKPOINT}" --additional-steps "${ADDITIONAL_STEPS:-2000000}" --num-envs "${NUM_ENVS:-8}" --rollout-horizon "${ROLLOUT_HORIZON:-256}" --device "${DEVICE:-cuda}"
-  selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+  {{python_cmd}} -m selfplay.doctor --expect-cuda --min-vram-gb 7.0
+  {{python_cmd}} -m train_selfplay --resume-from "${CHECKPOINT}" --model-preset "${MODEL_PRESET:-base}" --env-backend "${ENV_BACKEND:-auto}" --opponent-difficulty "${OPPONENT_DIFFICULTY:-SMART}" --self-difficulty "${SELF_DIFFICULTY:-SMART_ML}" --episode-seconds "${EPISODE_SECONDS:-1200}" --decision-frames "${DECISION_FRAMES:-30}" --additional-steps "${ADDITIONAL_STEPS:-2000000}" --num-envs "${NUM_ENVS:-8}" --rollout-horizon "${ROLLOUT_HORIZON:-256}" --device "${DEVICE:-cuda}" --minibatch-size "${MINIBATCH_SIZE:-32}" --checkpoint-every "${CHECKPOINT_EVERY:-100000}" --eval-every "${EVAL_EVERY:-200000}" --eval-matches "${EVAL_MATCHES:-200}" --eval-workers "${EVAL_WORKERS:-0}" --milestone-fractions "${MILESTONE_FRACTIONS:-0.2,0.4,0.6,0.8,1.0}" --reward-dense-start "${REWARD_DENSE_START:-1.0}" --reward-dense-end "${REWARD_DENSE_END:-1.0}" --reward-dense-decay-interval "${REWARD_DENSE_DECAY_INTERVAL:-0.2}" --reward-dense-decay-factor "${REWARD_DENSE_DECAY_FACTOR:-0.9}" --reward-terminal-start "${REWARD_TERMINAL_START:-1.0}" --reward-terminal-end "${REWARD_TERMINAL_END:-5.0}" --reward-curriculum-steps "${REWARD_CURRICULUM_STEPS:-0}" --league-keep-top "${LEAGUE_KEEP_TOP:-5}" --league-keep-diverse "${LEAGUE_KEEP_DIVERSE:-5}" --league-max-agents "${LEAGUE_MAX_AGENTS:-10}" --league-min-promote-winrate "${LEAGUE_MIN_PROMOTE_WINRATE:-0.55}" --league-archetype-winrate-floor "${LEAGUE_ARCHETYPE_WINRATE_FLOOR:-0.52}"
+  {{python_cmd}} -m selfplay.checkpoint_registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
 
-train-resume-to:
+train-resume-to: _guard-git-bash
   if [ -z "${CHECKPOINT:-}" ]; then echo "CHECKPOINT env var is required. Example: CHECKPOINT=checkpoints/<run>/latest.pt TOTAL_STEPS=12000000 just train-resume-to"; exit 2; fi
   if [ -z "${TOTAL_STEPS:-}" ]; then echo "TOTAL_STEPS env var is required for train-resume-to."; exit 2; fi
-  selfplay-doctor --expect-cuda --min-vram-gb 7.0
-  train-selfplay --resume-from "${CHECKPOINT}" --total-steps "${TOTAL_STEPS}" --num-envs "${NUM_ENVS:-8}" --rollout-horizon "${ROLLOUT_HORIZON:-256}" --device "${DEVICE:-cuda}"
-  selfplay-export-registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+  {{python_cmd}} -m selfplay.doctor --expect-cuda --min-vram-gb 7.0
+  {{python_cmd}} -m train_selfplay --resume-from "${CHECKPOINT}" --model-preset "${MODEL_PRESET:-base}" --env-backend "${ENV_BACKEND:-auto}" --opponent-difficulty "${OPPONENT_DIFFICULTY:-SMART}" --self-difficulty "${SELF_DIFFICULTY:-SMART_ML}" --episode-seconds "${EPISODE_SECONDS:-1200}" --decision-frames "${DECISION_FRAMES:-30}" --total-steps "${TOTAL_STEPS}" --num-envs "${NUM_ENVS:-8}" --rollout-horizon "${ROLLOUT_HORIZON:-256}" --device "${DEVICE:-cuda}" --minibatch-size "${MINIBATCH_SIZE:-32}" --checkpoint-every "${CHECKPOINT_EVERY:-100000}" --eval-every "${EVAL_EVERY:-200000}" --eval-matches "${EVAL_MATCHES:-200}" --eval-workers "${EVAL_WORKERS:-0}" --milestone-fractions "${MILESTONE_FRACTIONS:-0.2,0.4,0.6,0.8,1.0}" --reward-dense-start "${REWARD_DENSE_START:-1.0}" --reward-dense-end "${REWARD_DENSE_END:-1.0}" --reward-dense-decay-interval "${REWARD_DENSE_DECAY_INTERVAL:-0.2}" --reward-dense-decay-factor "${REWARD_DENSE_DECAY_FACTOR:-0.9}" --reward-terminal-start "${REWARD_TERMINAL_START:-1.0}" --reward-terminal-end "${REWARD_TERMINAL_END:-5.0}" --reward-curriculum-steps "${REWARD_CURRICULUM_STEPS:-0}" --league-keep-top "${LEAGUE_KEEP_TOP:-5}" --league-keep-diverse "${LEAGUE_KEEP_DIVERSE:-5}" --league-max-agents "${LEAGUE_MAX_AGENTS:-10}" --league-min-promote-winrate "${LEAGUE_MIN_PROMOTE_WINRATE:-0.55}" --league-archetype-winrate-floor "${LEAGUE_ARCHETYPE_WINRATE_FLOOR:-0.52}"
+  {{python_cmd}} -m selfplay.checkpoint_registry --checkpoints-dir checkpoints --output ../public/ml/checkpoints/index.json
