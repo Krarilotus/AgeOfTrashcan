@@ -26,6 +26,8 @@ interface StartScreenProps {
   mlFeaturedOptions: MLFeaturedAgentOption[];
   mlCheckpointOptions: MLCheckpointOption[];
   latestMlCheckpointLabel: string;
+  mlFeaturedCount: number;
+  mlCheckpointCount: number;
   hasSavedGame: boolean;
   onStartNewGame: () => void;
   onStartWatchGame: () => void;
@@ -35,6 +37,7 @@ interface StartScreenProps {
   onPlaySmartMlSelectionChange: (selection: AISelectionValue) => void;
   onWatchPlayerSelectionChange: (selection: AISelectionValue) => void;
   onWatchEnemySelectionChange: (selection: AISelectionValue) => void;
+  onRefreshCheckpointRegistry: () => void;
   onClearSavedGame: () => void;
 }
 
@@ -47,6 +50,8 @@ export function StartScreen({
   mlFeaturedOptions,
   mlCheckpointOptions,
   latestMlCheckpointLabel,
+  mlFeaturedCount,
+  mlCheckpointCount,
   hasSavedGame,
   onStartNewGame,
   onStartWatchGame,
@@ -56,6 +61,7 @@ export function StartScreen({
   onPlaySmartMlSelectionChange,
   onWatchPlayerSelectionChange,
   onWatchEnemySelectionChange,
+  onRefreshCheckpointRegistry,
   onClearSavedGame,
 }: StartScreenProps) {
   const allDifficulties = ['EASY', 'MEDIUM', 'HARD', 'SMART', 'SMART_ML', 'CHEATER'] as const;
@@ -109,6 +115,17 @@ export function StartScreen({
             }`}
           >
             Watch Game
+          </button>
+        </div>
+        <div className="mb-4 flex items-center justify-between gap-3 rounded border border-slate-700 bg-slate-900/40 px-3 py-2">
+          <div className="text-xs text-slate-400">
+            ML registry: {mlFeaturedCount} league agents, {mlCheckpointCount} checkpoints
+          </div>
+          <button
+            onClick={onRefreshCheckpointRegistry}
+            className="rounded bg-slate-700 px-2 py-1 text-xs text-slate-200 hover:bg-slate-600"
+          >
+            Refresh ML Registry
           </button>
         </div>
 

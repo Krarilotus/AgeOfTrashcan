@@ -170,6 +170,8 @@ export interface GameStateSnapshot {
   playerUnitsNearEnemyBase: number;
   enemyUnitsNearPlayerBase: number;
   lastEnemyBaseAttackTime: number; // Time in seconds when enemy base was last attacked
+  playerTimeSinceLastAgeUp?: number;
+  enemyTimeSinceLastAgeUp?: number;
   
   // Difficulty
   difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER';

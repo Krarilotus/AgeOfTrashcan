@@ -1177,10 +1177,16 @@ export class GameEngine {
 
     const ownUnits = ownUnitsRaw.map(mapUnit);
     const opponentUnits = opponentUnitsRaw.map(mapUnit);
+    const gameTimeSec = (this.state.tick * FIXED_TIMESTEP) / 1000;
+    const ownAgeUpTimes = this.telemetry.bySide[owner].ageUpTimes;
+    const opponentAgeUpTimes = this.telemetry.bySide[opponent].ageUpTimes;
+    const ownLastAgeUpTime = ownAgeUpTimes.length > 0 ? ownAgeUpTimes[ownAgeUpTimes.length - 1] : 0;
+    const opponentLastAgeUpTime =
+      opponentAgeUpTimes.length > 0 ? opponentAgeUpTimes[opponentAgeUpTimes.length - 1] : 0;
 
     return {
       tick: this.state.tick,
-      gameTime: (this.state.tick * FIXED_TIMESTEP) / 1000,
+      gameTime: gameTimeSec,
       playerGold: opponentEcon.gold,
       enemyGold: ownEcon.gold,
       playerMana: opponentEcon.mana,
@@ -1235,6 +1241,8 @@ export class GameEngine {
       playerUnitsNearEnemyBase: opponentUnits.filter((unit) => Math.abs(unit.position - width) < 15).length,
       enemyUnitsNearPlayerBase: ownUnits.filter((unit) => Math.abs(unit.position - 0) < 15).length,
       lastEnemyBaseAttackTime: ownBase.lastAttackTime,
+      playerTimeSinceLastAgeUp: Math.max(0, gameTimeSec - opponentLastAgeUpTime),
+      enemyTimeSinceLastAgeUp: Math.max(0, gameTimeSec - ownLastAgeUpTime),
     };
   }
 

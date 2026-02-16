@@ -265,8 +265,9 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
   const legalSellSlots = countLegal(actionMask.sellSlotMask);
 
   return [
-    normalize(state.gameTime, 600),
-    normalize(state.tick, 36000),
+    // Provide relative age progression timing (instead of absolute clock/tick).
+    normalize(state.enemyTimeSinceLastAgeUp ?? 0, 1800),
+    normalize(state.playerTimeSinceLastAgeUp ?? 0, 1800),
     normalize(state.enemyGold, 10000),
     normalize(state.playerGold, 10000),
     normalize(state.enemyGold - state.playerGold, 10000),

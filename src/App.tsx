@@ -417,6 +417,8 @@ export default function App() {
         mlFeaturedOptions={mlFeaturedOptions}
         mlCheckpointOptions={mlCheckpointOptions}
         latestMlCheckpointLabel={latestMlCheckpointLabel}
+        mlFeaturedCount={mlFeaturedOptions.length}
+        mlCheckpointCount={mlCheckpointOptions.length}
         hasSavedGame={hasSavedGame}
         onStartNewGame={startNewGame}
         onStartWatchGame={startWatchGame}
@@ -426,6 +428,9 @@ export default function App() {
         onPlaySmartMlSelectionChange={setPlaySmartMlSelection}
         onWatchPlayerSelectionChange={setWatchPlayerSelection}
         onWatchEnemySelectionChange={setWatchEnemySelection}
+        onRefreshCheckpointRegistry={() => {
+          void loadCheckpointRegistry();
+        }}
         onClearSavedGame={handleClearSavedGame}
       />
     );
