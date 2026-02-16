@@ -69,16 +69,18 @@ function encodeHistoryToken(token: MLHistoryToken): number[] {
 function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): number[][] {
   const tokens: number[][] = [];
   const width = Math.max(1, state.battlefieldWidth);
+  const opponentBaseX = Number.isFinite(state.playerBaseX) ? state.playerBaseX : 0;
+  const ownBaseX = Number.isFinite(state.enemyBaseX) ? state.enemyBaseX : width;
   const pushToken = (token: number[]) => {
     if (tokens.length >= maxTokens) return;
     tokens.push(token.map((value) => clamp(value, -1, 1)));
   };
 
   const ownUnits = [...state.enemyUnits]
-    .sort((a, b) => Math.abs(a.position - 0) - Math.abs(b.position - 0))
+    .sort((a, b) => Math.abs(a.position - opponentBaseX) - Math.abs(b.position - opponentBaseX))
     .slice(0, 32);
   const opponentUnits = [...state.playerUnits]
-    .sort((a, b) => Math.abs(a.position - width) - Math.abs(b.position - width))
+    .sort((a, b) => Math.abs(a.position - ownBaseX) - Math.abs(b.position - ownBaseX))
     .slice(0, 32);
 
   ownUnits.forEach((unit) => {
@@ -176,6 +178,9 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
 }
 
 function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalActionMask): number[] {
+  const width = Math.max(1, state.battlefieldWidth);
+  const opponentBaseX = Number.isFinite(state.playerBaseX) ? state.playerBaseX : 0;
+  const ownBaseX = Number.isFinite(state.enemyBaseX) ? state.enemyBaseX : width;
   const playerUnitHealth = state.playerUnits.map((unit) => unit.health);
   const enemyUnitHealth = state.enemyUnits.map((unit) => unit.health);
   const playerUnitDamage = state.playerUnits.map((unit) => unit.damage);
@@ -199,8 +204,12 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
   const opponentProjectiles = projectileState.filter((projectile) => projectile.owner === 'OPPONENT');
   const ownProjectileDamage = sum(ownProjectiles.map((projectile) => projectile.damage));
   const opponentProjectileDamage = sum(opponentProjectiles.map((projectile) => projectile.damage));
-  const ownProjectileNearEnemyBase = ownProjectiles.filter((projectile) => projectile.x > state.battlefieldWidth - 15).length;
-  const opponentProjectileNearOwnBase = opponentProjectiles.filter((projectile) => projectile.x < 15).length;
+  const ownProjectileNearEnemyBase = ownProjectiles.filter(
+    (projectile) => Math.abs(projectile.x - opponentBaseX) < 15
+  ).length;
+  const opponentProjectileNearOwnBase = opponentProjectiles.filter(
+    (projectile) => Math.abs(projectile.x - ownBaseX) < 15
+  ).length;
   const ownProjectileSplash = ownProjectiles.filter((projectile) => projectile.splashRadius > 0).length;
   const opponentProjectileSplash = opponentProjectiles.filter((projectile) => projectile.splashRadius > 0).length;
   const ownProjectileFalling = ownProjectiles.filter((projectile) => projectile.isFalling).length;

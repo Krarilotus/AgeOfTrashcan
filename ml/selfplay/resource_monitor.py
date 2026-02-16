@@ -99,6 +99,43 @@ class ResourceMonitor:
             gpu_source=gpu_source,
         )
 
+    def averaged_between(self, start_ts: float, end_ts: float) -> Optional[ResourceSample]:
+        start = float(min(start_ts, end_ts))
+        end = float(max(start_ts, end_ts))
+        with self._lock:
+            if not self._history:
+                return None
+            samples = [sample for sample in self._history if start <= sample.timestamp <= end]
+            if not samples:
+                return None
+
+        cpu = float(sum(sample.cpu_percent for sample in samples) / len(samples))
+        ram = float(sum(sample.ram_percent for sample in samples) / len(samples))
+        gpu_util_values = [sample.gpu_util_percent for sample in samples if sample.gpu_util_percent is not None]
+        gpu_mem_values = [sample.gpu_mem_percent for sample in samples if sample.gpu_mem_percent is not None]
+        gpu_util = (
+            float(sum(gpu_util_values) / len(gpu_util_values))
+            if gpu_util_values
+            else None
+        )
+        gpu_mem = (
+            float(sum(gpu_mem_values) / len(gpu_mem_values))
+            if gpu_mem_values
+            else None
+        )
+        gpu_source = next(
+            (sample.gpu_source for sample in reversed(samples) if sample.gpu_source),
+            None,
+        )
+        return ResourceSample(
+            timestamp=end,
+            cpu_percent=cpu,
+            ram_percent=ram,
+            gpu_util_percent=gpu_util,
+            gpu_mem_percent=gpu_mem,
+            gpu_source=gpu_source,
+        )
+
     def sustained_gpu_util_over(
         self,
         threshold_percent: float,

@@ -90,6 +90,7 @@ class SelfPlayTrainer:
         self.train_start_step = 0
         self.last_rollout_profile = StrategyProfile()
         self.last_rollout_telemetry_line = ""
+        self.last_rollout_resource_sample: Optional[ResourceSample] = None
         self.last_log_perf = self.train_start_perf
         self.update_count = 0
         self.dead_row_streaks: Dict[str, np.ndarray] = {}
@@ -299,17 +300,17 @@ class SelfPlayTrainer:
         _, peak_util = self._peak_utilization(sample, include_gpu=False, include_gpu_mem=False)
         return peak_util < target
 
-    def _scale_down_reason(self, sample: ResourceSample) -> str | None:
+    def _scale_down_reason(self, cpu_ram_sample: ResourceSample, live_sample: ResourceSample) -> str | None:
         threshold = float(self.cfg.runtime.smart_env_scale_down_trigger_percent)
-        if float(sample.cpu_percent) >= threshold:
-            return "cpu"
-        if float(sample.ram_percent) >= threshold:
-            return "ram"
+        if float(cpu_ram_sample.cpu_percent) >= threshold:
+            return "cpu_rollout"
+        if float(cpu_ram_sample.ram_percent) >= threshold:
+            return "ram_rollout"
         # GPU memory is safety-critical and should react quickly.
-        if sample.gpu_mem_percent is not None and float(sample.gpu_mem_percent) >= threshold:
+        if live_sample.gpu_mem_percent is not None and float(live_sample.gpu_mem_percent) >= threshold:
             return "gpu_mem"
         # GPU utilization only counts if sustained high for a long window.
-        if sample.gpu_util_percent is not None and self.resource_monitor is not None:
+        if live_sample.gpu_util_percent is not None and self.resource_monitor is not None:
             window_sec = max(1.0, float(self.cfg.runtime.smart_env_gpu_sustain_sec))
             if self.resource_monitor.sustained_gpu_util_over(
                 threshold_percent=threshold,
@@ -373,6 +374,11 @@ class SelfPlayTrainer:
             f"gpu_src={gpu_source}"
         )
 
+    def _cpu_ram_autoscale_sample(self, live_sample: ResourceSample) -> Tuple[ResourceSample, str]:
+        if self.last_rollout_resource_sample is not None:
+            return self.last_rollout_resource_sample, "rollout_window"
+        return live_sample, "live_1s_fallback"
+
     def _autoscale_hold_log(self, now: float, reason: str, env_count: int, sample: ResourceSample) -> None:
         # Avoid log spam: emit hold reasons at most once every 10 seconds.
         if (now - self.last_autoscale_status_log_perf) < 10.0:
@@ -395,19 +401,21 @@ class SelfPlayTrainer:
         if (now - self.last_autoscale_adjust_perf) < cooldown:
             return
 
-        # Use 1-second moving averages to avoid reacting to spikes.
-        sample = self.resource_monitor.averaged(window_sec=1.0)
-        if sample is None:
+        # Live sample is used for GPU-based safeguards/logging.
+        live_sample = self.resource_monitor.averaged(window_sec=1.0)
+        if live_sample is None:
             return
+        # CPU/RAM autoscale inputs come from the previous rollout window.
+        cpu_ram_sample, cpu_ram_source = self._cpu_ram_autoscale_sample(live_sample)
         old_count = len(self.envs)
-        scale_down_reason = self._scale_down_reason(sample)
+        scale_down_reason = self._scale_down_reason(cpu_ram_sample, live_sample)
         if scale_down_reason is not None:
             if old_count <= self.autoscale_min_envs:
                 self._autoscale_hold_log(
                     now,
-                    f"at_min_envs({self.autoscale_min_envs})_while_over_down_trigger_{scale_down_reason}",
+                    f"at_min_envs({self.autoscale_min_envs})_while_over_down_trigger_{scale_down_reason}_cpu_src={cpu_ram_source}",
                     old_count,
-                    sample,
+                    live_sample,
                 )
                 self.last_autoscale_adjust_perf = now
                 return
@@ -419,32 +427,33 @@ class SelfPlayTrainer:
                 f"[autoscale-down] envs={old_count}->{len(self.envs)} "
                 f"reason={scale_down_reason} "
                 f"avg_1s_high_trigger={self.cfg.runtime.smart_env_scale_down_trigger_percent:.1f}% "
-                f"{self._sample_to_text(sample)}"
+                f"cpu_src={cpu_ram_source} cpu={cpu_ram_sample.cpu_percent:.1f}% ram={cpu_ram_sample.ram_percent:.1f}% "
+                f"{self._sample_to_text(live_sample)}"
             )
             return
 
         if old_count >= self.autoscale_max_envs:
             max_label = "inf" if self.autoscale_unbounded else str(self.autoscale_max_envs)
-            self._autoscale_hold_log(now, f"at_max_envs({max_label})", old_count, sample)
+            self._autoscale_hold_log(now, f"at_max_envs({max_label})_cpu_src={cpu_ram_source}", old_count, live_sample)
             self.last_autoscale_adjust_perf = now
             return
 
-        if not self._can_scale_up(sample):
-            peak_name, peak_util = self._peak_utilization(sample, include_gpu=False, include_gpu_mem=False)
+        if not self._can_scale_up(cpu_ram_sample):
+            peak_name, peak_util = self._peak_utilization(cpu_ram_sample, include_gpu=False, include_gpu_mem=False)
             target_util = float(self.cfg.runtime.smart_env_target_util_percent)
             self._autoscale_hold_log(
                 now,
-                f"peak_{peak_name}={peak_util:.1f}%_>=_target_{target_util:.1f}%_(cpu_ram_mode)",
+                f"peak_{peak_name}={peak_util:.1f}%_>=_target_{target_util:.1f}%_(cpu_ram_mode)_cpu_src={cpu_ram_source}",
                 old_count,
-                sample,
+                live_sample,
             )
             self.last_autoscale_adjust_perf = now
             return
 
-        peak_name, peak_util = self._peak_utilization(sample, include_gpu=False, include_gpu_mem=False)
-        target = self._projected_scale_up_target(sample, old_count)
+        peak_name, peak_util = self._peak_utilization(cpu_ram_sample, include_gpu=False, include_gpu_mem=False)
+        target = self._projected_scale_up_target(cpu_ram_sample, old_count)
         if target <= old_count:
-            self._autoscale_hold_log(now, "projection_no_growth", old_count, sample)
+            self._autoscale_hold_log(now, f"projection_no_growth_cpu_src={cpu_ram_source}", old_count, live_sample)
             return
 
         self._resize_envs(target)
@@ -452,8 +461,9 @@ class SelfPlayTrainer:
         print(
             f"[autoscale] envs={old_count}->{len(self.envs)} "
             f"avg_1s_target={self.cfg.runtime.smart_env_target_util_percent:.1f}% "
-            f"peak(cpu_ram)={peak_name}:{peak_util:.1f}% "
-            f"{self._sample_to_text(sample)}"
+            f"peak(cpu_ram@{cpu_ram_source})={peak_name}:{peak_util:.1f}% "
+            f"cpu={cpu_ram_sample.cpu_percent:.1f}% ram={cpu_ram_sample.ram_percent:.1f}% "
+            f"{self._sample_to_text(live_sample)}"
         )
 
     def _compatible_checkpoint_config(self, checkpoint_cfg: Dict[str, object]) -> bool:
@@ -586,6 +596,7 @@ class SelfPlayTrainer:
 
     def _collect_rollout(self) -> RolloutBatch:
         runtime = self.cfg.runtime
+        rollout_start_perf = time.perf_counter()
         horizon = runtime.rollout_horizon
         num_envs = len(self.envs)
         if num_envs <= 0:
@@ -731,6 +742,17 @@ class SelfPlayTrainer:
             self.cfg.ppo.gamma,
             self.cfg.ppo.gae_lambda,
         )
+
+        if self.autoscale_enabled and self.resource_monitor is not None:
+            rollout_end_perf = time.perf_counter()
+            rollout_sample = self.resource_monitor.averaged_between(
+                rollout_start_perf,
+                rollout_end_perf,
+            )
+            if rollout_sample is None:
+                rollout_sample = self.resource_monitor.averaged(window_sec=1.0)
+            if rollout_sample is not None:
+                self.last_rollout_resource_sample = rollout_sample
 
         def flatten(arr: np.ndarray) -> np.ndarray:
             return arr.reshape(horizon * num_envs, *arr.shape[2:])

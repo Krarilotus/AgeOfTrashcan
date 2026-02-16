@@ -116,6 +116,8 @@ function normalizeDifficulty(raw: unknown, fallback: GameDifficulty): GameDiffic
   return fallback;
 }
 
+const FORCED_TIMEOUT_LOSS_SEC = 60 * 60;
+
 class BridgeRuntime {
   private engine: GameEngine | null = null;
   private history = new MLHistoryBuffer({ horizonSeconds: 120 });
@@ -281,7 +283,9 @@ class BridgeRuntime {
       this.enemyLastAgeUpTimeSec = prev.gameTime;
     }
     const doneByBase = next.enemyBaseHealth <= 0 || next.playerBaseHealth <= 0;
-    const doneByTimeout = next.gameTime >= this.episodeSeconds;
+    const doneByConfiguredTimeout = next.gameTime >= this.episodeSeconds;
+    const doneByForcedTimeout = next.gameTime >= FORCED_TIMEOUT_LOSS_SEC;
+    const doneByTimeout = doneByConfiguredTimeout || doneByForcedTimeout;
     const done = doneByBase || doneByTimeout;
     const terminalCause = next.playerBaseHealth <= 0
       ? 'player_win'
@@ -544,9 +548,8 @@ class BridgeRuntime {
       if (terminalCause === 'player_win') terminalOutcome = 40.0;
       else if (terminalCause === 'enemy_win') terminalOutcome = -40.0;
       else if (terminalCause === 'timeout') {
-        const ownRatio = next.enemyBaseHealth / Math.max(1, next.enemyBaseMaxHealth);
-        const oppRatio = next.playerBaseHealth / Math.max(1, next.playerBaseMaxHealth);
-        terminalOutcome = clamp((ownRatio - oppRatio) * 10, -10.0, 10.0);
+        // Timeouts are treated as forced losses to eliminate draw farming.
+        terminalOutcome = -40.0;
       }
     }
     return {

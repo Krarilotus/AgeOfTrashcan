@@ -272,7 +272,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--smart-env-min",
         type=int,
-        default=16,
+        default=32,
         help="Minimum env workers when autoscale is enabled",
     )
     parser.add_argument(
@@ -296,7 +296,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--smart-env-gpu-sustain-sec",
         type=float,
-        default=10.0,
+        default=60.0,
         help="Seconds of sustained GPU overload required before autoscale scale-down reacts",
     )
     parser.add_argument(

@@ -244,8 +244,8 @@ class MockSelfPlayEnv(SelfPlayEnv):
             elif self.state.own_base_hp <= 0 and self.state.opp_base_hp > 0:
                 reward_components.terminal_outcome = -40.0
             else:
-                delta = (self.state.own_base_hp - self.state.opp_base_hp) / 1000.0
-                reward_components.terminal_outcome = float(np.clip(delta * 10.0, -10.0, 10.0))
+                # Timeout/no-decision outcomes are treated as losses (no draw reward shaping).
+                reward_components.terminal_outcome = -40.0
             reward += reward_components.terminal_outcome
 
         info = {

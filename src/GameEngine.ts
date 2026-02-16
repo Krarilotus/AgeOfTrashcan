@@ -1178,6 +1178,8 @@ export class GameEngine {
     const ownUnits = ownUnitsRaw.map(mapUnit);
     const opponentUnits = opponentUnitsRaw.map(mapUnit);
     const gameTimeSec = (this.state.tick * FIXED_TIMESTEP) / 1000;
+    const ownBasePos = mirrorX(ownBase.x);
+    const opponentBasePos = mirrorX(opponentBase.x);
     const ownAgeUpTimes = this.telemetry.bySide[owner].ageUpTimes;
     const opponentAgeUpTimes = this.telemetry.bySide[opponent].ageUpTimes;
     const ownLastAgeUpTime = ownAgeUpTimes.length > 0 ? ownAgeUpTimes[ownAgeUpTimes.length - 1] : 0;
@@ -1235,11 +1237,11 @@ export class GameEngine {
       playerTurretQueueCount: this.getQueueForOwner(opponent).filter((q) => q.kind !== 'unit').length,
       enemyTurretQueueCount: this.getQueueForOwner(owner).filter((q) => q.kind !== 'unit').length,
       battlefieldWidth: width,
-      playerBaseX: 0,
-      enemyBaseX: width,
+      playerBaseX: opponentBasePos,
+      enemyBaseX: ownBasePos,
       difficulty: this.getDifficultyOrDefault(owner, this.config.difficulty),
-      playerUnitsNearEnemyBase: opponentUnits.filter((unit) => Math.abs(unit.position - width) < 15).length,
-      enemyUnitsNearPlayerBase: ownUnits.filter((unit) => Math.abs(unit.position - 0) < 15).length,
+      playerUnitsNearEnemyBase: opponentUnits.filter((unit) => Math.abs(unit.position - ownBasePos) < 15).length,
+      enemyUnitsNearPlayerBase: ownUnits.filter((unit) => Math.abs(unit.position - opponentBasePos) < 15).length,
       lastEnemyBaseAttackTime: ownBase.lastAttackTime,
       playerTimeSinceLastAgeUp: Math.max(0, gameTimeSec - opponentLastAgeUpTime),
       enemyTimeSinceLastAgeUp: Math.max(0, gameTimeSec - ownLastAgeUpTime),

@@ -73,11 +73,11 @@ class RuntimeConfig:
     smart_env_scale_down_trigger_percent: float = 90.0
     smart_env_scale_step: int = 2
     smart_env_adjust_cooldown_sec: float = 1.0
-    smart_env_min_envs: int = 16
+    smart_env_min_envs: int = 32
     smart_env_max_envs: int = 0
     smart_env_sample_hz: float = 10.0
     smart_env_gpu_probe_hz: float = 2.0
-    smart_env_gpu_sustain_sec: float = 10.0
+    smart_env_gpu_sustain_sec: float = 60.0
 
 
 @dataclass(slots=True)

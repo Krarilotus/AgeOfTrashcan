@@ -198,17 +198,18 @@ Optional: run inference under `systemd` and reverse proxy `/infer` through nginx
 - `SMART_ENV_AUTOSCALE`
   - `1` enables adaptive worker scaling.
   - Uses a fixed smart policy:
-    - 1-second moving average for CPU/RAM.
+    - CPU/RAM scale-up and CPU/RAM scale-down checks use averages from the previous rollout window (simulation phase).
+    - GPU safety checks (utilization/memory) use live 1-second moving averages from the monitor.
     - adjust at most once per second.
     - scale up by utilization-based projection toward ~95% of target (with a minimum `+2` step).
-    - scale down gradually by `-1` worker when average utilization crosses the high trigger.
+    - scale down gradually by `-1` worker when utilization crosses the high trigger.
   - GPU utilization source is `nvidia-smi` (shown in logs as `gpu_src=nvidia-smi`).
   - Brief GPU spikes are ignored for scale-up decisions.
 - `SMART_ENV_TARGET_UTIL`
-  - Target utilization cap percentage (default `80`, averaged over 1 second).
+  - Target utilization cap percentage (default `80`).
   - Autoscale stops adding workers when CPU or RAM reaches this threshold.
 - `SMART_ENV_SCALE_DOWN_TRIGGER`
-  - High-watermark percentage for gradual scale-down (default `90`, averaged over 1 second).
+  - High-watermark percentage for gradual scale-down (default `90`).
   - If CPU or RAM crosses this threshold, trainer removes workers slowly (1 at a time).
   - GPU util only triggers scale-down when sustained above this threshold for `SMART_ENV_GPU_SUSTAIN_SEC`.
   - GPU memory remains a safety trigger to avoid OOM spirals.
@@ -218,12 +219,12 @@ Optional: run inference under `systemd` and reverse proxy `/infer` through nginx
   - Cooldown between autoscale decisions (default `1.0` sec).
 - `SMART_ENV_MIN`, `SMART_ENV_MAX`
   - Lower/upper env bounds for autoscale.
-  - Default minimum is `16` workers.
+  - Default minimum is `32` workers.
   - `SMART_ENV_MAX=0` means unbounded upper limit (practically capped by available machine resources).
 - `SMART_ENV_SAMPLE_HZ`, `SMART_ENV_GPU_PROBE_HZ`
   - Resource monitor sample rates (defaults: `10Hz` total sample loop, `2Hz` GPU probe loop).
 - `SMART_ENV_GPU_SUSTAIN_SEC`
-  - Required sustained GPU-overload window before GPU can trigger scale-down (default `10` sec).
+  - Required sustained GPU-overload window before GPU can trigger scale-down (default `60` sec).
 - `--keep-awake` / `--no-keep-awake`
   - Keep-awake is enabled by default on Windows during training.
   - Uses periodic execution-state signaling so sleep/screensaver does not interrupt long runs.
