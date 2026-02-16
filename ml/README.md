@@ -56,6 +56,8 @@ just install-torch-cuda
 ENV_BACKEND=auto RUN_NAME=my_experiment TOTAL_STEPS=5000000 NUM_ENVS=8 ROLLOUT_HORIZON=256 DEVICE=cuda just train
 ENV_BACKEND=game OPPONENT_DIFFICULTY=SMART SELF_DIFFICULTY=SMART_ML DECISION_FRAMES=30 just train-smoke
 ENV_BACKEND=game just train-quick10
+ENV_BACKEND=game SMART_ENV_AUTOSCALE=1 just train
+ENV_BACKEND=game SMART_ENV_AUTOSCALE=1 MODEL_PRESET=large just train
 DEVICE=cuda just serve-inference
 HOST=0.0.0.0 PORT=8765 DEVICE=cpu just serve-inference-public
 CHECKPOINT=checkpoints/my_experiment/latest.pt ADDITIONAL_STEPS=2000000 just train-resume
@@ -74,6 +76,8 @@ Important usage note for Git Bash:
 - `just train-overnight`, `just train-smoke`, `just train-resume`, and `just train-resume-to` automatically refresh the UI checkpoint registry at the end.
 - If you trained outside `just`, run `just sync-checkpoints` manually.
 - `python -m train_selfplay` now also exports the UI checkpoint registry at run end by default (disable with `--no-export-registry`).
+- `python -m train_selfplay` now also updates the UI checkpoint registry live whenever a checkpoint is saved.
+- Training now enables a keep-awake guard by default on Windows to prevent sleep/screensaver interruptions.
 - Non-resume training runs are clean by default: if `RUN_NAME` already exists, that run directory is deleted first.
 - `just train-quick10` is a tiny-network, short-step sanity probe for behavior checks before overnight runs.
 - `just serve-inference` binds local-only (`127.0.0.1`) by default; `just serve-inference-public` binds `0.0.0.0` for LAN/server use.
@@ -188,14 +192,49 @@ Optional: run inference under `systemd` and reverse proxy `/infer` through nginx
 ## Training Parameters Explained
 
 - `NUM_ENVS`
-  - Number of parallel environment instances.
+  - Number of parallel environment instances when autoscale is off.
+  - If autoscale is on, this is the initial bootstrap worker count; runtime workers then move within `SMART_ENV_MIN..SMART_ENV_MAX`.
   - Higher value improves sample throughput, but increases CPU load and per-update memory.
+- `SMART_ENV_AUTOSCALE`
+  - `1` enables adaptive worker scaling.
+  - Uses a fixed smart policy:
+    - 1-second moving average for CPU/RAM.
+    - adjust at most once per second.
+    - scale up by utilization-based projection toward ~95% of target (with a minimum `+2` step).
+    - scale down gradually by `-1` worker when average utilization crosses the high trigger.
+  - GPU utilization source is `nvidia-smi` (shown in logs as `gpu_src=nvidia-smi`).
+  - Brief GPU spikes are ignored for scale-up decisions.
+- `SMART_ENV_TARGET_UTIL`
+  - Target utilization cap percentage (default `80`, averaged over 1 second).
+  - Autoscale stops adding workers when CPU or RAM reaches this threshold.
+- `SMART_ENV_SCALE_DOWN_TRIGGER`
+  - High-watermark percentage for gradual scale-down (default `90`, averaged over 1 second).
+  - If CPU or RAM crosses this threshold, trainer removes workers slowly (1 at a time).
+  - GPU util only triggers scale-down when sustained above this threshold for `SMART_ENV_GPU_SUSTAIN_SEC`.
+  - GPU memory remains a safety trigger to avoid OOM spirals.
+- `SMART_ENV_SCALE_STEP`
+  - Scale-up step size (default `2`).
+- `SMART_ENV_ADJUST_COOLDOWN_SEC`
+  - Cooldown between autoscale decisions (default `1.0` sec).
+- `SMART_ENV_MIN`, `SMART_ENV_MAX`
+  - Lower/upper env bounds for autoscale.
+  - Default minimum is `16` workers.
+  - `SMART_ENV_MAX=0` means unbounded upper limit (practically capped by available machine resources).
+- `SMART_ENV_SAMPLE_HZ`, `SMART_ENV_GPU_PROBE_HZ`
+  - Resource monitor sample rates (defaults: `10Hz` total sample loop, `2Hz` GPU probe loop).
+- `SMART_ENV_GPU_SUSTAIN_SEC`
+  - Required sustained GPU-overload window before GPU can trigger scale-down (default `10` sec).
+- `--keep-awake` / `--no-keep-awake`
+  - Keep-awake is enabled by default on Windows during training.
+  - Uses periodic execution-state signaling so sleep/screensaver does not interrupt long runs.
+- `--keep-awake-interval-sec`
+  - Keep-awake heartbeat interval (default `600` seconds).
 - `ROLLOUT_HORIZON`
   - Steps collected per env before one PPO update.
-  - Update batch size is `NUM_ENVS * ROLLOUT_HORIZON`.
+  - Update batch size is `active_envs * ROLLOUT_HORIZON` (dynamic if autoscale is enabled).
 - `TOTAL_STEPS`
   - Total environment transitions for the full run.
-  - With `NUM_ENVS=8`, each training loop adds `8 * ROLLOUT_HORIZON` steps.
+  - Per loop, progress increases by `active_envs * ROLLOUT_HORIZON` steps.
 - `DEVICE`
   - `cuda` for GPU training, `cpu` for fallback/debug.
 - `MODEL_PRESET`
@@ -340,6 +379,19 @@ just doctor
 ```
 
 `just doctor` now checks CUDA architecture compatibility too, so unsupported wheel/device combinations fail fast.
+
+## Troubleshooting: `Missing dependency: psutil`
+
+Autoscale mode (`SMART_ENV_AUTOSCALE=1`) requires `psutil` for resource monitoring.
+
+If you see this error, sync dependencies in your active venv:
+
+```bash
+cd ml
+python -m pip install -e .
+# or
+just setup
+```
 
 ## Troubleshooting: CUDA OOM on GTX 1080
 

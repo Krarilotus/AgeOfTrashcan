@@ -43,6 +43,7 @@ class RewardComponents:
     enemy_base_damage: float = 0.0
     own_base_damage: float = 0.0
     safe_age_up_bonus: float = 0.0
+    age_up_delay_penalty: float = 0.0
     lane_control_delta: float = 0.0
     illegal_action_penalty: float = 0.0
     terminal_outcome: float = 0.0

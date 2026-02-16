@@ -43,6 +43,7 @@
         "enemy_base_damage",
         "own_base_damage",
         "safe_age_up_bonus",
+        "age_up_delay_penalty",
         "lane_control_delta",
         "illegal_action_penalty",
         "terminal_outcome"
@@ -53,6 +54,7 @@
         "enemy_base_damage": { "type": "number" },
         "own_base_damage": { "type": "number" },
         "safe_age_up_bonus": { "type": "number" },
+        "age_up_delay_penalty": { "type": "number" },
         "lane_control_delta": { "type": "number" },
         "illegal_action_penalty": { "type": "number" },
         "terminal_outcome": { "type": "number" }

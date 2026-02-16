@@ -233,6 +233,92 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(clean_run=True)
     parser.add_argument(
+        "--smart-env-autoscale",
+        dest="smart_env_autoscale",
+        action="store_true",
+        help="Dynamically scale env workers to keep system utilization under target",
+    )
+    parser.add_argument(
+        "--no-smart-env-autoscale",
+        dest="smart_env_autoscale",
+        action="store_false",
+        help="Disable dynamic env autoscaling",
+    )
+    parser.set_defaults(smart_env_autoscale=False)
+    parser.add_argument(
+        "--smart-env-target-util",
+        type=float,
+        default=80.0,
+        help="Utilization target percentage for CPU/RAM autoscale cap",
+    )
+    parser.add_argument(
+        "--smart-env-scale-down-trigger",
+        type=float,
+        default=90.0,
+        help="High-watermark utilization percentage to trigger gradual env scale-down",
+    )
+    parser.add_argument(
+        "--smart-env-scale-step",
+        type=int,
+        default=2,
+        help="How many env workers to add per autoscale adjustment (autoscale mode)",
+    )
+    parser.add_argument(
+        "--smart-env-adjust-cooldown-sec",
+        type=float,
+        default=1.0,
+        help="Cooldown between autoscale adjustments in seconds (autoscale mode)",
+    )
+    parser.add_argument(
+        "--smart-env-min",
+        type=int,
+        default=16,
+        help="Minimum env workers when autoscale is enabled",
+    )
+    parser.add_argument(
+        "--smart-env-max",
+        type=int,
+        default=0,
+        help="Maximum env workers when autoscale is enabled (0 = unbounded)",
+    )
+    parser.add_argument(
+        "--smart-env-sample-hz",
+        type=float,
+        default=10.0,
+        help="Resource sampling rate in Hz",
+    )
+    parser.add_argument(
+        "--smart-env-gpu-probe-hz",
+        type=float,
+        default=2.0,
+        help="GPU probe rate in Hz (nvidia-smi polling)",
+    )
+    parser.add_argument(
+        "--smart-env-gpu-sustain-sec",
+        type=float,
+        default=10.0,
+        help="Seconds of sustained GPU overload required before autoscale scale-down reacts",
+    )
+    parser.add_argument(
+        "--keep-awake",
+        dest="keep_awake",
+        action="store_true",
+        help="Prevent Windows sleep/screensaver while training is running (default)",
+    )
+    parser.add_argument(
+        "--no-keep-awake",
+        dest="keep_awake",
+        action="store_false",
+        help="Disable keep-awake signaling during training",
+    )
+    parser.set_defaults(keep_awake=True)
+    parser.add_argument(
+        "--keep-awake-interval-sec",
+        type=float,
+        default=600.0,
+        help="Heartbeat interval in seconds for keep-awake signaling",
+    )
+    parser.add_argument(
         "--registry-output",
         type=str,
         default=default_registry_output,
@@ -343,6 +429,16 @@ def main() -> None:
     cfg.runtime.dead_unit_check_every = max(1, int(args.dead_unit_check_every))
     cfg.runtime.dead_unit_zero_epsilon = max(0.0, float(args.dead_unit_zero_epsilon))
     cfg.runtime.dead_unit_streak = max(1, int(args.dead_unit_streak))
+    cfg.runtime.smart_env_autoscale = bool(args.smart_env_autoscale)
+    cfg.runtime.smart_env_target_util_percent = float(args.smart_env_target_util)
+    cfg.runtime.smart_env_scale_down_trigger_percent = float(args.smart_env_scale_down_trigger)
+    cfg.runtime.smart_env_scale_step = max(1, int(args.smart_env_scale_step))
+    cfg.runtime.smart_env_adjust_cooldown_sec = max(1.0, float(args.smart_env_adjust_cooldown_sec))
+    cfg.runtime.smart_env_min_envs = max(1, int(args.smart_env_min))
+    cfg.runtime.smart_env_max_envs = max(0, int(args.smart_env_max))
+    cfg.runtime.smart_env_sample_hz = max(0.5, float(args.smart_env_sample_hz))
+    cfg.runtime.smart_env_gpu_probe_hz = max(0.2, float(args.smart_env_gpu_probe_hz))
+    cfg.runtime.smart_env_gpu_sustain_sec = max(1.0, float(args.smart_env_gpu_sustain_sec))
     if cfg.runtime.reward_dense_scale_start < 0 or cfg.runtime.reward_dense_scale_end < 0:
         raise SystemExit("reward-dense-start and reward-dense-end must be >= 0")
     if cfg.runtime.reward_terminal_scale_start < 0 or cfg.runtime.reward_terminal_scale_end < 0:
@@ -357,6 +453,19 @@ def main() -> None:
         raise SystemExit("league-archetype-winrate-floor must be in [0, 1]")
     if cfg.runtime.league_archetype_winrate_floor > cfg.runtime.league_min_promote_winrate:
         raise SystemExit("league-archetype-winrate-floor must be <= league-min-promote-winrate")
+    if cfg.runtime.smart_env_target_util_percent <= 0 or cfg.runtime.smart_env_target_util_percent > 99:
+        raise SystemExit("smart-env-target-util must be in (0, 99]")
+    if (
+        cfg.runtime.smart_env_scale_down_trigger_percent <= cfg.runtime.smart_env_target_util_percent
+        or cfg.runtime.smart_env_scale_down_trigger_percent > 100
+    ):
+        raise SystemExit("smart-env-scale-down-trigger must be > smart-env-target-util and <= 100")
+    if cfg.runtime.smart_env_max_envs > 0 and cfg.runtime.smart_env_max_envs < cfg.runtime.smart_env_min_envs:
+        raise SystemExit("smart-env-max must be >= smart-env-min (or 0 for auto)")
+    if cfg.runtime.smart_env_gpu_sustain_sec < 1.0:
+        raise SystemExit("smart-env-gpu-sustain-sec must be >= 1.0")
+    if float(args.keep_awake_interval_sec) < 30.0:
+        raise SystemExit("keep-awake-interval-sec must be >= 30")
     if cfg.runtime.dead_unit_zero_epsilon > 1e-4:
         raise SystemExit("dead-unit-zero-epsilon is too large; keep it <= 1e-4 for safety")
     if args.minibatch_size and args.minibatch_size > 0:
@@ -410,7 +519,31 @@ def main() -> None:
             print(f"[env] backend=mock (auto fallback): {exc}")
             env_factory = lambda: MockSelfPlayEnv(cfg.model)
 
-    trainer = SelfPlayTrainer(cfg, env_factory=env_factory, eval_env_factory=env_factory, run_name=run_name)
+    registry_output_path = Path(args.registry_output)
+
+    def _live_checkpoint_export() -> None:
+        if not args.export_registry:
+            return
+        _export_checkpoint_registry(checkpoints_root, registry_output_path)
+
+    trainer = SelfPlayTrainer(
+        cfg,
+        env_factory=env_factory,
+        eval_env_factory=env_factory,
+        run_name=run_name,
+        on_checkpoint_saved=_live_checkpoint_export,
+    )
+    keep_awake_guard = None
+    try:
+        from selfplay.keep_awake import KeepAwakeGuard
+
+        keep_awake_guard = KeepAwakeGuard(
+            enabled=bool(args.keep_awake),
+            interval_sec=float(args.keep_awake_interval_sec),
+        )
+        keep_awake_guard.start()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[keep-awake] failed to initialize: {exc}")
 
     if resume_path:
         trainer.resume_from_checkpoint(resume_path)
@@ -439,9 +572,11 @@ def main() -> None:
     try:
         trainer.train()
     finally:
+        if keep_awake_guard is not None:
+            keep_awake_guard.stop()
         if args.export_registry:
             try:
-                _export_checkpoint_registry(checkpoints_root, Path(args.registry_output))
+                _export_checkpoint_registry(checkpoints_root, registry_output_path)
             except Exception as exc:  # noqa: BLE001
                 print(f"[registry] export failed: {exc}")
 

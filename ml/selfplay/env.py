@@ -55,6 +55,7 @@ class MockEnvState:
     own_gold: float = 150.0
     own_mana: float = 0.0
     own_age: int = 1
+    own_last_age_up_time: float = 0.0
     own_mana_level: int = 0
     own_slots_unlocked: int = 1
     own_turrets_installed: int = 0
@@ -96,6 +97,7 @@ class MockSelfPlayEnv(SelfPlayEnv):
         self.opponent_strength = 1.0
         self.own_base_milestones_awarded: set[float] = set()
         self.opp_base_milestones_awarded: set[float] = set()
+        self.last_buy_time_by_slot: List[float] = [-1e9 for _ in range(self.model_cfg.slot_dim)]
 
     def set_opponent_profile(self, profile: Dict[str, float | str] | None) -> None:
         if not profile:
@@ -114,6 +116,7 @@ class MockSelfPlayEnv(SelfPlayEnv):
         self.last_damage_to_self = 0.0
         self.own_base_milestones_awarded = set()
         self.opp_base_milestones_awarded = set()
+        self.last_buy_time_by_slot = [-1e9 for _ in range(self.model_cfg.slot_dim)]
         return self._build_observation()
 
     def step(self, action: Action) -> Tuple[Observation, float, bool, Dict[str, float], RewardComponents]:
@@ -147,6 +150,12 @@ class MockSelfPlayEnv(SelfPlayEnv):
             )
 
         illegal_penalty = 0.0 if legal else -0.5
+        if legal and action.action_type == "SELL_TURRET_ENGINE":
+            # Penalize quick buy->sell flips within 3 seconds on the same slot.
+            if 0 <= sell_slot_idx < len(self.last_buy_time_by_slot):
+                since_buy_sec = max(0.0, self.state.game_time - self.last_buy_time_by_slot[sell_slot_idx])
+                if since_buy_sec <= 3.0:
+                    illegal_penalty -= 0.5
 
         if legal and action.action_type == "RECRUIT_UNIT":
             unit = self.unit_specs[unit_idx]
@@ -157,6 +166,7 @@ class MockSelfPlayEnv(SelfPlayEnv):
             cost = 350 + self.state.own_age * 180
             self.state.own_gold -= cost
             self.state.own_age += 1
+            self.state.own_last_age_up_time = self.state.game_time
         elif legal and action.action_type == "UPGRADE_MANA":
             cost = 120 + self.state.own_mana_level * 80
             self.state.own_gold -= cost
@@ -170,12 +180,14 @@ class MockSelfPlayEnv(SelfPlayEnv):
             self.state.own_gold -= turret.gold_cost
             self.state.own_mana -= turret.mana_cost
             self.turret_slots[buy_slot_idx] = turret_idx
+            self.last_buy_time_by_slot[buy_slot_idx] = self.state.game_time
             self._refresh_turret_count()
         elif legal and action.action_type == "SELL_TURRET_ENGINE":
             turret_idx = self.turret_slots[sell_slot_idx]
             turret = self.turret_specs[turret_idx]
             self.turret_slots[sell_slot_idx] = -1
             self.state.own_gold += turret.gold_cost * MOCK_TURRET_REFUND
+            self.last_buy_time_by_slot[sell_slot_idx] = -1e9
             self._refresh_turret_count()
         elif legal and action.action_type == "REPAIR_BASE":
             self.state.own_mana -= 120
@@ -201,12 +213,14 @@ class MockSelfPlayEnv(SelfPlayEnv):
             self.own_base_milestones_awarded,
             (2.0, 4.0, 8.0),
         )
+        age_up_delay_penalty = self._compute_age_up_delay_penalty(prev, self.state)
         reward_components = RewardComponents(
             enemy_unit_kill_value=0.0,
             own_unit_loss_value=0.0,
             enemy_base_damage=enemy_base_bonus,
             own_base_damage=-own_base_penalty,
             safe_age_up_bonus=1.2 if self.state.own_age > prev.own_age and self.state.own_base_hp > 500 else 0.0,
+            age_up_delay_penalty=age_up_delay_penalty,
             lane_control_delta=0.0,
             illegal_action_penalty=illegal_penalty,
             terminal_outcome=0.0,
@@ -217,6 +231,7 @@ class MockSelfPlayEnv(SelfPlayEnv):
             + reward_components.enemy_base_damage
             + reward_components.own_base_damage
             + reward_components.safe_age_up_bonus
+            + reward_components.age_up_delay_penalty
             + reward_components.lane_control_delta
             + reward_components.illegal_action_penalty
             + reward_components.terminal_outcome
@@ -257,6 +272,22 @@ class MockSelfPlayEnv(SelfPlayEnv):
                 awarded.add(threshold)
                 bonus += float(rewards[idx])
         return bonus
+
+    def _compute_age_up_delay_penalty(self, prev: MockEnvState, next_state: MockEnvState) -> float:
+        if next_state.own_age >= MOCK_MAX_AGE:
+            return 0.0
+        elapsed_since_age_up = max(0.0, next_state.game_time - next_state.own_last_age_up_time)
+        grace_seconds = float(next_state.own_age) * 180.0
+        if elapsed_since_age_up <= grace_seconds:
+            return 0.0
+        ramp_seconds = 180.0
+        overdue = elapsed_since_age_up - grace_seconds
+        ramp = float(np.clip(overdue / ramp_seconds, 0.0, 1.0))
+        required_gold = float(350 + next_state.own_age * 180)
+        current_gold = max(1.0, float(next_state.own_gold))
+        ratio = required_gold / current_gold
+        delta_seconds = max(0.0, float(next_state.game_time - prev.game_time))
+        return -(ratio * ramp * delta_seconds)
 
     def _simulate_opponent_policy(self) -> None:
         pressure = (0.8 + self.rng.uniform(0.0, 0.7)) * self.opponent_strength
@@ -440,8 +471,8 @@ class MockSelfPlayEnv(SelfPlayEnv):
 
     def _build_observation(self) -> Observation:
         static = np.zeros((self.model_cfg.static_dim,), dtype=np.float32)
-        static[0] = np.clip(self.state.game_time / 900.0, 0.0, 1.0)
-        static[1] = np.clip(self.state.tick / max(1, self.max_ticks), 0.0, 1.0)
+        static[0] = np.clip((self.state.game_time - self.state.own_last_age_up_time) / 1800.0, 0.0, 1.0)
+        static[1] = 0.0
         static[2] = np.clip(self.state.own_gold / 12000.0, 0.0, 1.0)
         static[3] = np.clip(self.state.own_mana / 5000.0, 0.0, 1.0)
         static[4] = np.clip(self.state.own_age / 6.0, 0.0, 1.0)
@@ -695,6 +726,7 @@ class GameBridgeEnv(SelfPlayEnv):
             enemy_base_damage=float(raw_components.get("enemy_base_damage", 0.0)),
             own_base_damage=float(raw_components.get("own_base_damage", 0.0)),
             safe_age_up_bonus=float(raw_components.get("safe_age_up_bonus", 0.0)),
+            age_up_delay_penalty=float(raw_components.get("age_up_delay_penalty", 0.0)),
             lane_control_delta=float(raw_components.get("lane_control_delta", 0.0)),
             illegal_action_penalty=float(raw_components.get("illegal_action_penalty", 0.0)),
             terminal_outcome=float(raw_components.get("terminal_outcome", 0.0)),

@@ -4,10 +4,11 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 from pathlib import Path
 import shutil
 import time
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -19,7 +20,10 @@ from .env import ACTIONS, MockSelfPlayEnv, SelfPlayEnv
 from .league import LeaguePool, StrategyProfile
 from .model import TransformerActorCritic
 from .ppo import PPOUpdater, RolloutBatch, compute_gae
+from .resource_monitor import ResourceMonitor, ResourceSample
 from .schemas import Action, Observation, RewardComponents
+
+AUTOSCALE_INF_CAP = 1_000_000
 
 
 class SelfPlayTrainer:
@@ -30,6 +34,7 @@ class SelfPlayTrainer:
         eval_env_factory: Callable[[], SelfPlayEnv] | None = None,
         run_name: str | None = None,
         milestone_steps: List[int] | None = None,
+        on_checkpoint_saved: Callable[[], None] | None = None,
     ) -> None:
         self.cfg = cfg
         runtime = cfg.runtime
@@ -56,10 +61,24 @@ class SelfPlayTrainer:
             archetype_winrate_floor=runtime.league_archetype_winrate_floor,
         )
 
+        self.autoscale_enabled = bool(runtime.smart_env_autoscale)
+        self.autoscale_min_envs = max(1, int(runtime.smart_env_min_envs))
+        self.autoscale_unbounded = int(getattr(runtime, "smart_env_max_envs", 0)) <= 0
+        self.autoscale_max_envs = self._resolve_smart_env_max(runtime)
+        self.last_autoscale_adjust_perf = time.perf_counter() - max(
+            0.0, float(runtime.smart_env_adjust_cooldown_sec)
+        )
+        self.resource_monitor: Optional[ResourceMonitor] = None
         self.env_factory = env_factory or (lambda: MockSelfPlayEnv(cfg.model))
         self.eval_env_factory = eval_env_factory or self.env_factory
-        self.envs: List[SelfPlayEnv] = [self.env_factory() for _ in range(runtime.num_envs)]
-        self.env_step_pool = ThreadPoolExecutor(max_workers=runtime.num_envs) if runtime.num_envs > 1 else None
+        self.last_autoscale_status_log_perf = 0.0
+        if self.autoscale_enabled:
+            # In autoscale mode, bootstrap from min and let scaler add capacity.
+            initial_envs = max(1, self.autoscale_min_envs)
+        else:
+            initial_envs = int(runtime.num_envs)
+        self.envs: List[SelfPlayEnv] = [self.env_factory() for _ in range(max(1, initial_envs))]
+        self.env_step_pool = ThreadPoolExecutor(max_workers=len(self.envs)) if len(self.envs) > 1 else None
         self.global_step = 0
         self.last_good_checkpoint: str | None = None
         self.best_eval_winrate = float("-inf")
@@ -70,28 +89,47 @@ class SelfPlayTrainer:
         self.train_start_perf = time.perf_counter()
         self.train_start_step = 0
         self.last_rollout_profile = StrategyProfile()
+        self.last_rollout_telemetry_line = ""
         self.last_log_perf = self.train_start_perf
         self.update_count = 0
         self.dead_row_streaks: Dict[str, np.ndarray] = {}
         self.dead_revival_layers = self._resolve_dead_revival_layers()
+        self.on_checkpoint_saved = on_checkpoint_saved
 
         Path(runtime.save_dir).mkdir(parents=True, exist_ok=True)
         self._load_or_init_manifest()
         self.obs: List[Observation] = [
             env.reset(runtime.seed + env_idx) for env_idx, env in enumerate(self.envs)
         ]
+        if self.autoscale_enabled:
+            self.resource_monitor = ResourceMonitor(
+                sample_hz=runtime.smart_env_sample_hz,
+                gpu_probe_hz=runtime.smart_env_gpu_probe_hz,
+                enable_gpu=(self.device.type == "cuda"),
+                history_sec=max(20.0, float(runtime.smart_env_gpu_sustain_sec) + 2.0),
+            )
+            self.resource_monitor.start()
+            max_label = "inf" if self.autoscale_unbounded else str(self.autoscale_max_envs)
+            print(
+                f"[autoscale] enabled target={runtime.smart_env_target_util_percent:.1f}% "
+                f"down_trigger={runtime.smart_env_scale_down_trigger_percent:.1f}% "
+                f"gpu_sustain={runtime.smart_env_gpu_sustain_sec:.1f}s "
+                f"env_range={self.autoscale_min_envs}-{max_label}"
+            )
 
     def train(self) -> None:
         runtime = self.cfg.runtime
         try:
             while self.global_step < runtime.total_steps:
+                self._maybe_autoscale_envs()
                 previous_step = self.global_step
+                active_envs = len(self.envs)
                 batch = self._collect_rollout()
                 metrics = self.ppo.update(batch)
                 self.update_count += 1
                 self._maybe_revive_dead_units()
                 self._anneal_entropy()
-                self.global_step += runtime.rollout_horizon * runtime.num_envs
+                self.global_step += runtime.rollout_horizon * active_envs
 
                 if any(np.isnan(v) or np.isinf(v) for v in metrics.values()):
                     self._rollback_checkpoint()
@@ -119,8 +157,10 @@ class SelfPlayTrainer:
                         f"[step={self.global_step} progress={progress_pct:.1f}%] policy={metrics['policy_loss']:.4f} "
                         f"value={metrics['value_loss']:.4f} entropy={metrics['entropy']:.4f} "
                         f"kl={metrics['kl']:.5f} reward_scale(dense={dense_scale:.3f},terminal={terminal_scale:.3f}) "
-                        f"sps={steps_per_sec:.1f} eta={self._format_eta(eta_seconds)}"
+                        f"sps={steps_per_sec:.1f} eta={self._format_eta(eta_seconds)} envs={active_envs}"
                     )
+                    if self.last_rollout_telemetry_line:
+                        print(self.last_rollout_telemetry_line)
                     self.last_log_perf = now_perf
                     if metrics["entropy"] < runtime.entropy_floor_alert:
                         print(
@@ -185,6 +225,9 @@ class SelfPlayTrainer:
         return int(self.global_step)
 
     def close(self) -> None:
+        if self.resource_monitor is not None:
+            self.resource_monitor.stop()
+            self.resource_monitor = None
         for env in self.envs:
             try:
                 env.close()
@@ -197,6 +240,221 @@ class SelfPlayTrainer:
     def set_milestone_steps(self, steps: List[int]) -> None:
         self.milestone_steps = sorted({int(step) for step in steps if int(step) > 0})
         self._persist_manifest()
+
+    def _resolve_smart_env_max(self, runtime) -> int:
+        explicit_max = int(getattr(runtime, "smart_env_max_envs", 0))
+        if explicit_max > 0:
+            return max(self.autoscale_min_envs, explicit_max)
+        return max(self.autoscale_min_envs, AUTOSCALE_INF_CAP)
+
+    def _rebuild_env_step_pool(self) -> None:
+        if self.env_step_pool is not None:
+            self.env_step_pool.shutdown(wait=True, cancel_futures=False)
+            self.env_step_pool = None
+        if len(self.envs) > 1:
+            self.env_step_pool = ThreadPoolExecutor(max_workers=len(self.envs))
+
+    def _resize_envs(self, target_count: int) -> None:
+        target = max(1, int(target_count))
+        if self.autoscale_enabled:
+            target = max(self.autoscale_min_envs, min(self.autoscale_max_envs, target))
+        current = len(self.envs)
+        if target == current:
+            return
+
+        if target > current:
+            added_envs: List[SelfPlayEnv] = []
+            added_obs: List[Observation] = []
+            try:
+                for idx in range(current, target):
+                    env = self.env_factory()
+                    seed = int(self.cfg.runtime.seed + self.global_step + (idx + 1) * 977)
+                    obs = env.reset(seed)
+                    added_envs.append(env)
+                    added_obs.append(obs)
+            except Exception:
+                for env in added_envs:
+                    try:
+                        env.close()
+                    except Exception:
+                        pass
+                raise
+            self.envs.extend(added_envs)
+            self.obs.extend(added_obs)
+        else:
+            remove_count = current - target
+            for _ in range(remove_count):
+                env = self.envs.pop()
+                self.obs.pop()
+                try:
+                    env.close()
+                except Exception:
+                    pass
+
+        self._rebuild_env_step_pool()
+
+    def _can_scale_up(self, sample: ResourceSample) -> bool:
+        target = float(self.cfg.runtime.smart_env_target_util_percent)
+        # Scale-up decisions are CPU/RAM-driven to avoid reacting to short GPU bursts.
+        _, peak_util = self._peak_utilization(sample, include_gpu=False, include_gpu_mem=False)
+        return peak_util < target
+
+    def _scale_down_reason(self, sample: ResourceSample) -> str | None:
+        threshold = float(self.cfg.runtime.smart_env_scale_down_trigger_percent)
+        if float(sample.cpu_percent) >= threshold:
+            return "cpu"
+        if float(sample.ram_percent) >= threshold:
+            return "ram"
+        # GPU memory is safety-critical and should react quickly.
+        if sample.gpu_mem_percent is not None and float(sample.gpu_mem_percent) >= threshold:
+            return "gpu_mem"
+        # GPU utilization only counts if sustained high for a long window.
+        if sample.gpu_util_percent is not None and self.resource_monitor is not None:
+            window_sec = max(1.0, float(self.cfg.runtime.smart_env_gpu_sustain_sec))
+            if self.resource_monitor.sustained_gpu_util_over(
+                threshold_percent=threshold,
+                window_sec=window_sec,
+                min_ratio=0.9,
+            ):
+                return f"gpu_util_sustained_{window_sec:.0f}s"
+        return None
+
+    def _peak_utilization(
+        self,
+        sample: ResourceSample,
+        *,
+        include_gpu: bool = True,
+        include_gpu_mem: bool = True,
+    ) -> Tuple[str, float]:
+        candidates: List[Tuple[str, float]] = [
+            ("cpu", float(sample.cpu_percent)),
+            ("ram", float(sample.ram_percent)),
+        ]
+        if include_gpu and sample.gpu_util_percent is not None:
+            candidates.append(("gpu", float(sample.gpu_util_percent)))
+        if include_gpu_mem and sample.gpu_mem_percent is not None:
+            candidates.append(("gpu_mem", float(sample.gpu_mem_percent)))
+        return max(candidates, key=lambda item: item[1])
+
+    def _projected_scale_up_target(self, sample: ResourceSample, old_count: int) -> int:
+        runtime = self.cfg.runtime
+        min_step = max(1, int(runtime.smart_env_scale_step))
+        _, peak_util = self._peak_utilization(sample, include_gpu=False, include_gpu_mem=False)
+        target_util = float(runtime.smart_env_target_util_percent)
+        desired_util = max(1.0, target_util * 0.95)
+
+        # If utilization sensors are near-zero, still move forward conservatively.
+        if peak_util <= 1e-6:
+            return min(self.autoscale_max_envs, old_count + max(2, min_step))
+
+        if peak_util >= target_util:
+            return old_count
+
+        projected = int(math.ceil(old_count * (desired_util / peak_util)))
+        projected = max(projected, old_count + max(2, min_step))
+
+        # Prevent unstable one-shot explosions while still allowing strong jumps.
+        projected_cap_for_tick = old_count + max(old_count, max(2, min_step))
+        projected = min(projected, projected_cap_for_tick)
+        projected = min(projected, self.autoscale_max_envs)
+        if projected <= old_count:
+            projected = min(self.autoscale_max_envs, old_count + max(2, min_step))
+        return projected
+
+    def _sample_to_text(self, sample: ResourceSample) -> str:
+        gpu_util = "n/a" if sample.gpu_util_percent is None else f"{sample.gpu_util_percent:.1f}"
+        gpu_mem = "n/a" if sample.gpu_mem_percent is None else f"{sample.gpu_mem_percent:.1f}"
+        gpu_source = sample.gpu_source or "n/a"
+        return (
+            f"cpu={sample.cpu_percent:.1f}% "
+            f"ram={sample.ram_percent:.1f}% "
+            f"gpu={gpu_util}% "
+            f"gpu_mem={gpu_mem}% "
+            f"gpu_src={gpu_source}"
+        )
+
+    def _autoscale_hold_log(self, now: float, reason: str, env_count: int, sample: ResourceSample) -> None:
+        # Avoid log spam: emit hold reasons at most once every 10 seconds.
+        if (now - self.last_autoscale_status_log_perf) < 10.0:
+            return
+        self.last_autoscale_status_log_perf = now
+        print(
+            f"[autoscale-hold] envs={env_count} reason={reason} "
+            f"{self._sample_to_text(sample)}"
+        )
+
+    def _maybe_autoscale_envs(self) -> None:
+        if not self.autoscale_enabled:
+            return
+        if self.resource_monitor is None:
+            return
+
+        now = time.perf_counter()
+        # Keep autoscale stable: one adjustment decision per second.
+        cooldown = max(1.0, float(self.cfg.runtime.smart_env_adjust_cooldown_sec))
+        if (now - self.last_autoscale_adjust_perf) < cooldown:
+            return
+
+        # Use 1-second moving averages to avoid reacting to spikes.
+        sample = self.resource_monitor.averaged(window_sec=1.0)
+        if sample is None:
+            return
+        old_count = len(self.envs)
+        scale_down_reason = self._scale_down_reason(sample)
+        if scale_down_reason is not None:
+            if old_count <= self.autoscale_min_envs:
+                self._autoscale_hold_log(
+                    now,
+                    f"at_min_envs({self.autoscale_min_envs})_while_over_down_trigger_{scale_down_reason}",
+                    old_count,
+                    sample,
+                )
+                self.last_autoscale_adjust_perf = now
+                return
+            # Scale down gradually to avoid oscillation.
+            target = max(self.autoscale_min_envs, old_count - 1)
+            self._resize_envs(target)
+            self.last_autoscale_adjust_perf = now
+            print(
+                f"[autoscale-down] envs={old_count}->{len(self.envs)} "
+                f"reason={scale_down_reason} "
+                f"avg_1s_high_trigger={self.cfg.runtime.smart_env_scale_down_trigger_percent:.1f}% "
+                f"{self._sample_to_text(sample)}"
+            )
+            return
+
+        if old_count >= self.autoscale_max_envs:
+            max_label = "inf" if self.autoscale_unbounded else str(self.autoscale_max_envs)
+            self._autoscale_hold_log(now, f"at_max_envs({max_label})", old_count, sample)
+            self.last_autoscale_adjust_perf = now
+            return
+
+        if not self._can_scale_up(sample):
+            peak_name, peak_util = self._peak_utilization(sample, include_gpu=False, include_gpu_mem=False)
+            target_util = float(self.cfg.runtime.smart_env_target_util_percent)
+            self._autoscale_hold_log(
+                now,
+                f"peak_{peak_name}={peak_util:.1f}%_>=_target_{target_util:.1f}%_(cpu_ram_mode)",
+                old_count,
+                sample,
+            )
+            self.last_autoscale_adjust_perf = now
+            return
+
+        peak_name, peak_util = self._peak_utilization(sample, include_gpu=False, include_gpu_mem=False)
+        target = self._projected_scale_up_target(sample, old_count)
+        if target <= old_count:
+            self._autoscale_hold_log(now, "projection_no_growth", old_count, sample)
+            return
+
+        self._resize_envs(target)
+        self.last_autoscale_adjust_perf = now
+        print(
+            f"[autoscale] envs={old_count}->{len(self.envs)} "
+            f"avg_1s_target={self.cfg.runtime.smart_env_target_util_percent:.1f}% "
+            f"peak(cpu_ram)={peak_name}:{peak_util:.1f}% "
+            f"{self._sample_to_text(sample)}"
+        )
 
     def _compatible_checkpoint_config(self, checkpoint_cfg: Dict[str, object]) -> bool:
         model_cfg = checkpoint_cfg.get("model")
@@ -242,7 +500,7 @@ class SelfPlayTrainer:
         if optimizer_state:
             self.optimizer.load_state_dict(optimizer_state)
         self.global_step = int(state.get("step", 0))
-        quantum = max(1, self.cfg.runtime.rollout_horizon * self.cfg.runtime.num_envs)
+        quantum = max(1, self.cfg.runtime.rollout_horizon * max(1, len(self.envs)))
         self.update_count = max(0, self.global_step // quantum)
         self.last_good_checkpoint = str(path)
         self.train_start_perf = time.perf_counter()
@@ -329,7 +587,9 @@ class SelfPlayTrainer:
     def _collect_rollout(self) -> RolloutBatch:
         runtime = self.cfg.runtime
         horizon = runtime.rollout_horizon
-        num_envs = runtime.num_envs
+        num_envs = len(self.envs)
+        if num_envs <= 0:
+            raise RuntimeError("No active environments available for rollout")
         model_cfg = self.cfg.model
 
         static_np = np.zeros((horizon, num_envs, model_cfg.static_dim), dtype=np.float32)
@@ -378,9 +638,12 @@ class SelfPlayTrainer:
             "enemy_base_damage": 0.0,
             "own_base_damage": 0.0,
             "safe_age_up_bonus": 0.0,
+            "age_up_delay_penalty": 0.0,
             "illegal_action_penalty": 0.0,
             "terminal_outcome": 0.0,
         }
+        env_latest_game_stats: List[Dict[str, object] | None] = [None for _ in range(num_envs)]
+        completed_game_stats: List[Dict[str, object]] = []
 
         for t in range(horizon):
             static_t, seq_t, masks_t = self._obs_batch_to_tensors(self.obs)
@@ -419,23 +682,34 @@ class SelfPlayTrainer:
                     for env_idx in range(num_envs)
                 ]
 
-            for env_idx, (next_obs, reward, done, _, reward_components) in enumerate(step_results):
+            for env_idx, (next_obs, reward, done, info, reward_components) in enumerate(step_results):
                 progress_step = self.global_step + t * num_envs + env_idx
                 shaped_reward = self._compose_reward(reward_components, progress_step)
                 rewards_np[t, env_idx] = shaped_reward if np.isfinite(shaped_reward) else reward
                 dones_np[t, env_idx] = float(done)
+                parsed_stats = self._parse_rollout_game_stats(info)
+                if parsed_stats is not None:
+                    env_latest_game_stats[env_idx] = parsed_stats
                 reward_sums["enemy_base_damage"] += float(reward_components.enemy_base_damage)
                 reward_sums["own_base_damage"] += float(reward_components.own_base_damage)
                 reward_sums["safe_age_up_bonus"] += float(reward_components.safe_age_up_bonus)
+                reward_sums["age_up_delay_penalty"] += float(reward_components.age_up_delay_penalty)
                 reward_sums["illegal_action_penalty"] += float(reward_components.illegal_action_penalty)
                 reward_sums["terminal_outcome"] += float(reward_components.terminal_outcome)
                 if done:
+                    if parsed_stats is not None:
+                        completed_game_stats.append(parsed_stats)
+                    env_latest_game_stats[env_idx] = None
                     next_obs = self.envs[env_idx].reset(
                         self.cfg.runtime.seed + self.global_step + t * num_envs + env_idx + 1
                     )
                 self.obs[env_idx] = next_obs
 
         self.last_rollout_profile = self._build_strategy_profile(action_counts, reward_sums)
+        self.last_rollout_telemetry_line = self._format_rollout_telemetry_line(
+            completed_game_stats,
+            env_latest_game_stats,
+        )
 
         if self.cfg.runtime.reward_normalize:
             reward_mean = float(np.mean(rewards_np))
@@ -521,6 +795,123 @@ class SelfPlayTrainer:
         if action_type == "SELL_TURRET_ENGINE":
             return Action(action_type=action_type, slot_index=sell_slot_idx, confidence=confidence)
         return Action(action_type=action_type, confidence=confidence)
+
+    def _parse_rollout_game_stats(self, info: Dict[str, float]) -> Dict[str, object] | None:
+        if not info:
+            return None
+        highest_age = float(info.get("highest_age", info.get("own_age", 0.0)))
+        game_duration_sec = float(info.get("game_time", 0.0))
+        total_gold_spent = float(info.get("total_gold_spent", 0.0))
+        total_mana_spent = float(info.get("total_mana_spent", 0.0))
+        highest_turret_count = float(info.get("highest_turret_count", 0.0))
+        if not np.isfinite(highest_age):
+            highest_age = 0.0
+        if not np.isfinite(game_duration_sec):
+            game_duration_sec = 0.0
+        if not np.isfinite(total_gold_spent):
+            total_gold_spent = 0.0
+        if not np.isfinite(total_mana_spent):
+            total_mana_spent = 0.0
+        if not np.isfinite(highest_turret_count):
+            highest_turret_count = 0.0
+
+        unit_build_counts: Dict[str, float] = {}
+        turret_buy_counts: Dict[str, float] = {}
+        turret_strength_scores: Dict[str, float] = {}
+        for key, value in info.items():
+            if not isinstance(value, (int, float)):
+                continue
+            numeric_value = float(value)
+            if key.startswith("unit_build__"):
+                unit_id = key[len("unit_build__") :]
+                if unit_id:
+                    unit_build_counts[unit_id] = max(0.0, numeric_value)
+            elif key.startswith("turret_buy__"):
+                turret_id = key[len("turret_buy__") :]
+                if turret_id:
+                    turret_buy_counts[turret_id] = max(0.0, numeric_value)
+            elif key.startswith("turret_strength__"):
+                turret_id = key[len("turret_strength__") :]
+                if turret_id:
+                    turret_strength_scores[turret_id] = max(0.0, numeric_value)
+
+        return {
+            "highest_age": highest_age,
+            "game_duration_sec": max(0.0, game_duration_sec),
+            "total_gold_spent": total_gold_spent,
+            "total_mana_spent": total_mana_spent,
+            "highest_turret_count": highest_turret_count,
+            "unit_build_counts": unit_build_counts,
+            "turret_buy_counts": turret_buy_counts,
+            "turret_strength_scores": turret_strength_scores,
+        }
+
+    def _format_rollout_telemetry_line(
+        self,
+        completed_games: List[Dict[str, object]],
+        env_latest: List[Dict[str, object] | None],
+    ) -> str:
+        game_samples: List[Dict[str, object]]
+        if completed_games:
+            game_samples = completed_games
+        else:
+            game_samples = [sample for sample in env_latest if sample is not None]
+        if not game_samples:
+            return "[batch-telemetry] n/a"
+
+        sample_count = len(game_samples)
+        avg_highest_age = float(np.mean([float(sample.get("highest_age", 0.0)) for sample in game_samples]))
+        avg_game_duration_sec = float(
+            np.mean([float(sample.get("game_duration_sec", 0.0)) for sample in game_samples])
+        )
+        avg_gold_spent = float(np.mean([float(sample.get("total_gold_spent", 0.0)) for sample in game_samples]))
+        avg_mana_spent = float(np.mean([float(sample.get("total_mana_spent", 0.0)) for sample in game_samples]))
+        avg_highest_turrets = float(np.mean([float(sample.get("highest_turret_count", 0.0)) for sample in game_samples]))
+
+        unit_totals: Dict[str, float] = {}
+        turret_buy_totals: Dict[str, float] = {}
+        turret_strength: Dict[str, float] = {}
+        for sample in game_samples:
+            unit_counts = sample.get("unit_build_counts", {})
+            if isinstance(unit_counts, dict):
+                for unit_id, count in unit_counts.items():
+                    if isinstance(unit_id, str):
+                        unit_totals[unit_id] = unit_totals.get(unit_id, 0.0) + float(count)
+            turret_counts = sample.get("turret_buy_counts", {})
+            if isinstance(turret_counts, dict):
+                for turret_id, count in turret_counts.items():
+                    if isinstance(turret_id, str):
+                        turret_buy_totals[turret_id] = turret_buy_totals.get(turret_id, 0.0) + float(count)
+            turret_scores = sample.get("turret_strength_scores", {})
+            if isinstance(turret_scores, dict):
+                for turret_id, score in turret_scores.items():
+                    if isinstance(turret_id, str):
+                        turret_strength[turret_id] = max(turret_strength.get(turret_id, 0.0), float(score))
+
+        unit_avg = {unit_id: total / sample_count for unit_id, total in unit_totals.items()}
+        top_units = sorted(unit_avg.items(), key=lambda item: (item[1], item[0]), reverse=True)[:5]
+        top_units_text = ", ".join(f"{unit_id}:{count:.1f}" for unit_id, count in top_units) or "n/a"
+
+        turret_avg = {turret_id: total / sample_count for turret_id, total in turret_buy_totals.items()}
+        strongest_engines = sorted(
+            turret_avg.items(),
+            key=lambda item: (turret_strength.get(item[0], 0.0), item[1], item[0]),
+            reverse=True,
+        )[:3]
+        strongest_engines_text = ", ".join(
+            f"{turret_id}:{count:.1f}" for turret_id, count in strongest_engines
+        ) or "n/a"
+
+        return (
+            f"[batch-telemetry games={sample_count}] "
+            f"highest_age_avg={avg_highest_age:.2f} "
+            f"avg_game_duration={avg_game_duration_sec:.1f}s({avg_game_duration_sec / 60.0:.2f}m) "
+            f"gold_spent_avg={avg_gold_spent:.1f} "
+            f"mana_spent_avg={avg_mana_spent:.1f} "
+            f"top_units={top_units_text} "
+            f"highest_turret_count_avg={avg_highest_turrets:.2f} "
+            f"strongest_tower_engines={strongest_engines_text}"
+        )
 
     def _build_strategy_profile(
         self,
@@ -703,6 +1094,11 @@ class SelfPlayTrainer:
             milestone_target_step=milestone_target_step,
         )
         print(f"[checkpoint] saved {path}")
+        if self.on_checkpoint_saved is not None:
+            try:
+                self.on_checkpoint_saved()
+            except Exception as exc:
+                print(f"[registry] live export failed after checkpoint save: {exc}")
         return str(path)
 
     def _rollback_checkpoint(self) -> None:
@@ -835,7 +1231,7 @@ class SelfPlayTrainer:
         requested = int(getattr(self.cfg.runtime, "eval_workers", 0))
         if requested > 0:
             return max(1, min(matches, requested))
-        auto = max(1, min(matches, self.cfg.runtime.num_envs))
+        auto = max(1, min(matches, max(1, len(self.envs))))
         return int(auto)
 
     def _reward_progress(self, step: int) -> float:
@@ -867,6 +1263,7 @@ class SelfPlayTrainer:
             + components.enemy_base_damage
             + components.own_base_damage
             + components.safe_age_up_bonus
+            + components.age_up_delay_penalty
             + components.lane_control_delta
             + components.illegal_action_penalty
         )

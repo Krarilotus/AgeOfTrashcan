@@ -14,6 +14,7 @@ import { MLHistoryBuffer } from '../../src/ai/ml/historyBuffer';
 import { buildLegalActionMask } from '../../src/ai/ml/legalActionMask';
 import { encodeObservation } from '../../src/ai/ml/observationEncoder';
 import { BASE_CONFIG, INCOME_CONFIG, type GameDifficulty } from '../../src/config/gameBalance';
+import { getTurretEngineDef } from '../../src/config/turrets';
 
 type Owner = 'PLAYER' | 'ENEMY';
 
@@ -136,6 +137,12 @@ class BridgeRuntime {
   private opponentDefense = 0.5;
   private ownBaseMilestonesAwarded = new Set<number>();
   private opponentBaseMilestonesAwarded = new Set<number>();
+  private lastBuyTimeBySlot = new Map<number, number>();
+  private enemyLastAgeUpTimeSec = 0;
+  private episodeGoldSpent = 0;
+  private episodeManaSpent = 0;
+  private peakEnemyAge = 1;
+  private peakEnemyTurretCount = 0;
 
   init(command: Extract<BridgeCommand, { cmd: 'init' }>): Record<string, unknown> {
     this.staticDim = Math.max(1, command.model.static_dim ?? this.staticDim);
@@ -201,6 +208,12 @@ class BridgeRuntime {
   reset(command: Extract<BridgeCommand, { cmd: 'reset' }>): Record<string, unknown> {
     this.ownBaseMilestonesAwarded.clear();
     this.opponentBaseMilestonesAwarded.clear();
+    this.lastBuyTimeBySlot.clear();
+    this.enemyLastAgeUpTimeSec = 0;
+    this.episodeGoldSpent = 0;
+    this.episodeManaSpent = 0;
+    this.peakEnemyAge = 1;
+    this.peakEnemyTurretCount = 0;
     const opponentDifficulty = this.pickOpponentDifficulty(command.seed);
     const config: GameConfig = {
       difficulty: this.selfDifficulty,
@@ -228,6 +241,8 @@ class BridgeRuntime {
     this.engine.startHeadless();
     this.history.reset();
     const snapshot = this.engine.getAISnapshot('ENEMY');
+    this.peakEnemyAge = Math.max(this.peakEnemyAge, snapshot.enemyAge);
+    this.peakEnemyTurretCount = Math.max(this.peakEnemyTurretCount, snapshot.enemyTurretInstalledCount);
     this.history.ingestState(snapshot);
     const obs = this.encodeSnapshot(snapshot);
     return { ok: true, observation: obs };
@@ -243,11 +258,28 @@ class BridgeRuntime {
     const decision = this.decodeDecision(command.action);
     const legal = this.isDecisionLegal(decision, prevMask);
     const applied = legal ? this.engine.applyAIDecision(decision, 'ENEMY') : false;
+    if (legal && applied) {
+      const postAction = this.engine.getAISnapshot('ENEMY');
+      this.episodeGoldSpent += Math.max(0, prev.enemyGold - postAction.enemyGold);
+      this.episodeManaSpent += Math.max(0, prev.enemyMana - postAction.enemyMana);
+    }
+    const decisionSlot =
+      typeof (decision.parameters as Record<string, unknown> | undefined)?.slotIndex === 'number'
+        ? Math.floor((decision.parameters as Record<string, unknown>).slotIndex as number)
+        : null;
+    if (legal && applied && decision.action === 'BUY_TURRET_ENGINE' && decisionSlot !== null) {
+      this.lastBuyTimeBySlot.set(decisionSlot, prev.gameTime);
+    }
     this.history.recordDecision(prev, decision, legal && applied ? 0 : -0.35);
     this.engine.stepHeadless(this.decisionFrames);
 
     const next = this.engine.getAISnapshot('ENEMY');
+    this.peakEnemyAge = Math.max(this.peakEnemyAge, next.enemyAge);
+    this.peakEnemyTurretCount = Math.max(this.peakEnemyTurretCount, next.enemyTurretInstalledCount);
     this.history.ingestState(next);
+    if (next.enemyAge > prev.enemyAge) {
+      this.enemyLastAgeUpTimeSec = prev.gameTime;
+    }
     const doneByBase = next.enemyBaseHealth <= 0 || next.playerBaseHealth <= 0;
     const doneByTimeout = next.gameTime >= this.episodeSeconds;
     const done = doneByBase || doneByTimeout;
@@ -258,7 +290,19 @@ class BridgeRuntime {
         : doneByTimeout
           ? 'timeout'
           : 'none';
-    const rewardComponents = this.computeReward(prev, next, legal && applied, terminalCause, done);
+    const rewardComponents = this.computeReward(
+      prev,
+      next,
+      legal && applied,
+      terminalCause,
+      done,
+      decision.action,
+      decisionSlot,
+      prev.gameTime
+    );
+    if (legal && applied && decision.action === 'SELL_TURRET_ENGINE' && decisionSlot !== null) {
+      this.lastBuyTimeBySlot.delete(decisionSlot);
+    }
     const reward =
       rewardComponents.enemy_unit_kill_value +
       rewardComponents.own_unit_loss_value +
@@ -272,21 +316,48 @@ class BridgeRuntime {
       this.engine.stopHeadless();
     }
     const obs = this.encodeSnapshot(next);
+    const telemetry = this.engine.getTelemetrySnapshot();
+    const ownTelemetry = telemetry.bySide.ENEMY;
+    const info: Record<string, number | string> = {
+      own_base_hp: next.enemyBaseHealth,
+      opp_base_hp: next.playerBaseHealth,
+      own_units: next.enemyUnitCount,
+      opp_units: next.playerUnitCount,
+      own_gold: next.enemyGold,
+      own_mana: next.enemyMana,
+      game_time: next.gameTime,
+      own_age: next.enemyAge,
+      highest_age: this.peakEnemyAge,
+      highest_turret_count: this.peakEnemyTurretCount,
+      total_gold_spent: this.episodeGoldSpent,
+      total_mana_spent: this.episodeManaSpent,
+      mana_upgrade_count: ownTelemetry.manaUpgradeCount,
+      turret_slot_upgrade_count: ownTelemetry.turretSlotUpgradeCount,
+      enemy_time_since_last_age_up: Math.max(0, next.gameTime - this.enemyLastAgeUpTimeSec),
+      terminal_cause: terminalCause,
+    };
+
+    Object.entries(ownTelemetry.unitBuildCounts).forEach(([unitId, count]) => {
+      info[`unit_build__${unitId}`] = Number(count) || 0;
+    });
+    Object.entries(ownTelemetry.turretEngineBuys).forEach(([turretId, count]) => {
+      info[`turret_buy__${turretId}`] = Number(count) || 0;
+      const def = getTurretEngineDef(turretId);
+      if (def) {
+        const strength = def.age * 1000 + def.cost + def.protectionMultiplier * 100;
+        info[`turret_strength__${turretId}`] = strength;
+      }
+    });
+    Object.entries(ownTelemetry.turretEngineSells).forEach(([turretId, count]) => {
+      info[`turret_sell__${turretId}`] = Number(count) || 0;
+    });
+
     return {
       ok: true,
       observation: obs,
       reward,
       done,
-      info: {
-        own_base_hp: next.enemyBaseHealth,
-        opp_base_hp: next.playerBaseHealth,
-        own_units: next.enemyUnitCount,
-        opp_units: next.playerUnitCount,
-        own_gold: next.enemyGold,
-        own_mana: next.enemyMana,
-        game_time: next.gameTime,
-        terminal_cause: terminalCause,
-      },
+      info,
       reward_components: rewardComponents,
     };
   }
@@ -430,7 +501,10 @@ class BridgeRuntime {
     next: GameStateSnapshot,
     legalAndApplied: boolean,
     terminalCause: 'none' | 'player_win' | 'enemy_win' | 'timeout',
-    done: boolean
+    done: boolean,
+    executedAction: AIDecision['action'],
+    executedSlotIndex: number | null,
+    decisionTimeSec: number
   ): Record<string, number> {
     const enemyUnitKillValue = 0;
     const ownUnitLossValue = 0;
@@ -451,7 +525,20 @@ class BridgeRuntime {
         ? 1.2
         : 0;
     const laneControlDelta = 0;
-    const illegalActionPenalty = legalAndApplied ? 0 : -0.5;
+    const ageUpDelayPenalty = this.computeAgeUpDelayPenalty(prev, next);
+    let illegalActionPenalty = legalAndApplied ? 0 : -0.5;
+    if (legalAndApplied && executedAction === 'SELL_TURRET_ENGINE') {
+      // Penalize quick buy->sell flips (within 3 seconds on same slot).
+      if (executedSlotIndex !== null) {
+        const lastBuyTime = this.lastBuyTimeBySlot.get(executedSlotIndex);
+        if (lastBuyTime !== undefined) {
+          const sinceBuySec = Math.max(0, decisionTimeSec - lastBuyTime);
+          if (sinceBuySec <= 3.0) {
+            illegalActionPenalty -= 0.5;
+          }
+        }
+      }
+    }
     let terminalOutcome = 0;
     if (done) {
       if (terminalCause === 'player_win') terminalOutcome = 40.0;
@@ -468,10 +555,26 @@ class BridgeRuntime {
       enemy_base_damage: enemyBaseDamage,
       own_base_damage: ownBaseDamage,
       safe_age_up_bonus: safeAgeUpBonus,
+      age_up_delay_penalty: ageUpDelayPenalty,
       lane_control_delta: laneControlDelta,
       illegal_action_penalty: illegalActionPenalty,
       terminal_outcome: terminalOutcome,
     };
+  }
+
+  private computeAgeUpDelayPenalty(prev: GameStateSnapshot, next: GameStateSnapshot): number {
+    if (next.enemyAge >= 6) return 0;
+    const elapsedSinceAgeUp = Math.max(0, next.gameTime - this.enemyLastAgeUpTimeSec);
+    const graceSeconds = next.enemyAge * 180;
+    if (elapsedSinceAgeUp <= graceSeconds) return 0;
+    const rampSeconds = 180;
+    const overdue = elapsedSinceAgeUp - graceSeconds;
+    const ramp = clamp(overdue / rampSeconds, 0, 1);
+    const requiredGold = Math.max(1, next.enemyAgeCost);
+    const currentGold = Math.max(1, next.enemyGold);
+    const ratio = requiredGold / currentGold;
+    const deltaSeconds = Math.max(0, next.gameTime - prev.gameTime);
+    return -(ratio * ramp * deltaSeconds);
   }
 
   private computeOneTimeBaseMilestones(
