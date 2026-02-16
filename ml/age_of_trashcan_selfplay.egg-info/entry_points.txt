@@ -1,3 +1,0 @@
-[console_scripts]
-selfplay-doctor = selfplay.doctor:main
-train-selfplay = train_selfplay:main
