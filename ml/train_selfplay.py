@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import argparse
 
-from selfplay.config import OvernightConfig
-from selfplay.trainer import SelfPlayTrainer
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Age of Trashcan SMART_ML self-play policy")
@@ -18,6 +15,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    try:
+        from selfplay.config import OvernightConfig
+        from selfplay.trainer import SelfPlayTrainer
+    except ModuleNotFoundError as exc:
+        missing_name = getattr(exc, "name", "unknown")
+        raise SystemExit(
+            f"Missing dependency: {missing_name}. Install dependencies with "
+            f"`python -m pip install -e .` from the ml directory."
+        ) from exc
+
     cfg = OvernightConfig()
     cfg.runtime.total_steps = args.total_steps
     cfg.runtime.num_envs = args.num_envs

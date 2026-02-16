@@ -1,0 +1,28 @@
+set shell := ["sh", "-eu", "-o", "pipefail", "-c"]
+python_cmd := `if command -v python >/dev/null 2>&1; then printf 'python'; elif command -v python3 >/dev/null 2>&1; then printf 'python3'; elif command -v py >/dev/null 2>&1; then printf 'py -3'; elif [ -x /c/Windows/py.exe ]; then printf '/c/Windows/py.exe -3'; elif [ -x '/c/Program Files/Python311/python.exe' ]; then printf '/c/Program\\ Files/Python311/python.exe'; else printf ''; fi`
+
+default:
+  @just --list
+
+setup:
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m pip install --upgrade pip
+  {{python_cmd}} -m pip install -e .
+  selfplay-doctor --expect-cuda --min-vram-gb 7.0
+
+doctor:
+  selfplay-doctor --expect-cuda --min-vram-gb 7.0
+
+train-smoke:
+  selfplay-doctor --expect-cuda --min-vram-gb 7.0
+  train-selfplay --total-steps 100000 --num-envs 4 --rollout-horizon 128 --device cuda --save-dir checkpoints/smoke
+
+train-overnight:
+  save_dir="checkpoints/overnight_$(date +%Y%m%d_%H%M%S)"; \
+  echo "[train] Checkpoints: ${save_dir}"; \
+  selfplay-doctor --expect-cuda --min-vram-gb 7.0; \
+  train-selfplay --total-steps 10000000 --num-envs 8 --rollout-horizon 256 --device cuda --save-dir "${save_dir}"
+
+train TOTAL_STEPS="10000000" NUM_ENVS="8" ROLLOUT_HORIZON="256" DEVICE="cuda" SAVE_DIR="checkpoints/custom":
+  selfplay-doctor --expect-cuda --min-vram-gb 7.0
+  train-selfplay --total-steps {{TOTAL_STEPS}} --num-envs {{NUM_ENVS}} --rollout-horizon {{ROLLOUT_HORIZON}} --device {{DEVICE}} --save-dir {{SAVE_DIR}}

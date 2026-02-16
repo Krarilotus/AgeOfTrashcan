@@ -5,13 +5,14 @@ description = "PPO self-play trainer for Age of Trashcan SMART_ML policy path"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "numpy>=1.26.0",
-  "torch>=2.3.0",
-  "typing-extensions>=4.10.0"
+  "numpy>=1.26,<3",
+  "torch>=2.3,<2.8",
+  "typing-extensions>=4.10,<5"
 ]
 
 [project.scripts]
 train-selfplay = "train_selfplay:main"
+selfplay-doctor = "selfplay.doctor:main"
 
 [tool.setuptools]
 package-dir = {"" = "."}

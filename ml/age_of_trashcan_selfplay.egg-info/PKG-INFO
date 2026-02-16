@@ -1,3 +1,13 @@
+Metadata-Version: 2.4
+Name: age-of-trashcan-selfplay
+Version: 0.1.0
+Summary: PPO self-play trainer for Age of Trashcan SMART_ML policy path
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy<3,>=1.26
+Requires-Dist: torch<2.8,>=2.3
+Requires-Dist: typing-extensions<5,>=4.10
+
 # Age of Trashcan ML Self-Play Trainer
 
 This package contains an overnight PPO training stack for the `SMART_ML` policy path.

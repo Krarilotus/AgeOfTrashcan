@@ -215,6 +215,12 @@ interface PairContext {
   swarmPair: boolean;
 }
 
+interface ComboManaPressure {
+  requiredManaLevel: number;
+  immediateManaCost: number;
+  remainingManaCost: number;
+}
+
 const AGE_FORMATION_TEMPLATES: Record<number, CompositionTarget> = {
   1: { frontline: 0.58, ranged: 0.37, support: 0.0, siege: 0.05 },
   2: { frontline: 0.52, ranged: 0.38, support: 0.0, siege: 0.1 },
@@ -250,6 +256,9 @@ const COMBO_LIBRARY: Record<number, ComboTemplate[]> = {
     { id: 'a6_nanoswarm_cover', age: 6, units: ['robot_soldier', 'mech_walker', 'nanoswarm', 'nanoswarm', 'dark_cultist'], tags: ['anti_swarm', 'frontline_screen', 'mana_enabled'], requiredManaLevel: 8 },
   ],
 };
+const COMBO_BY_ID = new Map<string, ComboTemplate>(
+  Object.values(COMBO_LIBRARY).flat().map((combo) => [combo.id, combo])
+);
 
 export class SmartPlannerAI implements IAIBehavior {
   private name = 'SmartPlannerAI';
@@ -863,7 +872,10 @@ export class SmartPlannerAI implements IAIBehavior {
       (state.enemyAge < 6 ? 26 : 0) +
       (state.enemyAge < state.playerAge ? 24 : 0) +
       (canAge ? 19 : 0) +
+      (state.enemyAge >= 3 && state.enemyAge < 6 ? 8 : 0) +
+      Math.max(0, state.gameTime - 120) * (state.enemyAge < 6 ? 0.06 : 0) +
       Math.max(0, ctx.manaEdge) * 1.2 +
+      Math.max(0, -ctx.manaEdge) * 1.4 +
       Math.max(0, ctx.techDebt) * 26 +
       ctx.stallPressure * 12 +
       (ctx.queueDelta < 0 ? 6 : 0) +
@@ -1032,17 +1044,24 @@ export class SmartPlannerAI implements IAIBehavior {
       }
 
       if (method === 'age_spike' || method === 'age_transition') {
+        const baseRiskLimit = method === 'age_spike' ? 0.64 : 0.72;
+        const pressureLimit = method === 'age_spike' ? 3 : 4;
+        const queueLimit = method === 'age_spike' ? 3 : 5;
+        const defensiveParity = state.enemyTurretDps >= state.playerTurretDps * 0.8;
+        const safeEnough =
+          ctx.baseRisk <= baseRiskLimit ||
+          (ctx.baseRisk <= 0.78 && defensiveParity && ctx.immediatePressure <= pressureLimit);
         if (
           state.enemyAge < 6 &&
           state.enemyGold >= state.enemyAgeCost &&
-          ctx.baseRisk <= (method === 'age_spike' ? 0.56 : 0.62) &&
-          ctx.immediatePressure <= 2 &&
-          state.enemyQueueSize <= 2
+          safeEnough &&
+          ctx.immediatePressure <= pressureLimit &&
+          state.enemyQueueSize <= queueLimit
         ) {
           candidates.push({
             goal: task.goal,
             stage: `HTN:${method}`,
-            utility: (method === 'age_spike' ? 74 : 82) + (ctx.ageLead < 0 ? 8 : 0),
+            utility: (method === 'age_spike' ? 80 : 90) + (ctx.ageLead < 0 ? 10 : 0) + (state.enemyAge >= 3 ? 6 : 0),
             risk: 10,
             detail: `Advance to Age ${state.enemyAge + 1}`,
             decision: { action: 'AGE_UP', reasoning: `HTN ${method}: age power transition` },
@@ -1200,16 +1219,19 @@ export class SmartPlannerAI implements IAIBehavior {
     if (
       state.enemyAge < 6 &&
       state.enemyGold >= state.enemyAgeCost &&
-      ctx.baseRisk <= 0.56 &&
-      ctx.immediatePressure <= 2 &&
-      ctx.powerAdvantage >= -0.2 &&
-      state.enemyQueueSize <= 2
+      (
+        ctx.baseRisk <= 0.64 ||
+        (ctx.baseRisk <= 0.76 && state.enemyTurretDps >= state.playerTurretDps * 0.8)
+      ) &&
+      ctx.immediatePressure <= 3 &&
+      ctx.powerAdvantage >= -0.3 &&
+      state.enemyQueueSize <= 3
     ) {
       const turretLock = this.isTurretLockScenario(state, ctx);
       candidates.push({
         goal: 'PRESS',
         stage: 'Age Spike',
-        utility: 74 + ctx.offensiveWindow * 18 + (turretLock ? 14 : 0),
+        utility: 84 + ctx.offensiveWindow * 16 + (turretLock ? 14 : 0) + (state.enemyAge >= 3 ? 6 : 0),
         risk: 11,
         detail: `Advance to Age ${state.enemyAge + 1} for stronger pressure package`,
         decision: {
@@ -1229,14 +1251,17 @@ export class SmartPlannerAI implements IAIBehavior {
     if (
       state.enemyAge < 6 &&
       state.enemyGold >= state.enemyAgeCost &&
-      ctx.baseRisk <= 0.62 &&
-      ctx.immediatePressure <= 2
+      (
+        ctx.baseRisk <= 0.72 ||
+        (ctx.baseRisk <= 0.8 && state.enemyTurretDps >= state.playerTurretDps * 0.9)
+      ) &&
+      ctx.immediatePressure <= 4
     ) {
       const turretLock = this.isTurretLockScenario(state, ctx);
       candidates.push({
         goal: 'TECH',
         stage: 'Age Transition',
-        utility: 82 + (ctx.ageLead < 0 ? 14 : 0) + (turretLock ? 12 : 0),
+        utility: 94 + (ctx.ageLead < 0 ? 16 : 0) + (turretLock ? 12 : 0) + (state.enemyAge >= 3 ? 10 : 0),
         risk: 10,
         detail: `Age up now while lane pressure is controlled`,
         decision: {
@@ -1836,6 +1861,7 @@ export class SmartPlannerAI implements IAIBehavior {
     const ageProgress = state.enemyAge < 6 ? state.enemyGold / Math.max(1, state.enemyAgeCost) : 1;
     const nearAgeWindow = state.enemyAge < 6 && ageProgress >= 0.86;
     const canAgeNow = state.enemyAge < 6 && state.enemyGold >= state.enemyAgeCost;
+    const extendedTechClimb = state.enemyAge >= 3 && state.enemyAge < 6;
 
     if (underPressure && !nearAgeWindow) {
       const releaseFloor = highThreat || ctx.baseRisk >= 0.66 ? 0.78 : 0.55;
@@ -1844,6 +1870,13 @@ export class SmartPlannerAI implements IAIBehavior {
         reason = highThreat
           ? 'Threat pressure: release reserve for immediate actions'
           : 'Pressure detected: release reserve to avoid deadlock';
+      }
+    }
+    if (extendedTechClimb && !underPressure && !canAgeNow) {
+      const preserveCap = ageProgress >= 0.68 ? 0.14 : ageProgress >= 0.5 ? 0.2 : 0.28;
+      if (digRatio > preserveCap) {
+        digRatio = preserveCap;
+        reason = 'Tech climb reserve discipline after Age 3';
       }
     }
 
@@ -1902,16 +1935,18 @@ export class SmartPlannerAI implements IAIBehavior {
 
   private createForcedAgeCandidate(state: GameStateSnapshot, ctx: PlannerContext): Candidate | null {
     if (state.enemyAge >= 6 || state.enemyGold < state.enemyAgeCost) return null;
-    if (state.enemyQueueSize > 1) return null;
 
     const turretLock = this.isTurretLockScenario(state, ctx);
-    const ecoStall = state.enemyGold >= state.enemyAgeCost * 1.12 && ctx.baseRisk < 0.7;
-    const noImmediateFight = ctx.enemyArmy.unitCount <= 1 && ctx.immediatePressure <= 1;
+    const ecoStall = state.enemyGold >= state.enemyAgeCost * 1.05 && ctx.baseRisk < 0.74;
+    const noImmediateFight = ctx.enemyArmy.unitCount <= 2 && ctx.immediatePressure <= 2;
     const behindTech = ctx.ageLead < 0 && ctx.baseRisk < 0.78;
+    const plateau = state.enemyAge >= 3 && ctx.stallPressure >= 0.52 && ctx.baseRisk < 0.76;
+    const safeByDefense = ctx.baseRisk < 0.82 && state.enemyTurretDps >= state.playerTurretDps * 0.9;
 
-    if (!turretLock && !ecoStall && !noImmediateFight && !behindTech) return null;
+    if (!turretLock && !ecoStall && !noImmediateFight && !behindTech && !plateau) return null;
+    if (!(ctx.baseRisk < 0.76 || safeByDefense)) return null;
 
-    const utility = 88 + (turretLock ? 14 : 0) + (behindTech ? 8 : 0);
+    const utility = 96 + (turretLock ? 14 : 0) + (behindTech ? 10 : 0) + (plateau ? 12 : 0) - Math.max(0, state.enemyQueueSize - 3) * 2;
     return {
       goal: 'TECH',
       stage: 'Forced Age Pivot',
@@ -1972,7 +2007,7 @@ export class SmartPlannerAI implements IAIBehavior {
     if (state.enemyAge <= 1) return null;
     if (ctx.baseRisk >= 0.66) return null;
 
-    const desiredLevel = state.enemyAge >= 6
+    const baseDesiredLevel = state.enemyAge >= 6
       ? (state.gameTime >= 150 ? 16 : 12)
       : state.enemyAge === 5
         ? 9
@@ -1981,32 +2016,80 @@ export class SmartPlannerAI implements IAIBehavior {
           : state.enemyAge === 3
             ? 3
             : 1;
+    const comboMana = this.estimateComboManaPressure(state);
+    let desiredLevel = Math.max(baseDesiredLevel, comboMana.requiredManaLevel);
+    if (ctx.stallPressure > 0.62 && state.enemyAge >= 3) {
+      desiredLevel = Math.max(desiredLevel, baseDesiredLevel + 1);
+    }
+    if (ctx.manaEdge < -6 && state.enemyAge >= 3) {
+      desiredLevel = Math.max(desiredLevel, baseDesiredLevel + 1);
+    }
 
-    if (state.enemyManaLevel >= desiredLevel) return null;
+    if (state.enemyManaLevel >= desiredLevel && comboMana.immediateManaCost <= state.enemyMana * 0.65) return null;
 
     const cost = getManaCost(state.enemyManaLevel);
     if (cost > spendableGold) return null;
 
-    const manaDemand =
+    const manaDemandBaseline =
       ctx.ownArmy.supportShare * 180 +
       ctx.ownArmy.siegeShare * 130 +
       ctx.ownArmy.unitCount * 5 +
       (ctx.enemyArmy.rangedMass ? 25 : 0);
+    const manaDemand = manaDemandBaseline + comboMana.remainingManaCost * 1.1 + comboMana.immediateManaCost * 0.8;
+    const projectedMana = state.enemyMana + state.enemyManaIncome * 12;
+    const manaShortfall = Math.max(0, manaDemand - projectedMana);
+    if (projectedMana > manaDemand * 1.65 && state.enemyManaLevel >= desiredLevel && state.enemyManaLevel >= 5) return null;
 
-    const projectedMana = state.enemyMana + state.enemyManaIncome * 8;
-    if (projectedMana > manaDemand * 1.5 && state.enemyManaLevel >= 4) return null;
-
-    const utility = 50 + this.clamp(manaDemand / 120, 0, 28) + (ctx.offensiveWindow > 0.6 ? 6 : 0);
+    const levelGap = Math.max(0, desiredLevel - state.enemyManaLevel);
+    const utility =
+      52 +
+      this.clamp(manaDemand / 120, 0, 24) +
+      this.clamp(manaShortfall / 35, 0, 34) +
+      this.clamp(comboMana.immediateManaCost / 25, 0, 16) +
+      this.clamp(comboMana.remainingManaCost / 35, 0, 18) +
+      levelGap * 6 +
+      (ctx.manaEdge < -6 ? 8 : 0) +
+      (ctx.offensiveWindow > 0.6 ? 6 : 0);
     const risk = 6 + this.clamp(cost / Math.max(1, spendableGold), 0, 14);
 
     return {
       decision: {
         action: 'UPGRADE_MANA',
-        reasoning: `Mana upgrade to sustain skills/aoe throughput (${state.enemyManaLevel} -> ${state.enemyManaLevel + 1})`,
+        reasoning: `Mana upgrade to sustain planned units/skills (${state.enemyManaLevel} -> ${state.enemyManaLevel + 1})`,
       },
       utility,
       risk,
-      detail: `Mana level ${state.enemyManaLevel}/${desiredLevel}, demand=${manaDemand.toFixed(0)}, cost=${cost}`,
+      detail: `Mana level ${state.enemyManaLevel}/${desiredLevel}, combo=${comboMana.immediateManaCost.toFixed(0)}/${comboMana.remainingManaCost.toFixed(0)}, shortfall=${manaShortfall.toFixed(0)}, cost=${cost}`,
+    };
+  }
+
+  private estimateComboManaPressure(state: GameStateSnapshot): ComboManaPressure {
+    if (!this.activeComboPlan) {
+      return { requiredManaLevel: 0, immediateManaCost: 0, remainingManaCost: 0 };
+    }
+
+    const template = COMBO_BY_ID.get(this.activeComboPlan.id);
+    const requiredManaLevel = template?.requiredManaLevel ?? 0;
+    const remainingUnits = this.activeComboPlan.units.slice(this.activeComboPlan.index);
+    if (remainingUnits.length === 0) {
+      return { requiredManaLevel, immediateManaCost: 0, remainingManaCost: 0 };
+    }
+
+    let immediateManaCost = 0;
+    let remainingManaCost = 0;
+    for (let i = 0; i < remainingUnits.length; i += 1) {
+      const unitId = remainingUnits[i];
+      const manaCost = UNIT_DEFS[unitId]?.manaCost ?? 0;
+      remainingManaCost += manaCost;
+      if (i < 3) {
+        immediateManaCost += manaCost;
+      }
+    }
+
+    return {
+      requiredManaLevel,
+      immediateManaCost,
+      remainingManaCost,
     };
   }
 

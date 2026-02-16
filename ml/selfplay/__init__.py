@@ -1,5 +1,4 @@
 from .config import OvernightConfig, PPOConfig, RuntimeConfig
-from .trainer import SelfPlayTrainer
 
 __all__ = [
     "OvernightConfig",
@@ -7,3 +6,11 @@ __all__ = [
     "RuntimeConfig",
     "SelfPlayTrainer",
 ]
+
+
+def __getattr__(name: str):
+    if name == "SelfPlayTrainer":
+        from .trainer import SelfPlayTrainer as _SelfPlayTrainer
+
+        return _SelfPlayTrainer
+    raise AttributeError(f"module 'selfplay' has no attribute {name!r}")

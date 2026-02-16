@@ -219,10 +219,10 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
     protectionMultiplier: 0.99,
     targeting: 'healthiest',
     attackType: 'projectile',
-    fireIntervalSec: 2.5,
+    fireIntervalSec: 2.1,
     projectile: {
       speed: 32,
-      damage: 16,
+      damage: 15,
       lifeMs: 2600,
       curvature: -14,
       radiusPx: 7,
@@ -230,15 +230,15 @@ export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
       glowColor: 'rgba(251,146,60,0.9)',
       trailAlpha: 0.45,
       splitOnImpact: {
-        childCount: 3,
+        childCount: 5,
         childDamage: 5,
         childSpeed: 24,
         childLifeMs: 900,
-        spreadRadius: 3,
+        spreadRadius: 4,
       },
     },
     spritePath: '/turret_engines/flame_catapult.svg',
-    description: 'Heavy flaming payload that bursts into six burning shards on impact.',
+    description: 'Heavy flaming payload that bursts into five burning shards on impact.',
   },
 
   sunspike_ballista: {

@@ -45,6 +45,7 @@ import type { GameStateSnapshot, AIDecision, IAIBehavior, RecruitUnitParams } fr
 
 const FIXED_TIMESTEP = 1000 / 60; // ~16.67ms for 60 FPS
 const baseHalfSize = 30; // Original half size
+type Owner = 'PLAYER' | 'ENEMY';
 
 // Re-export UNIT_DEFS for backward compatibility
 export { UNIT_DEFS };
@@ -53,6 +54,7 @@ export { UNIT_DEFS };
 
 export interface GameConfig {
   difficulty: GameDifficulty;
+  mode?: 'PLAY' | 'WATCH';
   startingGold: number;
   startingMana: number;
   goldIncomeBase: number;
@@ -62,6 +64,57 @@ export interface GameConfig {
     player: number;
     enemy: number;
   };
+  sideControl?: Partial<Record<Owner, SideControlConfig>>;
+}
+
+export interface SideControlConfig {
+  control: 'HUMAN' | 'AI';
+  difficulty?: GameDifficulty;
+}
+
+export interface SideActionSnapshot {
+  tick: number;
+  gameTime: number;
+  owner: Owner;
+  action: string;
+  phase: 'DECISION' | 'EXECUTED';
+  success?: boolean;
+  details?: string;
+  parameters?: Record<string, any>;
+  gold: number;
+  mana: number;
+  age: number;
+  baseHealth: number;
+  opponentBaseHealth: number;
+  ownUnitCount: number;
+  opponentUnitCount: number;
+}
+
+export interface SideTelemetry {
+  owner: Owner;
+  control: 'HUMAN' | 'AI';
+  difficulty?: GameDifficulty;
+  ageUpTimes: number[];
+  unitBuildCounts: Record<string, number>;
+  manaUpgradeCount: number;
+  turretSlotUpgradeCount: number;
+  turretEngineBuys: Record<string, number>;
+  turretEngineSells: Record<string, number>;
+  actionTimeline: SideActionSnapshot[];
+}
+
+export interface MatchTelemetry {
+  bySide: Record<Owner, SideTelemetry>;
+  baseHealthTimeline: Array<{
+    tick: number;
+    gameTime: number;
+    playerBaseHealth: number;
+    enemyBaseHealth: number;
+    playerGold: number;
+    enemyGold: number;
+    playerMana: number;
+    enemyMana: number;
+  }>;
 }
 
 // DIFFICULTY_MODIFIERS removed - using DIFFICULTY_CONFIG from config/gameBalance.ts
@@ -211,7 +264,11 @@ export class GameEngine {
   private coreLoop: CoreLoop | null = null;
   private prng: PRNG;
   private lastUpdateTime = 0;
-  private aiAccumulatorMs = 0;
+  private aiAccumulatorsMs: Record<Owner, number> = { PLAYER: 0, ENEMY: 0 };
+  private sideControl: Record<Owner, SideControlConfig>;
+  private aiControllers: Partial<Record<Owner, AIController>> = {};
+  private telemetry: MatchTelemetry;
+  private lastTelemetrySampleTimeSec = 0;
   private isRunning = false;
   private isPaused = false;
   private canvas: HTMLCanvasElement | null = null;
@@ -224,14 +281,32 @@ export class GameEngine {
   private economySystem: EconomySystem;
   private skillSystem: SkillSystem;
   private combatUtils: CombatUtils = new CombatUtils();
-  private aiController: AIController; // NEW: Modular AI system
   
   // Track one-time bonuses for Cyber Assassin
   private enemyCyberAssassin6kBonusUsed = false;
   private enemyCyberAssassin12kBonusUsed = false;
 
-  public getAIController(): AIController {
-    return this.aiController;
+  public getAIController(owner: Owner = 'ENEMY'): AIController | null {
+    return this.aiControllers[owner] ?? null;
+  }
+
+  public getAIControllersDebug(): Partial<Record<Owner, ReturnType<AIController['getDebugInfo']>>> {
+    const debug: Partial<Record<Owner, ReturnType<AIController['getDebugInfo']>>> = {};
+    for (const owner of ['PLAYER', 'ENEMY'] as const) {
+      const controller = this.aiControllers[owner];
+      if (controller) {
+        debug[owner] = controller.getDebugInfo();
+      }
+    }
+    return debug;
+  }
+
+  public getTelemetrySnapshot(): MatchTelemetry {
+    return createSnapshot(this.telemetry) as MatchTelemetry;
+  }
+
+  public getSideControlSnapshot(): Record<Owner, SideControlConfig> {
+    return createSnapshot(this.sideControl) as Record<Owner, SideControlConfig>;
   }
 
   constructor(
@@ -239,6 +314,8 @@ export class GameEngine {
     private seed: number,
     private callbacks: GameCallbacks
   ) {
+    this.sideControl = this.buildSideControl(config);
+    this.telemetry = this.createInitialTelemetry();
     this.state = this.createInitialState();
     this.syncBasePositions();
     this.prng = new PRNG(seed);
@@ -250,8 +327,7 @@ export class GameEngine {
     this.vfxSystem = new VfxSystem();
     this.economySystem = new EconomySystem();
     this.skillSystem = new SkillSystem();
-
-    this.aiController = this.createAIController(config.difficulty);
+    this.initializeAIControllers();
   }
 
   private createBehaviorForDifficulty(difficulty: GameDifficulty): IAIBehavior {
@@ -270,6 +346,168 @@ export class GameEngine {
       'BALANCED',
       this.createBehaviorForDifficulty(difficulty)
     );
+  }
+
+  private buildSideControl(config: GameConfig): Record<Owner, SideControlConfig> {
+    const defaultControl: Record<Owner, SideControlConfig> = {
+      PLAYER: { control: 'HUMAN' },
+      ENEMY: { control: 'AI', difficulty: config.difficulty },
+    };
+    const mergedPlayer = {
+      ...defaultControl.PLAYER,
+      ...(config.sideControl?.PLAYER ?? {}),
+    };
+    const mergedEnemy = {
+      ...defaultControl.ENEMY,
+      ...(config.sideControl?.ENEMY ?? {}),
+    };
+    if (mergedPlayer.control === 'AI' && !mergedPlayer.difficulty) {
+      mergedPlayer.difficulty = config.difficulty;
+    }
+    if (mergedEnemy.control === 'AI' && !mergedEnemy.difficulty) {
+      mergedEnemy.difficulty = config.difficulty;
+    }
+    return {
+      PLAYER: mergedPlayer,
+      ENEMY: mergedEnemy,
+    };
+  }
+
+  private createInitialTelemetry(): MatchTelemetry {
+    return {
+      bySide: {
+        PLAYER: {
+          owner: 'PLAYER',
+          control: this.sideControl.PLAYER.control,
+          difficulty: this.sideControl.PLAYER.difficulty,
+          ageUpTimes: [],
+          unitBuildCounts: {},
+          manaUpgradeCount: 0,
+          turretSlotUpgradeCount: 0,
+          turretEngineBuys: {},
+          turretEngineSells: {},
+          actionTimeline: [],
+        },
+        ENEMY: {
+          owner: 'ENEMY',
+          control: this.sideControl.ENEMY.control,
+          difficulty: this.sideControl.ENEMY.difficulty,
+          ageUpTimes: [],
+          unitBuildCounts: {},
+          manaUpgradeCount: 0,
+          turretSlotUpgradeCount: 0,
+          turretEngineBuys: {},
+          turretEngineSells: {},
+          actionTimeline: [],
+        },
+      },
+      baseHealthTimeline: [],
+    };
+  }
+
+  private initializeAIControllers(): void {
+    this.aiControllers = {};
+    this.aiAccumulatorsMs = { PLAYER: 0, ENEMY: 0 };
+    for (const owner of ['PLAYER', 'ENEMY'] as const) {
+      const side = this.sideControl[owner];
+      if (side.control === 'AI') {
+        const difficulty = side.difficulty ?? this.config.difficulty;
+        this.aiControllers[owner] = this.createAIController(difficulty);
+      }
+    }
+  }
+
+  private getControlMode(owner: Owner): 'HUMAN' | 'AI' {
+    return this.sideControl[owner].control;
+  }
+
+  private isAISide(owner: Owner): boolean {
+    return this.getControlMode(owner) === 'AI';
+  }
+
+  private getDifficultyForOwner(owner: Owner): GameDifficulty | null {
+    if (!this.isAISide(owner)) return null;
+    return this.sideControl[owner].difficulty ?? this.config.difficulty;
+  }
+
+  private getDifficultyOrDefault(owner: Owner, fallback: GameDifficulty = 'MEDIUM'): GameDifficulty {
+    return this.getDifficultyForOwner(owner) ?? fallback;
+  }
+
+  private getOpponentOwner(owner: Owner): Owner {
+    return owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
+  }
+
+  private getBaseHealthForDifficulty(difficulty: GameDifficulty | null): number {
+    if (!difficulty) return BASE_CONFIG.baseHealth;
+    if (difficulty === 'EASY') return 300;
+    if (difficulty === 'MEDIUM' || difficulty === 'SMART' || difficulty === 'SMART_ML') return 500;
+    if (difficulty === 'HARD') return 700;
+    if (difficulty === 'CHEATER') return 1000;
+    return BASE_CONFIG.baseHealth;
+  }
+
+  private getInitialGoldIncome(owner: Owner): number {
+    const difficulty = this.getDifficultyForOwner(owner);
+    if (!difficulty) return this.config.goldIncomeBase;
+    return this.config.goldIncomeBase * DIFFICULTY_CONFIG[difficulty].goldMultiplier;
+  }
+
+  private recordActionSnapshot(
+    owner: Owner,
+    action: string,
+    phase: 'DECISION' | 'EXECUTED',
+    success: boolean,
+    parameters?: Record<string, any>,
+    details?: string
+  ): void {
+    const econ = this.getEconomyForOwner(owner);
+    const prog = this.getProgressionForOwner(owner);
+    const base = this.getBaseForOwner(owner);
+    const opponent = this.getOpponentOwner(owner);
+    const opponentBase = this.getBaseForOwner(opponent);
+    const ownUnitCount = Array.from(this.state.entities.values()).filter((entity) => entity.owner === owner).length;
+    const opponentUnitCount = Array.from(this.state.entities.values()).filter((entity) => entity.owner === opponent).length;
+    const timeline = this.telemetry.bySide[owner].actionTimeline;
+    timeline.push({
+      tick: this.state.tick,
+      gameTime: (this.state.tick * FIXED_TIMESTEP) / 1000,
+      owner,
+      action,
+      phase,
+      success,
+      details,
+      parameters,
+      gold: econ.gold,
+      mana: econ.mana,
+      age: prog.age,
+      baseHealth: base.health,
+      opponentBaseHealth: opponentBase.health,
+      ownUnitCount,
+      opponentUnitCount,
+    });
+    if (timeline.length > 2500) {
+      timeline.shift();
+    }
+  }
+
+  private recordBaseHealthTimelineIfNeeded(): void {
+    const gameTime = (this.state.tick * FIXED_TIMESTEP) / 1000;
+    if (gameTime - this.lastTelemetrySampleTimeSec < 2) return;
+    this.lastTelemetrySampleTimeSec = gameTime;
+    this.telemetry.baseHealthTimeline.push({
+      tick: this.state.tick,
+      gameTime,
+      playerBaseHealth: this.state.playerBase.health,
+      enemyBaseHealth: this.state.enemyBase.health,
+      playerGold: this.state.economy.player.gold,
+      enemyGold: this.state.economy.enemy.gold,
+      playerMana: this.state.economy.player.mana,
+      enemyMana: this.state.economy.enemy.mana,
+    });
+    if (this.telemetry.baseHealthTimeline.length > 3600) {
+      this.telemetry.baseHealthTimeline.shift();
+    }
   }
 
   private createDefaultTurretSlots(): MountedTurretSlotState[] {
@@ -355,11 +593,8 @@ export class GameEngine {
   }
 
   private createInitialState(): GameState {
-    const playerBase = this.createBaseState(BASE_CONFIG.baseHealth, 0);
-    const enemyBaseHealth = this.config.difficulty === 'EASY' ? 300 :
-      this.config.difficulty === 'MEDIUM' ? 500 :
-      this.config.difficulty === 'HARD' ? 700 :
-      this.config.difficulty === 'CHEATER' ? 1000 : 500;
+    const playerBase = this.createBaseState(this.getBaseHealthForDifficulty(this.getDifficultyForOwner('PLAYER')), 0);
+    const enemyBaseHealth = this.getBaseHealthForDifficulty(this.getDifficultyForOwner('ENEMY'));
     const enemyBase = this.createBaseState(enemyBaseHealth, 50);
     return {
       tick: 0,
@@ -372,13 +607,13 @@ export class GameEngine {
         player: {
           gold: this.config.startingGold,
           mana: this.config.startingMana,
-          goldIncomePerSec: this.config.goldIncomeBase,
+          goldIncomePerSec: this.getInitialGoldIncome('PLAYER'),
           manaIncomePerSec: 0, // Start with 0 mana generation - must upgrade
         },
         enemy: {
           gold: this.config.startingGold,
           mana: this.config.startingMana,
-          goldIncomePerSec: this.config.goldIncomeBase * DIFFICULTY_CONFIG[this.config.difficulty].goldMultiplier,
+          goldIncomePerSec: this.getInitialGoldIncome('ENEMY'),
           manaIncomePerSec: 0, // AI also starts with 0
         },
       },
@@ -573,9 +808,9 @@ export class GameEngine {
     this.updateEntities(deltaSeconds);
 
     // Throttle enemy AI: run at ~2Hz (every 500ms)
-    this.aiAccumulatorMs += deltaTime;
-    if (this.aiAccumulatorMs >= 500) {
-      this.aiAccumulatorMs -= 500;
+    this.aiAccumulatorsMs.ENEMY += deltaTime;
+    if (this.aiAccumulatorsMs.ENEMY >= 500) {
+      this.aiAccumulatorsMs.ENEMY -= 500;
       this.updateEnemyAI();
     }
 
@@ -817,7 +1052,9 @@ export class GameEngine {
   }
 
   // Execute AI decision from AIController
-  private executeAIDecision(decision: AIDecision): void {
+  private executeAIDecision(decision: AIDecision, owner: Owner = 'ENEMY'): void {
+    const econ = this.getEconomyForOwner(owner);
+    const base = this.getBaseForOwner(owner);
     switch (decision.action) {
       case 'RECRUIT_UNIT':
         // Extract unit type from parameters
@@ -825,27 +1062,27 @@ export class GameEngine {
         if (unitType) {
           const unit = UNIT_DEFS[unitType];
           if (!unit) return;
-          this.queueUnit('ENEMY', unitType);
+          this.queueUnit(owner, unitType);
         }
         break;
         
       case 'AGE_UP':
-        this.upgradeAge('ENEMY');
+        this.upgradeAge(owner);
         break;
         
       case 'UPGRADE_MANA':
-        this.upgradeManaGeneration('ENEMY');
+        this.upgradeManaGeneration(owner);
         break;
         
       case 'UPGRADE_TURRET_SLOTS':
-        this.queueTurretSlotUpgrade('ENEMY');
+        this.queueTurretSlotUpgrade(owner);
         break;
 
       case 'BUY_TURRET_ENGINE': {
         const slotIndex = (decision.parameters as any)?.slotIndex;
         const turretId = (decision.parameters as any)?.turretId;
         if (typeof slotIndex === 'number' && typeof turretId === 'string') {
-          this.queueTurretEngine('ENEMY', slotIndex, turretId);
+          this.queueTurretEngine(owner, slotIndex, turretId);
         }
         break;
       }
@@ -853,7 +1090,7 @@ export class GameEngine {
       case 'SELL_TURRET_ENGINE': {
         const slotIndex = (decision.parameters as any)?.slotIndex;
         if (typeof slotIndex === 'number') {
-          this.sellTurretEngine('ENEMY', slotIndex);
+          this.sellTurretEngine(owner, slotIndex);
         }
         break;
       }
@@ -865,7 +1102,7 @@ export class GameEngine {
             for (let i = 0; i < composition.count; i++) {
               const unit = UNIT_DEFS[composition.unitId];
               if (!unit) continue;
-              this.queueUnit('ENEMY', composition.unitId);
+              this.queueUnit(owner, composition.unitId);
             }
           }
         }
@@ -876,37 +1113,33 @@ export class GameEngine {
         break;
 
       case 'REPAIR_BASE':
-        if (this.state.economy.enemy.mana >= 500) {
-            this.state.economy.enemy.mana -= 500;
-            this.state.enemyBase.health = Math.min(
-                this.state.enemyBase.maxHealth,
-                this.state.enemyBase.health + 200
+        if (econ.mana >= 500) {
+            econ.mana -= 500;
+            base.health = Math.min(
+                base.maxHealth,
+                base.health + 200
             );
             // Visual effect for repair
             this.state.vfx.push({
                 id: this.state.nextVfxId++,
                 type: 'ability_cast', // Reusing cast effect
-                x: this.state.enemyBase.x,
+                x: base.x,
                 y: 0,
                 age: 0,
                 lifeMs: 1000
             });
-            console.log("AI Repaired Base: -500 Mana, +200 HP");
+            console.log(`${owner} AI repaired base: -500 Mana, +200 HP`);
         }
         break;
     }
   }
 
   private updateEnemyAI(): void {
-    // NEW MODULAR AI SYSTEM
-    // Extract current game state
+    const controller = this.aiControllers.ENEMY;
+    if (!controller) return;
     const gameState = this.extractGameStateForAI();
-    
-    // Get AI decision from controller
-    const decision = this.aiController.makeDecision(gameState, gameState.gameTime);
-    
-    // Execute the decision
-    this.executeAIDecision(decision);
+    const decision = controller.makeDecision(gameState, gameState.gameTime);
+    this.executeAIDecision(decision, 'ENEMY');
   }
 
 
@@ -1370,10 +1603,12 @@ export class GameEngine {
     (snapshot as any).unitCatalog = UNIT_DEFS;
     // telemetry
     (snapshot as any).stats = this.state.stats;
-    // Debug: Expose AI State
-    if (this.aiController) {
-        (snapshot as any).aiState = this.aiController.getState();
+    // Debug: Expose AI State (legacy + per-side)
+    const enemyAI = this.aiControllers.ENEMY;
+    if (enemyAI) {
+      (snapshot as any).aiState = enemyAI.getState();
     }
+    (snapshot as any).aiBySide = this.getAIControllersDebug();
     
     return snapshot;
   }
@@ -1400,12 +1635,17 @@ export class GameEngine {
           entities: entitiesArray, // Serialize as array
         },
         runtime: {
-          aiAccumulatorMs: this.aiAccumulatorMs,
+          aiAccumulatorsMs: this.aiAccumulatorsMs,
+          aiAccumulatorMs: this.aiAccumulatorsMs.ENEMY, // legacy compatibility
           lastUpdateTime: this.lastUpdateTime,
           enemyCyberAssassin6kBonusUsed: this.enemyCyberAssassin6kBonusUsed,
           enemyCyberAssassin12kBonusUsed: this.enemyCyberAssassin12kBonusUsed,
         },
-        aiState: this.aiController.getState(), // Persist AI state (warchest, learning)
+        aiState: this.aiControllers.ENEMY?.getState() ?? null, // legacy enemy AI state
+        aiStateByOwner: {
+          PLAYER: this.aiControllers.PLAYER?.getState() ?? null,
+          ENEMY: this.aiControllers.ENEMY?.getState() ?? null,
+        },
         seed: this.seed,
         config: this.config,
         timestamp: Date.now(),
@@ -1500,7 +1740,10 @@ export class GameEngine {
           label: item?.unitId,
         } as BuildQueueItem;
       });
-      this.aiAccumulatorMs = saveData.runtime?.aiAccumulatorMs ?? 0;
+      this.aiAccumulatorsMs = saveData.runtime?.aiAccumulatorsMs ?? {
+        PLAYER: 0,
+        ENEMY: saveData.runtime?.aiAccumulatorMs ?? 0,
+      };
       this.lastUpdateTime = saveData.runtime?.lastUpdateTime ?? 0;
       this.enemyCyberAssassin6kBonusUsed = saveData.runtime?.enemyCyberAssassin6kBonusUsed ?? false;
       this.enemyCyberAssassin12kBonusUsed = saveData.runtime?.enemyCyberAssassin12kBonusUsed ?? false;
@@ -1508,12 +1751,21 @@ export class GameEngine {
       // Reinitialize PRNG with restored seed
       this.prng = new PRNG(this.seed);
       
-      // Reinitialize AI controller for selected difficulty profile
-      this.aiController = this.createAIController(this.config.difficulty);
+      // Reinitialize AI controllers for selected side-control profiles
+      this.sideControl = this.buildSideControl(this.config);
+      this.telemetry = this.createInitialTelemetry();
+      this.initializeAIControllers();
       
-      // Restore AI state if available
-      if (saveData.aiState) {
-        this.aiController.restoreState(saveData.aiState);
+      // Restore AI state if available (per-side or legacy enemy-only)
+      const aiStateByOwner = saveData.aiStateByOwner ?? {};
+      if (this.aiControllers.PLAYER && aiStateByOwner.PLAYER) {
+        this.aiControllers.PLAYER.restoreState(aiStateByOwner.PLAYER);
+      }
+      if (this.aiControllers.ENEMY) {
+        const enemyState = aiStateByOwner.ENEMY ?? saveData.aiState;
+        if (enemyState) {
+          this.aiControllers.ENEMY.restoreState(enemyState);
+        }
       }
       
       // Ensure base positions are synced to battlefield dimensions
