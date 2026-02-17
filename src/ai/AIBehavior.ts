@@ -30,6 +30,16 @@ export interface GameStateSnapshot {
   enemyMana: number;
   enemyAge: number;
   enemyAgeCost: number;
+  playerAgeManaCost: number;
+  enemyAgeManaCost: number;
+  playerAgeRequirementsMet: boolean;
+  enemyAgeRequirementsMet: boolean;
+  playerAgeRequirementProgress: number;
+  enemyAgeRequirementProgress: number;
+  playerAgePrevAgeUnitRequirementProgress: number;
+  enemyAgePrevAgeUnitRequirementProgress: number;
+  playerAgeTotalUnitRequirementProgress: number;
+  enemyAgeTotalUnitRequirementProgress: number;
   enemyManaLevel: number;
   enemyGoldIncome: number;
   enemyManaIncome: number;
@@ -69,6 +79,10 @@ export interface GameStateSnapshot {
   // Units
   playerUnitCount: number;
   enemyUnitCount: number;
+  playerUnitCap: number;
+  enemyUnitCap: number;
+  playerUnitCapReached: boolean;
+  enemyUnitCapReached: boolean;
   playerUnits: Array<{
     unitId: string;
     health: number;
@@ -124,6 +138,7 @@ export interface GameStateSnapshot {
     queueBlocked: boolean;
     goldShortfall: number;
     manaShortfall: number;
+    capBlocked: boolean;
     scorePower: number;
   }>;
   turretCatalogDiagnostics?: Array<{
@@ -148,6 +163,7 @@ export interface GameStateSnapshot {
     unitBlockedByGold: number;
     unitBlockedByMana: number;
     unitBlockedByQueue: number;
+    unitBlockedByCap: number;
     turretBlockedByAge: number;
     turretBlockedByGold: number;
     turretBlockedByMana: number;

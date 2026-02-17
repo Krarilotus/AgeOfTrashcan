@@ -9,7 +9,7 @@ const FIXED_TIMESTEP = 1000 / 60;
 export class EntitySystem {
   
   public update(state: GameState, deltaSeconds: number, projectileSystem: any): void {
-    const toRemove: number[] = [];
+    const toRemove = new Set<number>();
     const damageStats = state.stats.damageDealt;
 
     // Use a secondary list to avoid iterator invalidation issues if concurrent mods happen (JS is single threaded but logic might vary)
@@ -113,10 +113,7 @@ export class EntitySystem {
         {
           getTowerProtectionMultiplier: (t) => CombatUtils.getTowerProtectionMultiplier(t, state),
           addVfx: (vfx) => {
-            // How to get nextVfxId? We can increment a static counter or use random
-            // Ideally state logic should provide ID gen. 
-            // For now, use Date.now() + random or just assume a large number
-             vfx.id = Date.now() + Math.random() * 1000;
+             vfx.id = state.nextVfxId++;
              state.vfx.push(vfx);
           }
         }
@@ -127,7 +124,7 @@ export class EntitySystem {
 
       // Step 6: Out of bounds check
       if (entity.transform.x < -5 || entity.transform.x > state.battlefield.width + 5) {
-        toRemove.push(id);
+        toRemove.add(id);
       }
     }
 
@@ -137,18 +134,18 @@ export class EntitySystem {
     // Let's add a pass for dead entities.
     for (const [id, entity] of state.entities) {
         if (entity.health.current <= 0) {
-            if (!toRemove.includes(id)) toRemove.push(id);
+            toRemove.add(id);
         }
     }
 
     // Remove entities logic
-    toRemove.forEach((id) => {
+    for (const id of toRemove) {
       const deadEntity = state.entities.get(id);
       if (deadEntity && deadEntity.health.current <= 0) {
           EntitySystem.handleDeathReward(deadEntity, state);
       }
       state.entities.delete(id);
-    });
+    }
   }
 
   private static updateTeleporter(entity: Entity, unitDef: any, state: GameState, deltaSeconds: number) {
@@ -181,7 +178,6 @@ export class EntitySystem {
          const aoeRadius = unitDef.skill?.radius ?? unitDef.skill?.power ?? 1;
          
          // Damage loop
-         const toKill: number[] = [];
          for (const other of state.entities.values()) {
              if (other.owner !== entity.owner) {
                  const dist = Math.abs(other.transform.x - entity.transform.x);

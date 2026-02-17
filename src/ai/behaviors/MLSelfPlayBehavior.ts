@@ -14,12 +14,19 @@ interface MLSelfPlayBehaviorOptions {
   sequenceLength?: number;
   modelVersionOverride?: string;
   selectedCheckpointId?: string;
+  requireCheckpointInference?: boolean;
 }
 
 interface MLDecisionDebugState {
   policyName: string;
   policyEnabled: boolean;
+  policySource: string;
   modelVersion: string;
+  checkpointStrictMode: boolean;
+  checkpointSelected: boolean;
+  checkpointId: string | null;
+  checkpointInferenceActive: boolean;
+  checkpointInactiveReason: string;
   fallbackUsed: boolean;
   lastFallbackReason: string;
   fallbackRate: number;
@@ -40,6 +47,7 @@ export class MLSelfPlayBehavior implements IAIBehavior {
   private policyEnabled: boolean;
   private modelVersionOverride: string | null;
   private selectedCheckpointId: string | null;
+  private requireCheckpointInference: boolean;
   private totalDecisions = 0;
   private fallbackDecisions = 0;
   private policyDecisions = 0;
@@ -51,11 +59,18 @@ export class MLSelfPlayBehavior implements IAIBehavior {
     this.policyEnabled = options.policyEnabled ?? true;
     this.modelVersionOverride = options.modelVersionOverride ?? null;
     this.selectedCheckpointId = options.selectedCheckpointId ?? null;
+    this.requireCheckpointInference = options.requireCheckpointInference ?? false;
     this.sequenceLength = options.sequenceLength ?? 240;
     this.lastDebug = {
       policyName: this.policy.getName(),
       policyEnabled: this.policyEnabled,
+      policySource: 'none',
       modelVersion: 'n/a',
+      checkpointStrictMode: false,
+      checkpointSelected: false,
+      checkpointId: null,
+      checkpointInferenceActive: false,
+      checkpointInactiveReason: '',
       fallbackUsed: false,
       lastFallbackReason: '',
       fallbackRate: 0,
@@ -83,6 +98,8 @@ export class MLSelfPlayBehavior implements IAIBehavior {
     this.history.ingestState(state);
 
     const legalMask = buildLegalActionMask(state);
+    const checkpointSelected = this.hasSelectedCheckpoint();
+    const checkpointStrictMode = this.requireCheckpointInference || checkpointSelected;
     const observation = encodeObservation(state, this.history.getRecentTokens(), legalMask, {
       sequenceLength: this.sequenceLength,
     });
@@ -90,10 +107,18 @@ export class MLSelfPlayBehavior implements IAIBehavior {
     let selectedDecision: AIDecision | null = null;
     let fallbackUsed = false;
     let fallbackReason = '';
+    let policySource = 'none';
     let modelVersion = 'n/a';
     let valueEstimate: number | undefined;
 
-    if (this.policyEnabled) {
+    if (checkpointStrictMode && !checkpointSelected) {
+      fallbackUsed = true;
+      fallbackReason = 'checkpoint not selected';
+      selectedDecision = {
+        action: 'WAIT',
+        reasoning: this.buildStrictCheckpointFailureReason(fallbackReason),
+      };
+    } else if (this.policyEnabled) {
       const policyOutput = this.policy.infer({
         observation,
         rawState: state,
@@ -101,6 +126,7 @@ export class MLSelfPlayBehavior implements IAIBehavior {
         checkpointId: this.selectedCheckpointId ?? undefined,
       });
       if (policyOutput) {
+        policySource = policyOutput.inferenceSource ?? 'unknown';
         modelVersion = policyOutput.modelVersion ?? 'unknown';
         valueEstimate = policyOutput.valueEstimate;
         const decoded = decodePolicyOutput(policyOutput, legalMask);
@@ -112,14 +138,32 @@ export class MLSelfPlayBehavior implements IAIBehavior {
         } else {
           fallbackUsed = true;
           fallbackReason = decoded ? 'policy decision failed legality check' : 'policy decode returned null';
+          if (checkpointStrictMode) {
+            selectedDecision = {
+              action: 'WAIT',
+              reasoning: this.buildStrictCheckpointFailureReason(fallbackReason),
+            };
+          }
         }
       } else {
         fallbackUsed = true;
         fallbackReason = 'policy returned null output';
+        if (checkpointStrictMode) {
+          selectedDecision = {
+            action: 'WAIT',
+            reasoning: this.buildStrictCheckpointFailureReason(fallbackReason),
+          };
+        }
       }
     } else {
       fallbackUsed = true;
       fallbackReason = 'policy disabled by configuration';
+      if (checkpointStrictMode) {
+        selectedDecision = {
+          action: 'WAIT',
+          reasoning: this.buildStrictCheckpointFailureReason(fallbackReason),
+        };
+      }
     }
 
     if (this.modelVersionOverride) {
@@ -127,14 +171,23 @@ export class MLSelfPlayBehavior implements IAIBehavior {
     }
 
     if (!selectedDecision) {
-      selectedDecision = this.fallbackBehavior.decide(state, personality);
-      if (!this.isDecisionLegal(selectedDecision, legalMask)) {
-        selectedDecision = { action: 'WAIT', reasoning: 'Fallback decision illegal under current mask' };
-      } else if (fallbackUsed) {
+      if (checkpointStrictMode) {
+        fallbackUsed = true;
+        if (!fallbackReason) fallbackReason = 'checkpoint inference unavailable';
         selectedDecision = {
-          ...selectedDecision,
-          reasoning: `[ML->RuleFallback] ${selectedDecision.reasoning ?? selectedDecision.action}`,
+          action: 'WAIT',
+          reasoning: this.buildStrictCheckpointFailureReason(fallbackReason),
         };
+      } else {
+        selectedDecision = this.fallbackBehavior.decide(state, personality);
+        if (!this.isDecisionLegal(selectedDecision, legalMask)) {
+          selectedDecision = { action: 'WAIT', reasoning: 'Fallback decision illegal under current mask' };
+        } else if (fallbackUsed) {
+          selectedDecision = {
+            ...selectedDecision,
+            reasoning: `[ML->RuleFallback] ${selectedDecision.reasoning ?? selectedDecision.action}`,
+          };
+        }
       }
     }
 
@@ -144,11 +197,24 @@ export class MLSelfPlayBehavior implements IAIBehavior {
       this.policyDecisions += 1;
     }
 
+    const checkpointInferenceActive =
+      checkpointStrictMode && checkpointSelected && policySource === 'remote_http' && !fallbackUsed;
+    const checkpointInactiveReason =
+      checkpointStrictMode && !checkpointInferenceActive
+        ? fallbackReason || (checkpointSelected ? 'checkpoint inference inactive' : 'checkpoint not selected')
+        : '';
+
     this.history.recordDecision(state, selectedDecision);
     this.lastDebug = {
       policyName: this.policy.getName(),
       policyEnabled: this.policyEnabled,
+      policySource,
       modelVersion,
+      checkpointStrictMode,
+      checkpointSelected,
+      checkpointId: this.selectedCheckpointId,
+      checkpointInferenceActive,
+      checkpointInactiveReason,
       fallbackUsed,
       lastFallbackReason: fallbackReason,
       fallbackRate: this.fallbackDecisions / Math.max(1, this.totalDecisions),
@@ -186,6 +252,7 @@ export class MLSelfPlayBehavior implements IAIBehavior {
       sequenceLength: this.sequenceLength,
       modelVersionOverride: this.modelVersionOverride,
       selectedCheckpointId: this.selectedCheckpointId,
+      requireCheckpointInference: this.requireCheckpointInference,
     };
   }
 
@@ -196,11 +263,15 @@ export class MLSelfPlayBehavior implements IAIBehavior {
     if (typeof params.modelVersionOverride === 'string' && params.modelVersionOverride.trim().length > 0) {
       this.modelVersionOverride = params.modelVersionOverride;
     }
-    if (typeof params.selectedCheckpointId === 'string' && params.selectedCheckpointId.trim().length > 0) {
-      this.selectedCheckpointId = params.selectedCheckpointId;
-      if (!this.modelVersionOverride) {
-        this.modelVersionOverride = params.selectedCheckpointId;
-      }
+    if (typeof params.requireCheckpointInference === 'boolean') {
+      this.requireCheckpointInference = params.requireCheckpointInference;
+    }
+    if (typeof params.selectedCheckpointId === 'string') {
+      const normalized = params.selectedCheckpointId.trim();
+      this.selectedCheckpointId = normalized.length > 0 ? normalized : null;
+    }
+    if (params.selectedCheckpointId === null) {
+      this.selectedCheckpointId = null;
     }
   }
 
@@ -232,5 +303,24 @@ export class MLSelfPlayBehavior implements IAIBehavior {
     }
 
     return true;
+  }
+
+  private hasSelectedCheckpoint(): boolean {
+    return typeof this.selectedCheckpointId === 'string' && this.selectedCheckpointId.trim().length > 0;
+  }
+
+  private buildStrictCheckpointFailureReason(baseReason: string): string {
+    const metadata = this.policy.getMetadata?.() ?? {};
+    const remote = (metadata as Record<string, unknown>).remote as Record<string, unknown> | undefined;
+    const remoteFailure =
+      typeof remote?.lastFailureReason === 'string' && remote.lastFailureReason.trim().length > 0
+        ? remote.lastFailureReason.trim()
+        : '';
+    const checkpointId = this.selectedCheckpointId;
+    const reason = remoteFailure || baseReason || 'unknown inference failure';
+    if (!checkpointId) {
+      return `[ML checkpoint required] checkpoint not selected: ${reason}`;
+    }
+    return `[ML checkpoint required] ${checkpointId} not inferred: ${reason}`;
   }
 }

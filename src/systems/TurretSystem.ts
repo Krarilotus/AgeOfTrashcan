@@ -367,48 +367,49 @@ export class TurretSystem {
     if (!config) return false;
 
     const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
-    const inRangeTargets = Array.from(state.entities.values())
-      .filter(
-        (entity) =>
-          entity.owner === targetOwner &&
-          entity.health.current > 0 &&
-          Math.abs(entity.transform.x - baseX) <= engine.range
-      );
-    if (inRangeTargets.length === 0) return false;
-
     const positions: Array<{ x: number; y: number }> = [];
     let totalDamage = 0;
     let damage = config.initialDamage;
-    let currentTarget: Entity | null = [...inRangeTargets].sort(
-      (a, b) => Math.abs(a.transform.x - baseX) - Math.abs(b.transform.x - baseX)
-    )[0] ?? null;
+    let currentTarget: Entity | null = null;
+
+    for (const entity of state.entities.values()) {
+      if (entity.owner !== targetOwner || entity.health.current <= 0) continue;
+      if (Math.abs(entity.transform.x - baseX) > engine.range) continue;
+      if (!currentTarget || Math.abs(entity.transform.x - baseX) < Math.abs(currentTarget.transform.x - baseX)) {
+        currentTarget = entity;
+      }
+    }
+    if (!currentTarget) return false;
+
+    const visited = new Set<number>();
     let previousTarget: Entity | null = null;
 
     for (let bounce = 0; bounce < config.maxTargets; bounce++) {
       if (!currentTarget) break;
       if (currentTarget.health.current <= 0) break;
+      if (visited.has(currentTarget.entityId)) break;
 
       totalDamage += this.applyTurretDamageToUnit(state, currentTarget, damage);
       positions.push({ x: currentTarget.transform.x, y: currentTarget.transform.laneY });
+      visited.add(currentTarget.entityId);
       damage *= config.falloffMultiplier;
 
       previousTarget = currentTarget;
-      const nextCandidates = inRangeTargets.filter(
-        (entity) =>
-          entity.health.current > 0 &&
-          entity.entityId !== previousTarget!.entityId
-      );
-      if (nextCandidates.length === 0) break;
-
-      currentTarget = [...nextCandidates].sort((a, b) => {
-        const da =
-          Math.abs(a.transform.x - previousTarget!.transform.x) +
-          Math.abs(a.transform.laneY - previousTarget!.transform.laneY) * 0.6;
-        const db =
-          Math.abs(b.transform.x - previousTarget!.transform.x) +
-          Math.abs(b.transform.laneY - previousTarget!.transform.laneY) * 0.6;
-        return da - db;
-      })[0] ?? null;
+      let nextTarget: Entity | null = null;
+      let nextScore = Number.POSITIVE_INFINITY;
+      for (const entity of state.entities.values()) {
+        if (entity.owner !== targetOwner || entity.health.current <= 0) continue;
+        if (visited.has(entity.entityId)) continue;
+        if (Math.abs(entity.transform.x - baseX) > engine.range) continue;
+        const score =
+          Math.abs(entity.transform.x - previousTarget.transform.x) +
+          Math.abs(entity.transform.laneY - previousTarget.transform.laneY) * 0.6;
+        if (score < nextScore) {
+          nextScore = score;
+          nextTarget = entity;
+        }
+      }
+      currentTarget = nextTarget;
     }
 
     if (positions.length === 0) return false;
@@ -441,12 +442,15 @@ export class TurretSystem {
 
     const direction = owner === 'PLAYER' ? 1 : -1;
     const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
-    const hasTargetsInCoverage = Array.from(state.entities.values()).some((entity) => {
-      if (entity.owner !== targetOwner || entity.health.current <= 0) return false;
+    let hasTargetsInCoverage = false;
+    for (const entity of state.entities.values()) {
+      if (entity.owner !== targetOwner || entity.health.current <= 0) continue;
       const dx = (entity.transform.x - baseX) * direction;
-      if (dx < 0 || dx > config.spreadRange) return false;
-      return Math.abs(entity.transform.laneY) <= config.spreadLaneY * 0.5 + config.shellRadius;
-    });
+      if (dx < 0 || dx > config.spreadRange) continue;
+      if (Math.abs(entity.transform.laneY) > config.spreadLaneY * 0.5 + config.shellRadius) continue;
+      hasTargetsInCoverage = true;
+      break;
+    }
     if (!hasTargetsInCoverage) return false;
 
     state.vfx.push({
@@ -498,27 +502,13 @@ export class TurretSystem {
     const forwardReachUnits = Math.max(0.4, config.forwardReachUnits ?? config.radius);
     const backReachUnits = Math.max(0.2, config.backReachUnits ?? Math.max(0.6, config.radius * 0.6));
     const laneHalfHeight = Math.max(1.3, config.radius * 0.75);
-    const hasTargetsInPourZone = Array.from(state.entities.values()).some(
-      (entity) => this.isEntityInsideOilZone(
-        entity,
-        targetOwner,
-        baseX,
-        centerX,
-        direction,
-        config.radius,
-        laneHalfHeight,
-        forwardReachUnits,
-        backReachUnits
-      )
-    );
-    if (!hasTargetsInPourZone) return false;
-
     const initialImpactDamage = Math.max(0, config.initialDamage ?? (config.damage * 0.55));
     const duration = Math.max(0.2, config.groundDurationSeconds ?? 2);
     const ticksPerSecond = Math.max(1, config.ticksPerSecond ?? 3);
     const tickInterval = 1 / ticksPerSecond;
     const tickDamage = Math.max(0, config.dotDamagePerTick ?? (config.damage * Math.max(0.05, config.dotTickMultiplier ?? 0.25)));
 
+    let hasTargetsInPourZone = false;
     let initialTotalDamage = 0;
     for (const entity of state.entities.values()) {
       if (!this.isEntityInsideOilZone(
@@ -532,8 +522,10 @@ export class TurretSystem {
         forwardReachUnits,
         backReachUnits
       )) continue;
+      hasTargetsInPourZone = true;
       initialTotalDamage += this.applyTurretDamageToUnit(state, entity, initialImpactDamage);
     }
+    if (!hasTargetsInPourZone) return false;
 
     if (initialTotalDamage > 0) {
       if (owner === 'PLAYER') {
@@ -616,14 +608,18 @@ export class TurretSystem {
     // One drone per cycle; cadence is controlled by cooldownSeconds (requested 4.8s).
     const targetOwner = owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
     const direction = owner === 'PLAYER' ? 1 : -1;
-    const inRangeTargets = Array.from(state.entities.values()).filter(
-      (entity) => entity.owner === targetOwner && entity.health.current > 0 && Math.abs(entity.transform.x - mount.x) <= engine.range
-    );
-    const farthestX = inRangeTargets.length > 0
-      ? direction === 1
-        ? Math.max(...inRangeTargets.map((entity) => entity.transform.x))
-        : Math.min(...inRangeTargets.map((entity) => entity.transform.x))
-      : target.transform.x;
+    let farthestX = target.transform.x;
+    let hasInRangeTarget = false;
+    for (const entity of state.entities.values()) {
+      if (entity.owner !== targetOwner || entity.health.current <= 0) continue;
+      if (Math.abs(entity.transform.x - mount.x) > engine.range) continue;
+      if (!hasInRangeTarget) {
+        farthestX = entity.transform.x;
+        hasInRangeTarget = true;
+      } else if ((direction === 1 && entity.transform.x > farthestX) || (direction === -1 && entity.transform.x < farthestX)) {
+        farthestX = entity.transform.x;
+      }
+    }
     const overflyPadding = Math.max(1.2, config.overflyPadding ?? 2.4);
     const overflyX = farthestX + direction * overflyPadding;
     const cruiseY = Math.max(6, config.cruiseHeight ?? 8.5);

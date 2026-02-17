@@ -283,6 +283,7 @@ const COMBO_LIBRARY: Record<number, ComboTemplate[]> = {
 const COMBO_BY_ID = new Map<string, ComboTemplate>(
   Object.values(COMBO_LIBRARY).flat().map((combo) => [combo.id, combo])
 );
+const MAX_SMART_ACTIVE_UNITS_BEFORE_RECRUIT = 40;
 
 export class SmartPlannerAI implements IAIBehavior {
   private name = 'SmartPlannerAI';
@@ -759,6 +760,9 @@ export class SmartPlannerAI implements IAIBehavior {
     if (decision.action === 'WAIT') return { ok: true, waitForResources: false, reason: 'noop' };
 
     if (decision.action === 'RECRUIT_UNIT') {
+      if (state.enemyUnitCount >= MAX_SMART_ACTIVE_UNITS_BEFORE_RECRUIT) {
+        return { ok: false, waitForResources: false, reason: `unit cap reached (${MAX_SMART_ACTIVE_UNITS_BEFORE_RECRUIT})` };
+      }
       const unitType = typeof params.unitType === 'string' ? params.unitType : '';
       const def = UNIT_DEFS[unitType];
       if (!def) return { ok: false, waitForResources: false, reason: 'unknown unit' };
@@ -877,6 +881,7 @@ export class SmartPlannerAI implements IAIBehavior {
     if (!unitType) return true;
     const def = UNIT_DEFS[unitType];
     if (!def) return true;
+    if (this.hasReachedRecruitUnitCap(state, ctx)) return true;
 
     if (state.enemyQueueSize >= QUEUE_CONFIG.maxQueueSize - 1 && goal !== 'SURVIVE') return true;
 
@@ -1834,6 +1839,7 @@ export class SmartPlannerAI implements IAIBehavior {
     reserve: ReservePolicy,
     goal: GoalId
   ): Candidate | null {
+    if (this.hasReachedRecruitUnitCap(state, ctx)) return null;
     if (state.enemyQueueSize >= 5) return null;
 
     const primaryGoal = goal ?? this.activeGoal;
@@ -1964,6 +1970,7 @@ export class SmartPlannerAI implements IAIBehavior {
     spendableGold: number,
     maxCount: number
   ): UnitCandidateScore[] {
+    if (this.hasReachedRecruitUnitCap(state, ctx)) return [];
     if (state.enemyQueueSize >= 5) return [];
     if (this.shouldHoldForStack(goal, state, ctx, spendableGold)) return [];
 
@@ -2803,6 +2810,7 @@ export class SmartPlannerAI implements IAIBehavior {
   }
 
   private pickEmergencyFallback(state: GameStateSnapshot, maxGold: number, ctx: PlannerContext): string | null {
+    if (this.hasReachedRecruitUnitCap(state, ctx)) return null;
     const units = getUnitsForAge(state.enemyAge);
     let bestUnit: string | null = null;
     let bestScore = -Infinity;
@@ -2897,6 +2905,7 @@ export class SmartPlannerAI implements IAIBehavior {
   }
 
   private buildActionSpaceMap(state: GameStateSnapshot, reserve: ReservePolicy): Record<string, unknown> {
+    const recruitCapReached = state.enemyUnitCount >= MAX_SMART_ACTIVE_UNITS_BEFORE_RECRUIT;
     const units = Object.values(getUnitsForAge(state.enemyAge));
     const affordableUnits = units.filter((u) => {
       const cost = this.getDiscountedCost(u.cost, state.difficulty, 'unit');
@@ -2921,7 +2930,7 @@ export class SmartPlannerAI implements IAIBehavior {
 
     return {
       legalActions: {
-        recruitUnit: affordableUnits > 0,
+        recruitUnit: !recruitCapReached && affordableUnits > 0,
         ageUp: canAgeUp,
         upgradeMana: canManaUp,
         upgradeTurretSlots: canTurretSlotUp,
@@ -2930,11 +2939,17 @@ export class SmartPlannerAI implements IAIBehavior {
         repairBase: state.enemyAge >= 6 && state.enemyMana >= 500 && state.enemyBaseHealth < state.enemyBaseMaxHealth,
       },
       counts: {
+        unitCap: MAX_SMART_ACTIVE_UNITS_BEFORE_RECRUIT,
+        unitCount: state.enemyUnitCount,
         affordableUnits,
         affordableEngines,
         emptySlots,
       },
     };
+  }
+
+  private hasReachedRecruitUnitCap(state: GameStateSnapshot, ctx: PlannerContext): boolean {
+    return Math.max(state.enemyUnitCount, ctx.ownArmy.unitCount) >= MAX_SMART_ACTIVE_UNITS_BEFORE_RECRUIT;
   }
 
   private estimateUnitDps(def: UnitDef | undefined, baseDamage: number): number {

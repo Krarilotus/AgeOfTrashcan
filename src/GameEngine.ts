@@ -17,6 +17,8 @@ import { UNIT_DEFS, type UnitDef, getUnitsForAge } from './config/units';
 import {
   BASE_CONFIG,
   getAgeUpgradeCost,
+  getAgeUpgradeManaCost,
+  getAgeUpgradeRequirementRule,
   DIFFICULTY_CONFIG,
   getEnemyPurchaseDiscountMultiplier,
   type EnemyPurchaseCategory,
@@ -26,6 +28,7 @@ import {
   getManaGeneration,
   PROGRESSION_CONFIG,
   QUEUE_CONFIG,
+  UNIT_CAP_CONFIG,
 } from './config/gameBalance';
 import {
   MAX_TURRET_SLOTS,
@@ -45,6 +48,7 @@ import type { GameStateSnapshot, AIDecision, IAIBehavior, RecruitUnitParams } fr
 
 const FIXED_TIMESTEP = 1000 / 60; // ~16.67ms for 60 FPS
 const baseHalfSize = 30; // Original half size
+const MAX_ACTIVE_UNITS_PER_SIDE = UNIT_CAP_CONFIG.maxActiveUnitsPerSide;
 type Owner = 'PLAYER' | 'ENEMY';
 
 // Re-export UNIT_DEFS for backward compatibility
@@ -71,6 +75,7 @@ export interface SideControlConfig {
   control: 'HUMAN' | 'AI';
   difficulty?: GameDifficulty;
   mlCheckpointId?: string;
+  mlStrictInference?: boolean;
 }
 
 export interface SideActionSnapshot {
@@ -230,12 +235,46 @@ export interface GameState {
   progression: {
     player: {
       age: number;
-      ageProgress: { costGold: number; canUpgrade: boolean };
+      ageProgress: {
+        costGold: number;
+        costMana: number;
+        canUpgrade: boolean;
+        requirementProgress: number;
+        requirementText: string;
+        requirements: {
+          targetAge: number;
+          prevAgeUnitsRequired: number;
+          prevAgeUnitsBuilt: number;
+          prevAgeUnitsProgress: number;
+          totalUnitsRequired: number;
+          totalUnitsBuilt: number;
+          totalUnitsProgress: number;
+          met: boolean;
+          missing: string[];
+        };
+      };
       manaGenerationLevel: number; // 0 = no mana generation
     };
     enemy: {
       age: number;
-      ageProgress: { costGold: number; canUpgrade: boolean };
+      ageProgress: {
+        costGold: number;
+        costMana: number;
+        canUpgrade: boolean;
+        requirementProgress: number;
+        requirementText: string;
+        requirements: {
+          targetAge: number;
+          prevAgeUnitsRequired: number;
+          prevAgeUnitsBuilt: number;
+          prevAgeUnitsProgress: number;
+          totalUnitsRequired: number;
+          totalUnitsBuilt: number;
+          totalUnitsProgress: number;
+          met: boolean;
+          missing: string[];
+        };
+      };
       manaGenerationLevel: number;
     };
   };
@@ -260,6 +299,8 @@ export interface GameState {
 }
 
 export class GameEngine {
+  private static readonly UNIT_CATALOG_ENTRIES = Object.entries(UNIT_DEFS) as Array<[string, UnitDef]>;
+  private static readonly TURRET_CATALOG_ENTRIES = Object.entries(TURRET_ENGINES);
   private state: GameState;
   private unitSprites: Map<string, HTMLImageElement | HTMLCanvasElement> = new Map();
   private coreLoop: CoreLoop | null = null;
@@ -320,6 +361,8 @@ export class GameEngine {
     this.telemetry = this.createInitialTelemetry();
     this.state = this.createInitialState();
     this.syncBasePositions();
+    this.refreshAgeUpgradeProgress('PLAYER');
+    this.refreshAgeUpgradeProgress('ENEMY');
     this.prng = new PRNG(seed);
     
     // Initialize Systems
@@ -338,12 +381,10 @@ export class GameEngine {
   ): IAIBehavior {
     if (difficulty === 'SMART_ML') {
       const behavior = new MLSelfPlayBehavior();
-      if (sideConfig?.mlCheckpointId) {
-        behavior.setParameters({
-          modelVersionOverride: sideConfig.mlCheckpointId,
-          selectedCheckpointId: sideConfig.mlCheckpointId,
-        });
-      }
+      behavior.setParameters({
+        selectedCheckpointId: sideConfig?.mlCheckpointId ?? null,
+        requireCheckpointInference: Boolean(sideConfig?.mlStrictInference),
+      });
       return behavior;
     }
     if (difficulty === 'SMART') {
@@ -490,7 +531,8 @@ export class GameEngine {
   private getBaseHealthForDifficulty(difficulty: GameDifficulty | null): number {
     if (!difficulty) return BASE_CONFIG.baseHealth;
     if (difficulty === 'EASY') return 300;
-    if (difficulty === 'MEDIUM' || difficulty === 'SMART' || difficulty === 'SMART_ML') return 500;
+    if (difficulty === 'MEDIUM') return 400;
+    if (difficulty === 'SMART' || difficulty === 'SMART_ML') return 500;
     if (difficulty === 'HARD') return 700;
     if (difficulty === 'CHEATER') return 1000;
     return BASE_CONFIG.baseHealth;
@@ -669,12 +711,46 @@ export class GameEngine {
       progression: {
         player: {
           age: 1,
-          ageProgress: { costGold: getAgeUpgradeCost(1), canUpgrade: false },
+          ageProgress: {
+            costGold: getAgeUpgradeCost(1),
+            costMana: getAgeUpgradeManaCost(1),
+            canUpgrade: false,
+            requirementProgress: 0,
+            requirementText: 'Requirement pending',
+            requirements: {
+              targetAge: 2,
+              prevAgeUnitsRequired: 5,
+              prevAgeUnitsBuilt: 0,
+              prevAgeUnitsProgress: 0,
+              totalUnitsRequired: 0,
+              totalUnitsBuilt: 0,
+              totalUnitsProgress: 1,
+              met: false,
+              missing: [],
+            },
+          },
           manaGenerationLevel: 0, // No mana generation initially
         },
         enemy: {
           age: 1,
-          ageProgress: { costGold: getAgeUpgradeCost(1), canUpgrade: false },
+          ageProgress: {
+            costGold: getAgeUpgradeCost(1),
+            costMana: getAgeUpgradeManaCost(1),
+            canUpgrade: false,
+            requirementProgress: 0,
+            requirementText: 'Requirement pending',
+            requirements: {
+              targetAge: 2,
+              prevAgeUnitsRequired: 5,
+              prevAgeUnitsBuilt: 0,
+              prevAgeUnitsProgress: 0,
+              totalUnitsRequired: 0,
+              totalUnitsBuilt: 0,
+              totalUnitsProgress: 1,
+              met: false,
+              missing: [],
+            },
+          },
           manaGenerationLevel: 0,
         },
       },
@@ -874,6 +950,10 @@ export class GameEngine {
     // Update training queues and spawn units
     this.updateTrainingQueues();
 
+    // Keep age-up readiness (costs + requirements) current for UI and AI.
+    this.refreshAgeUpgradeProgress('PLAYER');
+    this.refreshAgeUpgradeProgress('ENEMY');
+
     // Update entities
     this.updateEntities(deltaSeconds);
 
@@ -911,6 +991,12 @@ export class GameEngine {
       item.remainingMs -= FIXED_TIMESTEP;
       if (item.remainingMs > 0) return;
 
+      if (item.kind === 'unit' && this.hasReachedActiveUnitCap(owner)) {
+        // Keep the completed unit build queued until a battlefield slot opens.
+        item.remainingMs = 100;
+        return;
+      }
+
       const finished = queue.shift();
       if (!finished) return;
 
@@ -934,6 +1020,9 @@ export class GameEngine {
   }
 
   private spawnTestUnit(owner: 'PLAYER' | 'ENEMY', unitId?: string): void {
+    if (this.hasReachedActiveUnitCap(owner)) {
+      return;
+    }
     const entityId = this.state.nextEntityId++;
     const isPlayer = owner === 'PLAYER';
 
@@ -1035,8 +1124,12 @@ export class GameEngine {
     const ownProg = this.getProgressionForOwner(owner);
     const opponentProg = this.getProgressionForOwner(opponent);
 
-    const ownUnitsRaw = Array.from(this.state.entities.values()).filter((entity) => entity.owner === owner);
-    const opponentUnitsRaw = Array.from(this.state.entities.values()).filter((entity) => entity.owner === opponent);
+    const ownUnitsRaw: Entity[] = [];
+    const opponentUnitsRaw: Entity[] = [];
+    for (const entity of this.state.entities.values()) {
+      if (entity.owner === owner) ownUnitsRaw.push(entity);
+      else if (entity.owner === opponent) opponentUnitsRaw.push(entity);
+    }
     const mirrorX = (x: number) => (mirror ? width - x : x);
     const mirrorVx = (vx: number) => (mirror ? -vx : vx);
     const mapUnit = (entity: Entity) => ({
@@ -1060,18 +1153,41 @@ export class GameEngine {
       return Math.floor(baseCost * getEnemyPurchaseDiscountMultiplier(sideDifficulty, category));
     };
 
-    const emptyUnlockedTurretSlots = ownBase.turretSlots.filter(
-      (slot) => slot.slotIndex < ownBase.turretSlotsUnlocked && !slot.turretId
-    ).length;
+    let emptyUnlockedTurretSlots = 0;
+    for (const slot of ownBase.turretSlots) {
+      if (slot.slotIndex < ownBase.turretSlotsUnlocked && !slot.turretId) {
+        emptyUnlockedTurretSlots += 1;
+      }
+    }
 
-    const unitCatalogDiagnostics = Object.entries(UNIT_DEFS).map(([unitId, def]) => {
+    let legalUnits = 0;
+    let unitBlockedByAge = 0;
+    let unitBlockedByGold = 0;
+    let unitBlockedByMana = 0;
+    let unitBlockedByQueue = 0;
+    let unitBlockedByCap = 0;
+    const ownUnitCapReached = ownUnitsRaw.length >= MAX_ACTIVE_UNITS_PER_SIDE;
+    const unitCatalogDiagnostics = GameEngine.UNIT_CATALOG_ENTRIES.map(([unitId, def]) => {
       const ageRequired = def.age ?? 1;
       const goldCost = discountedCost(def.cost, 'unit');
       const manaCost = def.manaCost ?? 0;
       const ageLocked = ageRequired > ownProg.age;
       const goldShortfall = Math.max(0, goldCost - ownEcon.gold);
       const manaShortfall = Math.max(0, manaCost - ownEcon.mana);
-      const legalNow = !ageLocked && !queueBlocked && goldShortfall <= 0 && manaShortfall <= 0;
+      const capBlocked = ownUnitCapReached;
+      const legalNow = !ageLocked && !queueBlocked && !capBlocked && goldShortfall <= 0 && manaShortfall <= 0;
+      if (legalNow) {
+        legalUnits += 1;
+      } else if (ageLocked) {
+        unitBlockedByAge += 1;
+      } else if (queueBlocked) {
+        unitBlockedByQueue += 1;
+      } else if (capBlocked) {
+        unitBlockedByCap += 1;
+      } else {
+        if (goldShortfall > 0) unitBlockedByGold += 1;
+        if (manaShortfall > 0) unitBlockedByMana += 1;
+      }
       const scorePower = def.damage * 6 + def.health * 0.6 + (def.range ?? 1) * 5 + def.speed * 2;
       return {
         unitId,
@@ -1083,11 +1199,18 @@ export class GameEngine {
         queueBlocked,
         goldShortfall,
         manaShortfall,
+        capBlocked,
         scorePower,
       };
     });
 
-    const turretCatalogDiagnostics = Object.entries(TURRET_ENGINES).map(([turretId, def]) => {
+    let legalTurrets = 0;
+    let turretBlockedByAge = 0;
+    let turretBlockedByGold = 0;
+    let turretBlockedByMana = 0;
+    let turretBlockedBySlot = 0;
+    let turretBlockedByQueue = 0;
+    const turretCatalogDiagnostics = GameEngine.TURRET_CATALOG_ENTRIES.map(([turretId, def]) => {
       const ageRequired = def.age;
       const goldCost = discountedCost(def.cost, 'turret_engine');
       const manaCost = def.manaCost ?? 0;
@@ -1096,6 +1219,18 @@ export class GameEngine {
       const manaShortfall = Math.max(0, manaCost - ownEcon.mana);
       const slotBlocked = emptyUnlockedTurretSlots <= 0;
       const legalNow = !ageLocked && !queueBlocked && !slotBlocked && goldShortfall <= 0 && manaShortfall <= 0;
+      if (legalNow) {
+        legalTurrets += 1;
+      } else if (ageLocked) {
+        turretBlockedByAge += 1;
+      } else if (queueBlocked) {
+        turretBlockedByQueue += 1;
+      } else if (slotBlocked) {
+        turretBlockedBySlot += 1;
+      } else {
+        if (goldShortfall > 0) turretBlockedByGold += 1;
+        if (manaShortfall > 0) turretBlockedByMana += 1;
+      }
       return {
         turretId,
         ageRequired,
@@ -1114,17 +1249,18 @@ export class GameEngine {
     const actionConstraintSummary = {
       queueRemaining: Math.max(0, QUEUE_CONFIG.maxQueueSize - queue.length),
       emptyUnlockedTurretSlots,
-      legalUnits: unitCatalogDiagnostics.filter((item) => item.legalNow).length,
-      legalTurrets: turretCatalogDiagnostics.filter((item) => item.legalNow).length,
-      unitBlockedByAge: unitCatalogDiagnostics.filter((item) => item.ageLocked).length,
-      unitBlockedByGold: unitCatalogDiagnostics.filter((item) => !item.ageLocked && item.goldShortfall > 0).length,
-      unitBlockedByMana: unitCatalogDiagnostics.filter((item) => !item.ageLocked && item.manaShortfall > 0).length,
-      unitBlockedByQueue: unitCatalogDiagnostics.filter((item) => !item.ageLocked && item.queueBlocked).length,
-      turretBlockedByAge: turretCatalogDiagnostics.filter((item) => item.ageLocked).length,
-      turretBlockedByGold: turretCatalogDiagnostics.filter((item) => !item.ageLocked && item.goldShortfall > 0).length,
-      turretBlockedByMana: turretCatalogDiagnostics.filter((item) => !item.ageLocked && item.manaShortfall > 0).length,
-      turretBlockedBySlot: turretCatalogDiagnostics.filter((item) => !item.ageLocked && item.slotBlocked).length,
-      turretBlockedByQueue: turretCatalogDiagnostics.filter((item) => !item.ageLocked && item.queueBlocked).length,
+      legalUnits,
+      legalTurrets,
+      unitBlockedByAge,
+      unitBlockedByGold,
+      unitBlockedByMana,
+      unitBlockedByQueue,
+      unitBlockedByCap,
+      turretBlockedByAge,
+      turretBlockedByGold,
+      turretBlockedByMana,
+      turretBlockedBySlot,
+      turretBlockedByQueue,
     };
 
     const projectiles = this.state.projectiles.map((projectile) => ({
@@ -1140,27 +1276,25 @@ export class GameEngine {
       hasDroneGuidance: Boolean(projectile.droneState),
     }));
 
-    const activeAbilityEffects = this.state.vfx
-      .map((vfx) => {
-        if (vfx.type !== 'ability_cast' && vfx.type !== 'ability_impact' && vfx.type !== 'flamethrower') {
-          return null;
-        }
-        return {
-          owner:
-            vfx.x > width * 0.5
-              ? mirror
-                ? ('OPPONENT' as const)
-                : ('SELF' as const)
-              : mirror
-                ? ('SELF' as const)
-                : ('OPPONENT' as const),
-          type: vfx.type,
-          x: mirrorX(vfx.x),
-          y: vfx.y,
-          lifeMs: vfx.lifeMs,
-        };
-      })
-      .filter((item): item is NonNullable<typeof item> => item !== null);
+    const activeAbilityEffects: Array<{
+      owner: 'SELF' | 'OPPONENT';
+      type: 'ability_cast' | 'ability_impact' | 'flamethrower';
+      x: number;
+      y: number;
+      lifeMs: number;
+    }> = [];
+    for (const vfx of this.state.vfx) {
+      if (vfx.type !== 'ability_cast' && vfx.type !== 'ability_impact' && vfx.type !== 'flamethrower') continue;
+      const sourceOnRight = vfx.x > width * 0.5;
+      const ownerRole = sourceOnRight ? (mirror ? 'OPPONENT' : 'SELF') : (mirror ? 'SELF' : 'OPPONENT');
+      activeAbilityEffects.push({
+        owner: ownerRole,
+        type: vfx.type,
+        x: mirrorX(vfx.x),
+        y: vfx.y,
+        lifeMs: vfx.lifeMs,
+      });
+    }
 
     const ownTurretStats = calculateTurretDefenseStats(ownBase);
     const opponentTurretStats = calculateTurretDefenseStats(opponentBase);
@@ -1175,16 +1309,36 @@ export class GameEngine {
       cooldownRemaining: slot.cooldownRemaining,
     }));
 
-    const ownUnits = ownUnitsRaw.map(mapUnit);
-    const opponentUnits = opponentUnitsRaw.map(mapUnit);
     const gameTimeSec = (this.state.tick * FIXED_TIMESTEP) / 1000;
     const ownBasePos = mirrorX(ownBase.x);
     const opponentBasePos = mirrorX(opponentBase.x);
+    const ownUnits = ownUnitsRaw.map(mapUnit);
+    const opponentUnits = opponentUnitsRaw.map(mapUnit);
+    let enemyUnitsNearPlayerBase = 0;
+    for (const unit of ownUnits) {
+      if (Math.abs(unit.position - opponentBasePos) < 15) enemyUnitsNearPlayerBase += 1;
+    }
+    let playerUnitsNearEnemyBase = 0;
+    for (const unit of opponentUnits) {
+      if (Math.abs(unit.position - ownBasePos) < 15) playerUnitsNearEnemyBase += 1;
+    }
+    const opponentQueue = this.getQueueForOwner(opponent);
+    const ownQueue = this.getQueueForOwner(owner);
+    let playerTurretQueueCount = 0;
+    for (const q of opponentQueue) {
+      if (q.kind !== 'unit') playerTurretQueueCount += 1;
+    }
+    let enemyTurretQueueCount = 0;
+    for (const q of ownQueue) {
+      if (q.kind !== 'unit') enemyTurretQueueCount += 1;
+    }
     const ownAgeUpTimes = this.telemetry.bySide[owner].ageUpTimes;
     const opponentAgeUpTimes = this.telemetry.bySide[opponent].ageUpTimes;
     const ownLastAgeUpTime = ownAgeUpTimes.length > 0 ? ownAgeUpTimes[ownAgeUpTimes.length - 1] : 0;
     const opponentLastAgeUpTime =
       opponentAgeUpTimes.length > 0 ? opponentAgeUpTimes[opponentAgeUpTimes.length - 1] : 0;
+    const ownAgeRequirements = ownProg.ageProgress.requirements;
+    const opponentAgeRequirements = opponentProg.ageProgress.requirements;
 
     return {
       tick: this.state.tick,
@@ -1201,6 +1355,16 @@ export class GameEngine {
       enemyAge: ownProg.age,
       playerAgeCost: opponentProg.ageProgress.costGold,
       enemyAgeCost: ownProg.ageProgress.costGold,
+      playerAgeManaCost: opponentProg.ageProgress.costMana,
+      enemyAgeManaCost: ownProg.ageProgress.costMana,
+      playerAgeRequirementsMet: opponentProg.ageProgress.requirements.met,
+      enemyAgeRequirementsMet: ownProg.ageProgress.requirements.met,
+      playerAgeRequirementProgress: opponentProg.ageProgress.requirementProgress,
+      enemyAgeRequirementProgress: ownProg.ageProgress.requirementProgress,
+      playerAgePrevAgeUnitRequirementProgress: opponentAgeRequirements.prevAgeUnitsProgress,
+      enemyAgePrevAgeUnitRequirementProgress: ownAgeRequirements.prevAgeUnitsProgress,
+      playerAgeTotalUnitRequirementProgress: opponentAgeRequirements.totalUnitsProgress,
+      enemyAgeTotalUnitRequirementProgress: ownAgeRequirements.totalUnitsProgress,
       playerManaLevel: opponentProg.manaGenerationLevel,
       enemyManaLevel: ownProg.manaGenerationLevel,
       playerBaseHealth: opponentBase.health,
@@ -1225,6 +1389,10 @@ export class GameEngine {
       enemyTurretSlots: ownTurretSummary,
       playerUnitCount: opponentUnits.length,
       enemyUnitCount: ownUnits.length,
+      playerUnitCap: MAX_ACTIVE_UNITS_PER_SIDE,
+      enemyUnitCap: MAX_ACTIVE_UNITS_PER_SIDE,
+      playerUnitCapReached: opponentUnits.length >= MAX_ACTIVE_UNITS_PER_SIDE,
+      enemyUnitCapReached: ownUnits.length >= MAX_ACTIVE_UNITS_PER_SIDE,
       playerUnits: opponentUnits,
       enemyUnits: ownUnits,
       projectiles,
@@ -1232,16 +1400,16 @@ export class GameEngine {
       unitCatalogDiagnostics,
       turretCatalogDiagnostics,
       actionConstraintSummary,
-      playerQueueSize: this.getQueueForOwner(opponent).length,
-      enemyQueueSize: this.getQueueForOwner(owner).length,
-      playerTurretQueueCount: this.getQueueForOwner(opponent).filter((q) => q.kind !== 'unit').length,
-      enemyTurretQueueCount: this.getQueueForOwner(owner).filter((q) => q.kind !== 'unit').length,
+      playerQueueSize: opponentQueue.length,
+      enemyQueueSize: ownQueue.length,
+      playerTurretQueueCount,
+      enemyTurretQueueCount,
       battlefieldWidth: width,
       playerBaseX: opponentBasePos,
       enemyBaseX: ownBasePos,
       difficulty: this.getDifficultyOrDefault(owner, this.config.difficulty),
-      playerUnitsNearEnemyBase: opponentUnits.filter((unit) => Math.abs(unit.position - ownBasePos) < 15).length,
-      enemyUnitsNearPlayerBase: ownUnits.filter((unit) => Math.abs(unit.position - opponentBasePos) < 15).length,
+      playerUnitsNearEnemyBase,
+      enemyUnitsNearPlayerBase,
       lastEnemyBaseAttackTime: ownBase.lastAttackTime,
       playerTimeSinceLastAgeUp: Math.max(0, gameTimeSec - opponentLastAgeUpTime),
       enemyTimeSinceLastAgeUp: Math.max(0, gameTimeSec - ownLastAgeUpTime),
@@ -1381,12 +1549,115 @@ export class GameEngine {
     return owner === 'PLAYER' ? this.state.playerQueue : this.state.enemyQueue;
   }
 
+  private countActiveUnits(owner: 'PLAYER' | 'ENEMY'): number {
+    let count = 0;
+    for (const entity of this.state.entities.values()) {
+      if (entity.owner === owner) count += 1;
+    }
+    return count;
+  }
+
+  private hasReachedActiveUnitCap(owner: 'PLAYER' | 'ENEMY'): boolean {
+    return this.countActiveUnits(owner) >= MAX_ACTIVE_UNITS_PER_SIDE;
+  }
+
   private getEconomyForOwner(owner: 'PLAYER' | 'ENEMY') {
     return owner === 'PLAYER' ? this.state.economy.player : this.state.economy.enemy;
   }
 
   private getProgressionForOwner(owner: 'PLAYER' | 'ENEMY') {
     return owner === 'PLAYER' ? this.state.progression.player : this.state.progression.enemy;
+  }
+
+  private getBuiltUnitStats(owner: 'PLAYER' | 'ENEMY'): { totalUnitsBuilt: number; builtByAge: Record<number, number> } {
+    const counts = this.telemetry.bySide[owner].unitBuildCounts ?? {};
+    const builtByAge: Record<number, number> = {};
+    let totalUnitsBuilt = 0;
+    for (const [unitId, rawCount] of Object.entries(counts)) {
+      const count = Math.max(0, Number(rawCount) || 0);
+      if (count <= 0) continue;
+      const unitAge = Math.max(1, UNIT_DEFS[unitId]?.age ?? 1);
+      builtByAge[unitAge] = (builtByAge[unitAge] ?? 0) + count;
+      totalUnitsBuilt += count;
+    }
+    return { totalUnitsBuilt, builtByAge };
+  }
+
+  private refreshAgeUpgradeProgress(owner: 'PLAYER' | 'ENEMY'): void {
+    const prog = this.getProgressionForOwner(owner);
+    const econ = this.getEconomyForOwner(owner);
+    const maxAge = PROGRESSION_CONFIG.maxAge;
+
+    if (prog.age >= maxAge) {
+      prog.ageProgress = {
+        costGold: 0,
+        costMana: 0,
+        canUpgrade: false,
+        requirementProgress: 1,
+        requirementText: 'Max age reached',
+        requirements: {
+          targetAge: maxAge,
+          prevAgeUnitsRequired: 0,
+          prevAgeUnitsBuilt: 0,
+          prevAgeUnitsProgress: 1,
+          totalUnitsRequired: 0,
+          totalUnitsBuilt: 0,
+          totalUnitsProgress: 1,
+          met: true,
+          missing: [],
+        },
+      };
+      return;
+    }
+
+    const targetAge = prog.age + 1;
+    const rule = getAgeUpgradeRequirementRule(prog.age);
+    const costGold = getAgeUpgradeCost(prog.age);
+    const costMana = getAgeUpgradeManaCost(prog.age);
+    const { totalUnitsBuilt, builtByAge } = this.getBuiltUnitStats(owner);
+    const prevAgeUnitsBuilt = builtByAge[prog.age] ?? 0;
+    const prevAgeUnitsRequired = Math.max(0, rule.prevAgeUnitsRequired ?? 0);
+    const totalUnitsRequired = Math.max(0, rule.totalUnitsRequired ?? 0);
+    const prevAgeUnitsProgress =
+      prevAgeUnitsRequired > 0 ? Math.min(1, prevAgeUnitsBuilt / prevAgeUnitsRequired) : 1;
+    const totalUnitsProgress =
+      totalUnitsRequired > 0 ? Math.min(1, totalUnitsBuilt / totalUnitsRequired) : 1;
+
+    const missing: string[] = [];
+    if (prevAgeUnitsRequired > 0 && prevAgeUnitsBuilt < prevAgeUnitsRequired) {
+      missing.push(`Build ${prevAgeUnitsRequired} age-${prog.age} units (${prevAgeUnitsBuilt}/${prevAgeUnitsRequired})`);
+    }
+    if (totalUnitsRequired > 0 && totalUnitsBuilt < totalUnitsRequired) {
+      missing.push(`Build ${totalUnitsRequired} total units (${totalUnitsBuilt}/${totalUnitsRequired})`);
+    }
+    if (costGold > 0 && econ.gold < costGold) {
+      missing.push(`Need ${Math.ceil(costGold - econ.gold)} more gold`);
+    }
+    if (costMana > 0 && econ.mana < costMana) {
+      missing.push(`Need ${Math.ceil(costMana - econ.mana)} more mana`);
+    }
+
+    const requirementProgress = Math.min(prevAgeUnitsProgress, totalUnitsProgress);
+    const requirementsMet = missing.length === 0;
+
+    prog.ageProgress = {
+      costGold,
+      costMana,
+      canUpgrade: requirementsMet,
+      requirementProgress,
+      requirementText: requirementsMet ? `Ready for age ${targetAge}` : missing[0] ?? 'Requirement pending',
+      requirements: {
+        targetAge,
+        prevAgeUnitsRequired,
+        prevAgeUnitsBuilt,
+        prevAgeUnitsProgress,
+        totalUnitsRequired,
+        totalUnitsBuilt,
+        totalUnitsProgress,
+        met: requirementsMet,
+        missing,
+      },
+    };
   }
 
   private getDiscountedGoldCostForOwner(
@@ -1650,6 +1921,7 @@ export class GameEngine {
     const econ = this.getEconomyForOwner(owner);
     const queue = this.getQueueForOwner(owner);
     const maxQueue = QUEUE_CONFIG.maxQueueSize;
+    if (this.hasReachedActiveUnitCap(owner)) return false;
     if (queue.length >= maxQueue) return false;
     // enforce age availability
     const ownerAge = this.getProgressionForOwner(owner).age;
@@ -1688,10 +1960,15 @@ export class GameEngine {
     const econ = owner === 'PLAYER' ? this.state.economy.player : this.state.economy.enemy;
     const base = owner === 'PLAYER' ? this.state.playerBase : this.state.enemyBase;
     if (prog.age >= PROGRESSION_CONFIG.maxAge) return false;
-    const cost = prog.ageProgress.costGold;
-    if (econ.gold < cost) return false;
+    this.refreshAgeUpgradeProgress(owner);
+    const costGold = prog.ageProgress.costGold;
+    const costMana = prog.ageProgress.costMana;
+    if (!prog.ageProgress.canUpgrade) return false;
+    if (econ.gold < costGold) return false;
+    if (econ.mana < costMana) return false;
     prog.age += 1;
-    econ.gold -= cost;
+    econ.gold -= costGold;
+    econ.mana -= costMana;
     
     // Update income using centralized config
     let newIncome = getGoldIncome(prog.age);
@@ -1706,8 +1983,8 @@ export class GameEngine {
     
     // Mana income NO LONGER auto-increases with age - must upgrade separately
     
-    // Update next age cost
-    prog.ageProgress.costGold = getAgeUpgradeCost(prog.age);
+    // Update next age readiness/costs after progression change.
+    this.refreshAgeUpgradeProgress(owner);
     
     // Expand battlefield from the middle - both halves grow to maintain symmetry
     const expansionFactor = 1 + prog.age * 0.2;
@@ -1731,7 +2008,9 @@ export class GameEngine {
     base.health += healthIncrease;
     if (base.health > base.maxHealth) base.health = base.maxHealth;
     
-    console.log(`${owner} Age upgraded to ${prog.age}, player half: ${this.state.battlefield.playerHalfWidth.toFixed(1)}, enemy half: ${this.state.battlefield.enemyHalfWidth.toFixed(1)}, total width: ${this.state.battlefield.width.toFixed(1)}, base health: ${Math.floor(base.health)}/${base.maxHealth}, next cost: ${prog.ageProgress.costGold}g`);
+    console.log(
+      `${owner} Age upgraded to ${prog.age}, player half: ${this.state.battlefield.playerHalfWidth.toFixed(1)}, enemy half: ${this.state.battlefield.enemyHalfWidth.toFixed(1)}, total width: ${this.state.battlefield.width.toFixed(1)}, base health: ${Math.floor(base.health)}/${base.maxHealth}, next cost: ${prog.ageProgress.costGold}g/${prog.ageProgress.costMana}m`
+    );
     this.telemetry.bySide[owner].ageUpTimes.push((this.state.tick * FIXED_TIMESTEP) / 1000);
     this.recordActionSnapshot(owner, 'AGE_UP', 'EXECUTED', true, { newAge: prog.age });
     
@@ -1995,6 +2274,8 @@ export class GameEngine {
         this.telemetry.baseHealthTimeline.length > 0
           ? this.telemetry.baseHealthTimeline[this.telemetry.baseHealthTimeline.length - 1].gameTime ?? 0
           : 0;
+      this.refreshAgeUpgradeProgress('PLAYER');
+      this.refreshAgeUpgradeProgress('ENEMY');
       this.initializeAIControllers();
       
       // Restore AI state if available (per-side or legacy enemy-only)

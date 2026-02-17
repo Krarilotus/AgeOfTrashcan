@@ -4,11 +4,12 @@ import { CombatUtils } from './CombatUtils';
 
 export class ProjectileSystem {
   public update(state: GameState, deltaSeconds: number): void {
-    const projToRemove: number[] = [];
+    const projToRemove = new Set<number>();
+    const deltaMs = deltaSeconds * 1000;
 
     for (const p of state.projectiles) {
       if (p.delayMs && p.delayMs > 0) {
-        p.delayMs -= deltaSeconds * 1000;
+        p.delayMs -= deltaMs;
         continue;
       }
 
@@ -22,7 +23,7 @@ export class ProjectileSystem {
 
       p.x += p.vx * deltaSeconds;
       p.y += p.vy * deltaSeconds;
-      p.lifeMs -= deltaSeconds * 1000;
+      p.lifeMs -= deltaMs;
 
       let hitResolved = false;
 
@@ -33,7 +34,7 @@ export class ProjectileSystem {
         }
         const baseHit = CombatUtils.applyDamageToBase(state, 'ENEMY', p.damage);
         state.stats.damageDealt.player += baseHit.actualDamage;
-        projToRemove.push(p.id);
+        projToRemove.add(p.id);
         hitResolved = true;
       } else if (p.owner === 'ENEMY' && p.x <= 1) {
         if (p.splitOnImpact) {
@@ -41,7 +42,7 @@ export class ProjectileSystem {
         }
         const baseHit = CombatUtils.applyDamageToBase(state, 'PLAYER', p.damage);
         state.stats.damageDealt.enemy += baseHit.actualDamage;
-        projToRemove.push(p.id);
+        projToRemove.add(p.id);
         hitResolved = true;
       }
 
@@ -50,7 +51,8 @@ export class ProjectileSystem {
       }
 
       const targetOwner = p.owner === 'PLAYER' ? 'ENEMY' : 'PLAYER';
-      const candidates: Entity[] = [];
+      let primary: Entity | null = null;
+      let primaryDistance = Number.POSITIVE_INFINITY;
 
       for (const ent of state.entities.values()) {
         if (ent.owner !== targetOwner) continue;
@@ -58,18 +60,24 @@ export class ProjectileSystem {
         if (p.isFalling) {
           const groundY = p.targetY ?? ent.transform.laneY;
           if (Math.abs(p.y - groundY) > 2.0) continue;
-          if (Math.abs(ent.transform.x - p.x) > 1.2) continue;
+          const xDistance = Math.abs(ent.transform.x - p.x);
+          if (xDistance > 1.2) continue;
+          if (xDistance < primaryDistance) {
+            primary = ent;
+            primaryDistance = xDistance;
+          }
         } else {
-          if (Math.abs(ent.transform.x - p.x) > 0.8) continue;
+          const xDistance = Math.abs(ent.transform.x - p.x);
+          if (xDistance > 0.8) continue;
           if (Math.abs(ent.transform.laneY - p.y) > 1.5) continue;
+          if (xDistance < primaryDistance) {
+            primary = ent;
+            primaryDistance = xDistance;
+          }
         }
-
-        candidates.push(ent);
       }
 
-      if (candidates.length > 0) {
-        candidates.sort((a, b) => Math.abs(a.transform.x - p.x) - Math.abs(b.transform.x - p.x));
-        const primary = candidates[0];
+      if (primary) {
         this.applyProjectileDamage(state, p, primary);
         const impactX = primary.transform.x;
         const impactY = primary.transform.laneY;
@@ -94,7 +102,7 @@ export class ProjectileSystem {
         }
 
         if (p.isFalling) {
-          projToRemove.push(p.id);
+          projToRemove.add(p.id);
           continue;
         }
 
@@ -103,18 +111,17 @@ export class ProjectileSystem {
           const direction = p.owner === 'PLAYER' ? 1 : -1;
           p.x += direction * 1.1;
         } else {
-          projToRemove.push(p.id);
+          projToRemove.add(p.id);
         }
       }
 
       if (p.lifeMs <= 0) {
-        projToRemove.push(p.id);
+        projToRemove.add(p.id);
       }
     }
 
-    if (projToRemove.length > 0) {
-      const removeSet = new Set(projToRemove);
-      state.projectiles = state.projectiles.filter((proj) => !removeSet.has(proj.id));
+    if (projToRemove.size > 0) {
+      state.projectiles = state.projectiles.filter((proj) => !projToRemove.has(proj.id));
     }
   }
 

@@ -8,7 +8,6 @@ const ACTION_LABELS = [...ML_ACTION_TYPES, 'INFERRED_DAMAGE', 'INFERRED_UNIT_DEL
 const ACTION_LABEL_TO_INDEX = new Map<string, number>(
   ACTION_LABELS.map((label, index) => [label, index])
 );
-const STATE_TOKEN_BUDGET = 112;
 
 export interface EncodedMLObservation {
   staticState: number[];
@@ -77,11 +76,9 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
   };
 
   const ownUnits = [...state.enemyUnits]
-    .sort((a, b) => Math.abs(a.position - opponentBaseX) - Math.abs(b.position - opponentBaseX))
-    .slice(0, 32);
+    .sort((a, b) => Math.abs(a.position - opponentBaseX) - Math.abs(b.position - opponentBaseX));
   const opponentUnits = [...state.playerUnits]
-    .sort((a, b) => Math.abs(a.position - ownBaseX) - Math.abs(b.position - ownBaseX))
-    .slice(0, 32);
+    .sort((a, b) => Math.abs(a.position - ownBaseX) - Math.abs(b.position - ownBaseX));
 
   ownUnits.forEach((unit) => {
     pushToken([
@@ -110,8 +107,8 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
   });
 
   const projectiles = state.projectiles ?? [];
-  const ownProjectiles = projectiles.filter((projectile) => projectile.owner === 'SELF').slice(0, 16);
-  const opponentProjectiles = projectiles.filter((projectile) => projectile.owner === 'OPPONENT').slice(0, 16);
+  const ownProjectiles = projectiles.filter((projectile) => projectile.owner === 'SELF');
+  const opponentProjectiles = projectiles.filter((projectile) => projectile.owner === 'OPPONENT');
 
   ownProjectiles.forEach((projectile) => {
     pushToken([
@@ -140,8 +137,8 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
   });
 
   const effects = state.activeAbilityEffects ?? [];
-  const ownEffects = effects.filter((effect) => effect.owner === 'SELF').slice(0, 8);
-  const opponentEffects = effects.filter((effect) => effect.owner === 'OPPONENT').slice(0, 8);
+  const ownEffects = effects.filter((effect) => effect.owner === 'SELF');
+  const opponentEffects = effects.filter((effect) => effect.owner === 'OPPONENT');
   const encodeEffectType = (type: string): number => {
     if (type === 'ability_cast') return 0.33;
     if (type === 'ability_impact') return 0.66;
@@ -174,7 +171,7 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
     ]);
   });
 
-  return tokens.slice(0, maxTokens);
+  return tokens;
 }
 
 function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalActionMask): number[] {
@@ -268,10 +265,16 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
   const avgAffordableTurretPower = mean(
     turretDiag.filter((item) => item.legalNow).map((item) => item.scorePower)
   );
-
   const legalActionTypes = countLegal(actionMask.actionTypeMask);
   const legalBuySlots = countLegal(actionMask.buySlotMask);
   const legalSellSlots = countLegal(actionMask.sellSlotMask);
+  const unitBlockedByCap =
+    summary?.unitBlockedByCap ??
+    unitDiag.filter((item) => !item.ageLocked && item.capBlocked).length;
+  const queueRemaining = summary?.queueRemaining ?? Math.max(0, 10 - state.enemyQueueSize);
+  const emptyUnlockedTurretSlots =
+    summary?.emptyUnlockedTurretSlots ??
+    Math.max(0, state.enemyTurretSlotsUnlocked - state.enemyTurretInstalledCount);
 
   return [
     // Provide relative age progression timing (instead of absolute clock/tick).
@@ -290,6 +293,12 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
     normalize(state.enemyAge, 6),
     normalize(state.playerAge, 6),
     normalize(state.enemyAge - state.playerAge, 6),
+    normalize(state.enemyAgeCost, 30000),
+    normalize(state.playerAgeCost, 30000),
+    normalize(state.enemyAgeManaCost, 3000),
+    normalize(state.playerAgeManaCost, 3000),
+    normalize(state.enemyAgeRequirementsMet ? 1 : 0, 1),
+    normalize(state.playerAgeRequirementsMet ? 1 : 0, 1),
     normalize(state.enemyManaLevel, 40),
     normalize(state.playerManaLevel, 40),
     normalize(state.enemyManaLevel - state.playerManaLevel, 40),
@@ -309,9 +318,15 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
     normalize(state.playerTurretSlotsUnlocked, 4),
     normalize(state.enemyTurretInstalledCount, 4),
     normalize(state.playerTurretInstalledCount, 4),
+    normalize(state.enemyTurretLevel, 6),
+    normalize(state.playerTurretLevel, 6),
     normalize(state.enemyUnitCount, 40),
     normalize(state.playerUnitCount, 40),
     normalize(state.enemyUnitCount - state.playerUnitCount, 40),
+    normalize(state.enemyUnitCap, 100),
+    normalize(state.playerUnitCap, 100),
+    normalize(state.enemyUnitCapReached ? 1 : 0, 1),
+    normalize(state.playerUnitCapReached ? 1 : 0, 1),
     normalize(playerTotalUnitHealth, 20000),
     normalize(enemyTotalUnitHealth, 20000),
     normalize(enemyTotalUnitHealth - playerTotalUnitHealth, 20000),
@@ -369,6 +384,7 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
     normalize(unitBlockedByGold, Math.max(1, ML_UNIT_IDS.length)),
     normalize(unitBlockedByMana, Math.max(1, ML_UNIT_IDS.length)),
     normalize(unitBlockedByQueue, Math.max(1, ML_UNIT_IDS.length)),
+    normalize(unitBlockedByCap, Math.max(1, ML_UNIT_IDS.length)),
     normalize(turretBlockedByAge, Math.max(1, ML_TURRET_IDS.length)),
     normalize(turretBlockedByGold, Math.max(1, ML_TURRET_IDS.length)),
     normalize(turretBlockedByMana, Math.max(1, ML_TURRET_IDS.length)),
@@ -382,6 +398,14 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
     normalize(avgAffordableUnitPower, 4000),
     normalize(maxTurretPower, 800),
     normalize(avgAffordableTurretPower, 800),
+    normalize(queueRemaining, 10),
+    normalize(emptyUnlockedTurretSlots, 4),
+    normalize(state.enemyAgeRequirementProgress, 1),
+    normalize(state.playerAgeRequirementProgress, 1),
+    normalize(state.enemyAgePrevAgeUnitRequirementProgress, 1),
+    normalize(state.playerAgePrevAgeUnitRequirementProgress, 1),
+    normalize(state.enemyAgeTotalUnitRequirementProgress, 1),
+    normalize(state.playerAgeTotalUnitRequirementProgress, 1),
   ];
 }
 
@@ -392,7 +416,9 @@ export function encodeObservation(
   config: ObservationEncoderConfig = {}
 ): EncodedMLObservation {
   const sequenceLength = config.sequenceLength ?? 240;
-  const stateTokenBudget = Math.max(0, Math.min(sequenceLength, STATE_TOKEN_BUDGET));
+  // Use full sequence capacity for live game-state tokens when needed.
+  // History tokens consume only the leftover capacity.
+  const stateTokenBudget = Math.max(0, sequenceLength);
   const stateTokens = encodeCurrentStateTokens(state, stateTokenBudget);
   const historyBudget = Math.max(0, sequenceLength - stateTokens.length);
   const encodedTokens = historyTokens.slice(-historyBudget).map(encodeHistoryToken);

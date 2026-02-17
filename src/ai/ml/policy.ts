@@ -21,6 +21,7 @@ export interface MLPolicyOutput {
   sellSlotLogits?: number[];
   valueEstimate?: number;
   modelVersion?: string;
+  inferenceSource?: 'remote_http' | 'heuristic_bootstrap';
 }
 
 export interface DecodedPolicyDecision {
@@ -268,6 +269,7 @@ export class HeuristicBootstrapPolicy implements IMLPolicy {
       sellSlotLogits,
       valueEstimate: (state.enemyBaseHealth - state.playerBaseHealth) / Math.max(1, state.enemyBaseMaxHealth),
       modelVersion: 'heuristic-bootstrap-v1',
+      inferenceSource: 'heuristic_bootstrap',
     };
   }
 
@@ -321,6 +323,12 @@ export class AsyncHttpCheckpointPolicy implements IMLPolicy {
     const checkpointId = (input.checkpointId ?? '').trim();
     const endpoint = this.resolveUrl();
     if (!endpoint || !checkpointId) {
+      this.lastFailureAt = Date.now();
+      if (!endpoint) {
+        this.lastFailureReason = 'inference URL not configured';
+      } else if (!checkpointId) {
+        this.lastFailureReason = 'checkpoint_id missing';
+      }
       return null;
     }
 
@@ -372,6 +380,10 @@ export class AsyncHttpCheckpointPolicy implements IMLPolicy {
       } catch {
         return null;
       }
+      const host = (window.location.hostname || '').toLowerCase();
+      if (host === 'localhost' || host === '127.0.0.1') {
+        return 'http://127.0.0.1:8765';
+      }
     }
     return null;
   }
@@ -421,6 +433,7 @@ export class AsyncHttpCheckpointPolicy implements IMLPolicy {
         sellSlotLogits: this.toNumberArray(data.sell_slot_logits),
         valueEstimate: typeof data.value_estimate === 'number' ? data.value_estimate : undefined,
         modelVersion: typeof data.model_version === 'string' ? data.model_version : 'remote',
+        inferenceSource: 'remote_http',
       };
       this.lastCheckpointId = checkpointId;
       this.lastSuccessAt = Date.now();
@@ -462,6 +475,11 @@ export class HybridRemotePolicy implements IMLPolicy {
   infer(input: MLPolicyInput): MLPolicyOutput | null {
     const remote = this.remotePolicy.infer(input);
     if (remote) return remote;
+    const hasCheckpointSelection = typeof input.checkpointId === 'string' && input.checkpointId.trim().length > 0;
+    if (hasCheckpointSelection) {
+      // In checkpoint mode, do not silently route to heuristic pseudo-policy.
+      return null;
+    }
     return this.fallbackPolicy.infer(input);
   }
 

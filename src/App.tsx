@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GameEngine } from './GameEngine';
 import {
   BASE_CONFIG,
@@ -73,6 +73,17 @@ export default function App() {
     }
     return { difficulty: selection as Difficulty };
   };
+
+  const mlCheckpointLabelById = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const option of mlCheckpointOptions) {
+      byId.set(option.id, option.label);
+    }
+    for (const option of mlFeaturedOptions) {
+      byId.set(option.id, option.label);
+    }
+    return byId;
+  }, [mlCheckpointOptions, mlFeaturedOptions]);
 
   const loadCheckpointRegistry = useCallback(async () => {
     try {
@@ -216,11 +227,13 @@ export default function App() {
                 control: 'AI' as const,
                 difficulty: watchPlayerConfig.difficulty,
                 mlCheckpointId: watchPlayerConfig.mlCheckpointId,
+                mlStrictInference: watchPlayerConfig.difficulty === 'SMART_ML',
               },
               ENEMY: {
                 control: 'AI' as const,
                 difficulty: watchEnemyConfig.difficulty,
                 mlCheckpointId: watchEnemyConfig.mlCheckpointId,
+                mlStrictInference: watchEnemyConfig.difficulty === 'SMART_ML',
               },
             }
           : {
@@ -229,6 +242,7 @@ export default function App() {
                 control: 'AI' as const,
                 difficulty,
                 mlCheckpointId: difficulty === 'SMART_ML' ? (playEnemyConfig?.mlCheckpointId ?? latestMlCheckpointId ?? undefined) : undefined,
+                mlStrictInference: difficulty === 'SMART_ML',
               },
             },
       };
@@ -544,6 +558,7 @@ export default function App() {
                   const sideProgression = owner === 'PLAYER' ? gameState?.progression?.player : gameState?.progression?.enemy;
                   const sideBase = owner === 'PLAYER' ? gameState?.playerBase : gameState?.enemyBase;
                   const sideTelemetry = gameState?.telemetry?.bySide?.[owner];
+                  const sideControl = gameState?.sideControl?.[owner];
 
                   if (!aiDebugInfo) {
                     return (
@@ -572,13 +587,59 @@ export default function App() {
                   const telemetryActions = Array.isArray(sideTelemetry?.actionTimeline)
                     ? sideTelemetry.actionTimeline.slice(-3).reverse()
                     : [];
+                  const debugCheckpointId =
+                    typeof aiDebugInfo.behaviorParams?.selectedCheckpointId === 'string' &&
+                    aiDebugInfo.behaviorParams.selectedCheckpointId.trim().length > 0
+                      ? aiDebugInfo.behaviorParams.selectedCheckpointId.trim()
+                      : null;
+                  const configuredCheckpointId =
+                    typeof sideControl?.mlCheckpointId === 'string' && sideControl.mlCheckpointId.trim().length > 0
+                      ? sideControl.mlCheckpointId.trim()
+                      : null;
+                  const activeCheckpointId = debugCheckpointId ?? configuredCheckpointId;
+                  const activeCheckpointLabel = activeCheckpointId
+                    ? mlCheckpointLabelById.get(activeCheckpointId) ?? activeCheckpointId
+                    : null;
+                  const sideDifficulty = sideControl?.difficulty ?? aiDebugInfo.behaviorParams?.difficulty ?? null;
+                  const sideStrictCheckpointMode = Boolean(sideControl?.mlStrictInference);
+                  const sideIdentityLabel =
+                    sideDifficulty === 'SMART_ML'
+                      ? activeCheckpointLabel
+                        ? `SMART_ML ${UI_SYMBOLS.arrowRight} ${activeCheckpointLabel}`
+                        : sideStrictCheckpointMode
+                          ? 'SMART_ML (checkpoint required: none selected)'
+                          : `SMART_ML (latest: ${latestMlCheckpointLabel})`
+                      : sideDifficulty ?? aiDebugInfo.endpoint ?? 'AI';
+                  const mlPolicySource =
+                    typeof aiDebugInfo.behaviorParams?.policySource === 'string'
+                      ? aiDebugInfo.behaviorParams.policySource
+                      : 'unknown';
+                  const mlModelVersion =
+                    typeof aiDebugInfo.behaviorParams?.modelVersion === 'string'
+                      ? aiDebugInfo.behaviorParams.modelVersion
+                      : 'n/a';
+                  const mlFallbackRate =
+                    typeof aiDebugInfo.behaviorParams?.fallbackRate === 'number'
+                      ? aiDebugInfo.behaviorParams.fallbackRate
+                      : 0;
+                  const mlLastFallbackReason =
+                    typeof aiDebugInfo.behaviorParams?.lastFallbackReason === 'string'
+                      ? aiDebugInfo.behaviorParams.lastFallbackReason
+                      : '';
+                  const mlCheckpointStrictMode = Boolean(aiDebugInfo.behaviorParams?.checkpointStrictMode);
+                  const mlCheckpointSelected = Boolean(aiDebugInfo.behaviorParams?.checkpointSelected);
+                  const mlCheckpointInferenceActive = Boolean(aiDebugInfo.behaviorParams?.checkpointInferenceActive);
+                  const mlCheckpointInactiveReason =
+                    typeof aiDebugInfo.behaviorParams?.checkpointInactiveReason === 'string'
+                      ? aiDebugInfo.behaviorParams.checkpointInactiveReason
+                      : '';
 
                   return (
                     <div key={owner} className="bg-slate-950/60 border border-slate-700 rounded p-3 space-y-2">
                       <div className="flex items-center justify-between">
                         <div className="font-bold text-white">{owner}</div>
-                        <div className="text-[10px] text-cyan-300">
-                          {aiDebugInfo.behaviorParams?.difficulty ?? aiDebugInfo.endpoint ?? 'AI'}
+                        <div className="text-[10px] text-cyan-300 text-right max-w-[70%] truncate" title={sideIdentityLabel}>
+                          {sideIdentityLabel}
                         </div>
                       </div>
 
@@ -590,6 +651,26 @@ export default function App() {
                         <div className="text-slate-400">Warchest: <span className="text-emerald-300">{Math.floor(aiDebugInfo.behaviorParams?.warchest ?? aiDebugInfo.warchest ?? 0)}g</span></div>
                         <div className="text-slate-400">Latency: <span className="text-purple-300">{aiDebugInfo.lastEndpointLatencyMs ?? 0}ms</span></div>
                       </div>
+                      {sideDifficulty === 'SMART_ML' && (
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px]">
+                          <div className="text-slate-400">ML Active: <span className={mlCheckpointInferenceActive ? 'text-emerald-300' : 'text-rose-300'}>{mlCheckpointInferenceActive ? 'YES' : 'NO'}</span></div>
+                          <div className="text-slate-400">Checkpoint Selected: <span className={mlCheckpointSelected ? 'text-emerald-300' : 'text-rose-300'}>{mlCheckpointSelected ? 'YES' : 'NO'}</span></div>
+                          <div className="text-slate-400">ML Source: <span className="text-cyan-300">{mlPolicySource}</span></div>
+                          <div className="text-slate-400">ML Fallback: <span className="text-rose-300">{(mlFallbackRate * 100).toFixed(1)}%</span></div>
+                          <div className="text-slate-400">Strict Checkpoint: <span className="text-amber-300">{mlCheckpointStrictMode ? 'ON' : 'OFF'}</span></div>
+                          <div className="text-slate-400 col-span-2 truncate" title={mlModelVersion}>Model: <span className="text-emerald-300">{mlModelVersion}</span></div>
+                          {mlCheckpointInactiveReason && (
+                            <div className="text-slate-500 col-span-2 truncate" title={mlCheckpointInactiveReason}>
+                              Inactive reason: {mlCheckpointInactiveReason}
+                            </div>
+                          )}
+                          {mlLastFallbackReason && (
+                            <div className="text-slate-500 col-span-2 truncate" title={mlLastFallbackReason}>
+                              Fallback reason: {mlLastFallbackReason}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                         <div className="bg-slate-800/60 border border-slate-700 rounded p-2">
@@ -851,14 +932,67 @@ export default function App() {
           {(gameState?.progression?.player?.age ?? 1) < PROGRESSION_CONFIG.maxAge && (
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-6">
               <h3 className="text-sm text-slate-400 mb-4">Evolution State</h3>
-              <button
-                onClick={handleUpgradeAge}
-                className="w-full px-4 py-2 bg-gradient-to-r from-amber-600 to-purple-600 hover:from-amber-700 hover:to-purple-700 text-white rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                disabled={playerControlledByAI || !(gameState?.progression?.player?.ageProgress?.canUpgrade) || (gameState?.economy?.player?.gold ?? 0) < (gameState?.progression?.player?.ageProgress?.costGold ?? 500)}
-              >
-                {UI_EMOTES.ageUp} Advance to Age {Math.min((gameState?.progression?.player?.age ?? 1) + 1, PROGRESSION_CONFIG.maxAge)}
-                <span className="ml-2 text-sm opacity-75">({gameState?.progression?.player?.ageProgress?.costGold ?? 500}g)</span>
-              </button>
+              {(() => {
+                const ageProgress = gameState?.progression?.player?.ageProgress;
+                const requirements = ageProgress?.requirements;
+                const costGold = ageProgress?.costGold ?? 500;
+                const costMana = ageProgress?.costMana ?? 0;
+                const canUpgrade = Boolean(ageProgress?.canUpgrade);
+                const missing: string[] = Array.isArray(requirements?.missing) ? requirements.missing : [];
+                const nextAge = Math.min((gameState?.progression?.player?.age ?? 1) + 1, PROGRESSION_CONFIG.maxAge);
+                const resourceShortfallGold = Math.max(0, costGold - (gameState?.economy?.player?.gold ?? 0));
+                const resourceShortfallMana = Math.max(0, costMana - (gameState?.economy?.player?.mana ?? 0));
+
+                return (
+                  <>
+                    <button
+                      onClick={handleUpgradeAge}
+                      className="w-full px-4 py-2 bg-gradient-to-r from-amber-600 to-purple-600 hover:from-amber-700 hover:to-purple-700 text-white rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                      disabled={playerControlledByAI || !canUpgrade}
+                    >
+                      {UI_EMOTES.ageUp} Advance to Age {nextAge}
+                      <span className="ml-2 text-sm opacity-75">
+                        ({costGold}g{costMana > 0 ? ` ${UI_SYMBOLS.middleDot} ${costMana}m` : ''})
+                      </span>
+                    </button>
+                    <div className="mt-3 space-y-1 text-xs">
+                      {requirements?.prevAgeUnitsRequired > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Age-{(gameState?.progression?.player?.age ?? 1)} units built</span>
+                          <span className={requirements.prevAgeUnitsProgress >= 1 ? 'text-emerald-300' : 'text-amber-300'}>
+                            {requirements.prevAgeUnitsBuilt}/{requirements.prevAgeUnitsRequired}
+                          </span>
+                        </div>
+                      )}
+                      {requirements?.totalUnitsRequired > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Total units built</span>
+                          <span className={requirements.totalUnitsProgress >= 1 ? 'text-emerald-300' : 'text-amber-300'}>
+                            {requirements.totalUnitsBuilt}/{requirements.totalUnitsRequired}
+                          </span>
+                        </div>
+                      )}
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Gold ready</span>
+                        <span className={resourceShortfallGold <= 0 ? 'text-emerald-300' : 'text-rose-300'}>
+                          {Math.floor(gameState?.economy?.player?.gold ?? 0)}/{costGold}
+                        </span>
+                      </div>
+                      {costMana > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Mana ready</span>
+                          <span className={resourceShortfallMana <= 0 ? 'text-emerald-300' : 'text-rose-300'}>
+                            {Math.floor(gameState?.economy?.player?.mana ?? 0)}/{costMana}
+                          </span>
+                        </div>
+                      )}
+                      <div className={missing.length === 0 ? 'text-emerald-300' : 'text-amber-300'}>
+                        {missing.length === 0 ? 'All requirements met' : `Missing: ${missing[0]}`}
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           )}
         </div>

@@ -26,6 +26,7 @@ function discountedEnemyCost(
 
 export function buildLegalActionMask(state: GameStateSnapshot): MLLegalActionMask {
   const canQueueMore = state.enemyQueueSize < QUEUE_CONFIG.maxQueueSize;
+  const canRecruitByCap = !state.enemyUnitCapReached && state.enemyUnitCount < state.enemyUnitCap;
   const hasAnyEmptyUnlockedSlot = ML_SLOT_INDICES.some(
     (slotIndex) =>
       slotIndex < state.enemyTurretSlotsUnlocked &&
@@ -48,6 +49,7 @@ export function buildLegalActionMask(state: GameStateSnapshot): MLLegalActionMas
     const unit = UNIT_DEFS[unitId];
     if (!unit) return 0;
     if (!canQueueMore) return 0;
+    if (!canRecruitByCap) return 0;
     if ((unit.age ?? 1) > state.enemyAge) return 0;
     const goldCost = discountedEnemyCost(state.difficulty, unit.cost, 'unit');
     const manaCost = unit.manaCost ?? 0;
@@ -57,7 +59,10 @@ export function buildLegalActionMask(state: GameStateSnapshot): MLLegalActionMas
   });
 
   const ageUpLegal =
-    state.enemyAge < PROGRESSION_CONFIG.maxAge && state.enemyGold >= state.enemyAgeCost;
+    state.enemyAge < PROGRESSION_CONFIG.maxAge &&
+    state.enemyGold >= state.enemyAgeCost &&
+    state.enemyMana >= state.enemyAgeManaCost &&
+    state.enemyAgeRequirementsMet;
 
   const manaUpgradeCost = getManaCost(state.enemyManaLevel);
   const manaUpgradeLegal = state.enemyGold >= manaUpgradeCost;

@@ -15,9 +15,6 @@ export class EconomySystem {
     state.economy.enemy.gold += state.economy.enemy.goldIncomePerSec * deltaSeconds;
     state.economy.enemy.mana += state.economy.enemy.manaIncomePerSec * deltaSeconds;
 
-    // Flags
-    state.progression.player.ageProgress.canUpgrade = state.economy.player.gold >= state.progression.player.ageProgress.costGold;
-    state.progression.enemy.ageProgress.canUpgrade = state.economy.enemy.gold >= state.progression.enemy.ageProgress.costGold;
   }
 
   public static updateQueues(state: GameState, engine: GameEngine): void {

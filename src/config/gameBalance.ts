@@ -75,9 +75,42 @@ export const AGE_UPGRADE_COSTS: Record<number, number> = {
   7: 10000,  // Age 6 -> 7 (or max) - using 7 as theoretical max or display
 };
 
+/**
+ * Additional age-up requirements and mana costs keyed by target age.
+ * Example: key 4 means requirements/costs to upgrade from age 3 -> 4.
+ */
+export const AGE_UPGRADE_RULES: Record<
+  number,
+  {
+    manaCost: number;
+    prevAgeUnitsRequired: number;
+    totalUnitsRequired: number;
+  }
+> = {
+  2: { manaCost: 0, prevAgeUnitsRequired: 5, totalUnitsRequired: 0 },
+  3: { manaCost: 0, prevAgeUnitsRequired: 5, totalUnitsRequired: 0 },
+  4: { manaCost: 200, prevAgeUnitsRequired: 0, totalUnitsRequired: 20 },
+  5: { manaCost: 600, prevAgeUnitsRequired: 0, totalUnitsRequired: 30 },
+  6: { manaCost: 1000, prevAgeUnitsRequired: 0, totalUnitsRequired: 50 },
+};
+
 export const getAgeUpgradeCost = (currentAge: number): number => {
   const targetAge = currentAge + 1;
   return AGE_UPGRADE_COSTS[targetAge] || 999999;
+};
+
+export const getAgeUpgradeManaCost = (currentAge: number): number => {
+  const targetAge = currentAge + 1;
+  return AGE_UPGRADE_RULES[targetAge]?.manaCost ?? 0;
+};
+
+export const getAgeUpgradeRequirementRule = (currentAge: number) => {
+  const targetAge = currentAge + 1;
+  return AGE_UPGRADE_RULES[targetAge] ?? {
+    manaCost: 0,
+    prevAgeUnitsRequired: 0,
+    totalUnitsRequired: 0,
+  };
 };
 
 /**
@@ -151,12 +184,12 @@ export const DIFFICULTY_CONFIG = {
     stackSizeMultiplierMax: 2.5, 
   },
   MEDIUM: {
-    goldMultiplier: 1.2,
-    manaIncomeMultiplier: 1.0,
+    goldMultiplier: 1.1,
+    manaIncomeMultiplier: 1.05,
     killGoldMultiplier: 1.0,
-    unitDiscountMultiplier: 0.8,
-    turretUpgradeDiscountMultiplier: 0.8,
-    turretEngineDiscountMultiplier: 0.8,
+    unitDiscountMultiplier: 0.9,
+    turretUpgradeDiscountMultiplier: 0.9,
+    turretEngineDiscountMultiplier: 0.9,
     stackSizeMultiplier: 2.5,
     stackSizeMultiplierMax: 3.0,
   },
@@ -233,6 +266,14 @@ export const QUEUE_CONFIG = {
   // Time penalty for each unit in queue (makes later units train slower)
   queueTimePenaltyMs: 100,
 };
+
+/**
+ * Hard cap for live units per side on the battlefield.
+ * Recruit actions are blocked at cap and queued unit completions wait until a slot opens.
+ */
+export const UNIT_CAP_CONFIG = {
+  maxActiveUnitsPerSide: 50,
+} as const;
 
 /**
  * Game Loop Configuration
