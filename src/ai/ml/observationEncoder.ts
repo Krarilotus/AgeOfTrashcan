@@ -34,18 +34,9 @@ function normalize(value: number, scale: number): number {
   return clamp(value / scale, -1, 1);
 }
 
-function mean(values: number[]): number {
-  if (values.length === 0) return 0;
-  return values.reduce((sum, item) => sum + item, 0) / values.length;
-}
-
-function sum(values: number[]): number {
-  return values.reduce((total, value) => total + value, 0);
-}
-
-function averageShortfall(values: number[]): number {
-  if (values.length === 0) return 0;
-  return sum(values) / values.length;
+function meanFromTotal(total: number, count: number): number {
+  if (count <= 0) return 0;
+  return total / count;
 }
 
 function encodeHistoryToken(token: MLHistoryToken): number[] {
@@ -72,7 +63,11 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
   const ownBaseX = Number.isFinite(state.enemyBaseX) ? state.enemyBaseX : width;
   const pushToken = (token: number[]) => {
     if (tokens.length >= maxTokens) return;
-    tokens.push(token.map((value) => clamp(value, -1, 1)));
+    const clamped = new Array<number>(token.length);
+    for (let i = 0; i < token.length; i += 1) {
+      clamped[i] = clamp(token[i], -1, 1);
+    }
+    tokens.push(clamped);
   };
 
   const ownUnits = [...state.enemyUnits]
@@ -107,8 +102,12 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
   });
 
   const projectiles = state.projectiles ?? [];
-  const ownProjectiles = projectiles.filter((projectile) => projectile.owner === 'SELF');
-  const opponentProjectiles = projectiles.filter((projectile) => projectile.owner === 'OPPONENT');
+  const ownProjectiles: typeof projectiles = [];
+  const opponentProjectiles: typeof projectiles = [];
+  for (const projectile of projectiles) {
+    if (projectile.owner === 'SELF') ownProjectiles.push(projectile);
+    else if (projectile.owner === 'OPPONENT') opponentProjectiles.push(projectile);
+  }
 
   ownProjectiles.forEach((projectile) => {
     pushToken([
@@ -137,8 +136,12 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
   });
 
   const effects = state.activeAbilityEffects ?? [];
-  const ownEffects = effects.filter((effect) => effect.owner === 'SELF');
-  const opponentEffects = effects.filter((effect) => effect.owner === 'OPPONENT');
+  const ownEffects: typeof effects = [];
+  const opponentEffects: typeof effects = [];
+  for (const effect of effects) {
+    if (effect.owner === 'SELF') ownEffects.push(effect);
+    else if (effect.owner === 'OPPONENT') opponentEffects.push(effect);
+  }
   const encodeEffectType = (type: string): number => {
     if (type === 'ability_cast') return 0.33;
     if (type === 'ability_impact') return 0.66;
@@ -178,99 +181,196 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
   const width = Math.max(1, state.battlefieldWidth);
   const opponentBaseX = Number.isFinite(state.playerBaseX) ? state.playerBaseX : 0;
   const ownBaseX = Number.isFinite(state.enemyBaseX) ? state.enemyBaseX : width;
-  const playerUnitHealth = state.playerUnits.map((unit) => unit.health);
-  const enemyUnitHealth = state.enemyUnits.map((unit) => unit.health);
-  const playerUnitDamage = state.playerUnits.map((unit) => unit.damage);
-  const enemyUnitDamage = state.enemyUnits.map((unit) => unit.damage);
-  const playerUnitRange = state.playerUnits.map((unit) => unit.range);
-  const enemyUnitRange = state.enemyUnits.map((unit) => unit.range);
-  const playerUnitPositions = state.playerUnits.map((unit) => unit.position);
-  const enemyUnitPositions = state.enemyUnits.map((unit) => unit.position);
-  const playerUnitCooldown = state.playerUnits.map((unit) => unit.attackCooldownRemaining ?? 0);
-  const enemyUnitCooldown = state.enemyUnits.map((unit) => unit.attackCooldownRemaining ?? 0);
-  const playerSkillCooldown = state.playerUnits.map((unit) => unit.skillCooldownRemaining ?? 0);
-  const enemySkillCooldown = state.enemyUnits.map((unit) => unit.skillCooldownRemaining ?? 0);
+  let playerUnitCount = 0;
+  let playerTotalUnitHealth = 0;
+  let playerTotalUnitDamage = 0;
+  let playerTotalUnitRange = 0;
+  let playerTotalUnitPosition = 0;
+  let playerTotalUnitCooldown = 0;
+  let playerTotalSkillCooldown = 0;
+  for (const unit of state.playerUnits) {
+    playerUnitCount += 1;
+    playerTotalUnitHealth += unit.health;
+    playerTotalUnitDamage += unit.damage;
+    playerTotalUnitRange += unit.range;
+    playerTotalUnitPosition += unit.position;
+    playerTotalUnitCooldown += unit.attackCooldownRemaining ?? 0;
+    playerTotalSkillCooldown += unit.skillCooldownRemaining ?? 0;
+  }
 
-  const playerTotalUnitHealth = sum(playerUnitHealth);
-  const enemyTotalUnitHealth = sum(enemyUnitHealth);
-  const playerTotalUnitDamage = sum(playerUnitDamage);
-  const enemyTotalUnitDamage = sum(enemyUnitDamage);
+  let enemyUnitCount = 0;
+  let enemyTotalUnitHealth = 0;
+  let enemyTotalUnitDamage = 0;
+  let enemyTotalUnitRange = 0;
+  let enemyTotalUnitPosition = 0;
+  let enemyTotalUnitCooldown = 0;
+  let enemyTotalSkillCooldown = 0;
+  for (const unit of state.enemyUnits) {
+    enemyUnitCount += 1;
+    enemyTotalUnitHealth += unit.health;
+    enemyTotalUnitDamage += unit.damage;
+    enemyTotalUnitRange += unit.range;
+    enemyTotalUnitPosition += unit.position;
+    enemyTotalUnitCooldown += unit.attackCooldownRemaining ?? 0;
+    enemyTotalSkillCooldown += unit.skillCooldownRemaining ?? 0;
+  }
 
   const projectileState = state.projectiles ?? [];
-  const ownProjectiles = projectileState.filter((projectile) => projectile.owner === 'SELF');
-  const opponentProjectiles = projectileState.filter((projectile) => projectile.owner === 'OPPONENT');
-  const ownProjectileDamage = sum(ownProjectiles.map((projectile) => projectile.damage));
-  const opponentProjectileDamage = sum(opponentProjectiles.map((projectile) => projectile.damage));
-  const ownProjectileNearEnemyBase = ownProjectiles.filter(
-    (projectile) => Math.abs(projectile.x - opponentBaseX) < 15
-  ).length;
-  const opponentProjectileNearOwnBase = opponentProjectiles.filter(
-    (projectile) => Math.abs(projectile.x - ownBaseX) < 15
-  ).length;
-  const ownProjectileSplash = ownProjectiles.filter((projectile) => projectile.splashRadius > 0).length;
-  const opponentProjectileSplash = opponentProjectiles.filter((projectile) => projectile.splashRadius > 0).length;
-  const ownProjectileFalling = ownProjectiles.filter((projectile) => projectile.isFalling).length;
-  const opponentProjectileFalling = opponentProjectiles.filter((projectile) => projectile.isFalling).length;
-  const ownProjectileDrone = ownProjectiles.filter((projectile) => projectile.hasDroneGuidance).length;
-  const opponentProjectileDrone = opponentProjectiles.filter((projectile) => projectile.hasDroneGuidance).length;
-  const ownProjectileLife = mean(ownProjectiles.map((projectile) => projectile.lifeMs));
-  const opponentProjectileLife = mean(opponentProjectiles.map((projectile) => projectile.lifeMs));
+  let ownProjectileCount = 0;
+  let ownProjectileDamage = 0;
+  let ownProjectileNearEnemyBase = 0;
+  let ownProjectileSplash = 0;
+  let ownProjectileFalling = 0;
+  let ownProjectileDrone = 0;
+  let ownProjectileLifeTotal = 0;
+  let opponentProjectileCount = 0;
+  let opponentProjectileDamage = 0;
+  let opponentProjectileNearOwnBase = 0;
+  let opponentProjectileSplash = 0;
+  let opponentProjectileFalling = 0;
+  let opponentProjectileDrone = 0;
+  let opponentProjectileLifeTotal = 0;
+  for (const projectile of projectileState) {
+    if (projectile.owner === 'SELF') {
+      ownProjectileCount += 1;
+      ownProjectileDamage += projectile.damage;
+      ownProjectileLifeTotal += projectile.lifeMs;
+      if (Math.abs(projectile.x - opponentBaseX) < 15) ownProjectileNearEnemyBase += 1;
+      if (projectile.splashRadius > 0) ownProjectileSplash += 1;
+      if (projectile.isFalling) ownProjectileFalling += 1;
+      if (projectile.hasDroneGuidance) ownProjectileDrone += 1;
+    } else if (projectile.owner === 'OPPONENT') {
+      opponentProjectileCount += 1;
+      opponentProjectileDamage += projectile.damage;
+      opponentProjectileLifeTotal += projectile.lifeMs;
+      if (Math.abs(projectile.x - ownBaseX) < 15) opponentProjectileNearOwnBase += 1;
+      if (projectile.splashRadius > 0) opponentProjectileSplash += 1;
+      if (projectile.isFalling) opponentProjectileFalling += 1;
+      if (projectile.hasDroneGuidance) opponentProjectileDrone += 1;
+    }
+  }
+  const ownProjectileLife = meanFromTotal(ownProjectileLifeTotal, ownProjectileCount);
+  const opponentProjectileLife = meanFromTotal(opponentProjectileLifeTotal, opponentProjectileCount);
 
   const abilityEffects = state.activeAbilityEffects ?? [];
-  const ownAbilityEffects = abilityEffects.filter((effect) => effect.owner === 'SELF');
-  const opponentAbilityEffects = abilityEffects.filter((effect) => effect.owner === 'OPPONENT');
-  const ownAbilityCast = ownAbilityEffects.filter((effect) => effect.type === 'ability_cast').length;
-  const opponentAbilityCast = opponentAbilityEffects.filter((effect) => effect.type === 'ability_cast').length;
-  const ownAbilityImpact = ownAbilityEffects.filter((effect) => effect.type === 'ability_impact').length;
-  const opponentAbilityImpact = opponentAbilityEffects.filter((effect) => effect.type === 'ability_impact').length;
-  const ownFlamethrowerEffects = ownAbilityEffects.filter((effect) => effect.type === 'flamethrower').length;
-  const opponentFlamethrowerEffects = opponentAbilityEffects.filter((effect) => effect.type === 'flamethrower').length;
+  let ownAbilityEffectsCount = 0;
+  let opponentAbilityEffectsCount = 0;
+  let ownAbilityCast = 0;
+  let opponentAbilityCast = 0;
+  let ownAbilityImpact = 0;
+  let opponentAbilityImpact = 0;
+  let ownFlamethrowerEffects = 0;
+  let opponentFlamethrowerEffects = 0;
+  for (const effect of abilityEffects) {
+    const isOwn = effect.owner === 'SELF';
+    if (isOwn) ownAbilityEffectsCount += 1;
+    else if (effect.owner === 'OPPONENT') opponentAbilityEffectsCount += 1;
+    else continue;
+    if (effect.type === 'ability_cast') {
+      if (isOwn) ownAbilityCast += 1;
+      else opponentAbilityCast += 1;
+    } else if (effect.type === 'ability_impact') {
+      if (isOwn) ownAbilityImpact += 1;
+      else opponentAbilityImpact += 1;
+    } else if (effect.type === 'flamethrower') {
+      if (isOwn) ownFlamethrowerEffects += 1;
+      else opponentFlamethrowerEffects += 1;
+    }
+  }
 
   const unitDiag = state.unitCatalogDiagnostics ?? [];
   const turretDiag = state.turretCatalogDiagnostics ?? [];
   const summary = state.actionConstraintSummary;
-  const legalUnits = summary?.legalUnits ?? unitDiag.filter((item) => item.legalNow).length;
-  const legalTurrets = summary?.legalTurrets ?? turretDiag.filter((item) => item.legalNow).length;
-  const unitBlockedByAge = summary?.unitBlockedByAge ?? unitDiag.filter((item) => item.ageLocked).length;
-  const unitBlockedByGold =
-    summary?.unitBlockedByGold ??
-    unitDiag.filter((item) => !item.ageLocked && item.goldShortfall > 0).length;
-  const unitBlockedByMana =
-    summary?.unitBlockedByMana ??
-    unitDiag.filter((item) => !item.ageLocked && item.manaShortfall > 0).length;
-  const unitBlockedByQueue =
-    summary?.unitBlockedByQueue ??
-    unitDiag.filter((item) => !item.ageLocked && item.queueBlocked).length;
-  const turretBlockedByAge = summary?.turretBlockedByAge ?? turretDiag.filter((item) => item.ageLocked).length;
-  const turretBlockedByGold =
-    summary?.turretBlockedByGold ??
-    turretDiag.filter((item) => !item.ageLocked && item.goldShortfall > 0).length;
-  const turretBlockedByMana =
-    summary?.turretBlockedByMana ??
-    turretDiag.filter((item) => !item.ageLocked && item.manaShortfall > 0).length;
-  const turretBlockedBySlot =
-    summary?.turretBlockedBySlot ??
-    turretDiag.filter((item) => !item.ageLocked && item.slotBlocked).length;
-  const turretBlockedByQueue =
-    summary?.turretBlockedByQueue ??
-    turretDiag.filter((item) => !item.ageLocked && item.queueBlocked).length;
 
-  const avgUnitGoldShortfall = averageShortfall(unitDiag.map((item) => item.goldShortfall));
-  const avgUnitManaShortfall = averageShortfall(unitDiag.map((item) => item.manaShortfall));
-  const avgTurretGoldShortfall = averageShortfall(turretDiag.map((item) => item.goldShortfall));
-  const avgTurretManaShortfall = averageShortfall(turretDiag.map((item) => item.manaShortfall));
-  const maxUnitPower = unitDiag.length > 0 ? Math.max(...unitDiag.map((item) => item.scorePower)) : 0;
-  const avgAffordableUnitPower = mean(unitDiag.filter((item) => item.legalNow).map((item) => item.scorePower));
-  const maxTurretPower = turretDiag.length > 0 ? Math.max(...turretDiag.map((item) => item.scorePower)) : 0;
-  const avgAffordableTurretPower = mean(
-    turretDiag.filter((item) => item.legalNow).map((item) => item.scorePower)
-  );
+  let diagLegalUnits = 0;
+  let diagUnitBlockedByAge = 0;
+  let diagUnitBlockedByGold = 0;
+  let diagUnitBlockedByMana = 0;
+  let diagUnitBlockedByQueue = 0;
+  let diagUnitBlockedByCap = 0;
+  let unitGoldShortfallTotal = 0;
+  let unitManaShortfallTotal = 0;
+  let maxUnitPower = 0;
+  let affordableUnitPowerTotal = 0;
+  let affordableUnitCount = 0;
+  for (const item of unitDiag) {
+    unitGoldShortfallTotal += item.goldShortfall;
+    unitManaShortfallTotal += item.manaShortfall;
+    if (item.scorePower > maxUnitPower) maxUnitPower = item.scorePower;
+    if (item.legalNow) {
+      diagLegalUnits += 1;
+      affordableUnitPowerTotal += item.scorePower;
+      affordableUnitCount += 1;
+    }
+    if (item.ageLocked) diagUnitBlockedByAge += 1;
+    if (!item.ageLocked && item.goldShortfall > 0) diagUnitBlockedByGold += 1;
+    if (!item.ageLocked && item.manaShortfall > 0) diagUnitBlockedByMana += 1;
+    if (!item.ageLocked && item.queueBlocked) diagUnitBlockedByQueue += 1;
+    if (!item.ageLocked && item.capBlocked) diagUnitBlockedByCap += 1;
+  }
+  const avgUnitGoldShortfall = meanFromTotal(unitGoldShortfallTotal, unitDiag.length);
+  const avgUnitManaShortfall = meanFromTotal(unitManaShortfallTotal, unitDiag.length);
+  const avgAffordableUnitPower = meanFromTotal(affordableUnitPowerTotal, affordableUnitCount);
+
+  let diagLegalTurrets = 0;
+  let diagTurretBlockedByAge = 0;
+  let diagTurretBlockedByGold = 0;
+  let diagTurretBlockedByMana = 0;
+  let diagTurretBlockedBySlot = 0;
+  let diagTurretBlockedByQueue = 0;
+  let turretGoldShortfallTotal = 0;
+  let turretManaShortfallTotal = 0;
+  let maxTurretPower = 0;
+  let affordableTurretPowerTotal = 0;
+  let affordableTurretCount = 0;
+  for (const item of turretDiag) {
+    turretGoldShortfallTotal += item.goldShortfall;
+    turretManaShortfallTotal += item.manaShortfall;
+    if (item.scorePower > maxTurretPower) maxTurretPower = item.scorePower;
+    if (item.legalNow) {
+      diagLegalTurrets += 1;
+      affordableTurretPowerTotal += item.scorePower;
+      affordableTurretCount += 1;
+    }
+    if (item.ageLocked) diagTurretBlockedByAge += 1;
+    if (!item.ageLocked && item.goldShortfall > 0) diagTurretBlockedByGold += 1;
+    if (!item.ageLocked && item.manaShortfall > 0) diagTurretBlockedByMana += 1;
+    if (!item.ageLocked && item.slotBlocked) diagTurretBlockedBySlot += 1;
+    if (!item.ageLocked && item.queueBlocked) diagTurretBlockedByQueue += 1;
+  }
+  const avgTurretGoldShortfall = meanFromTotal(turretGoldShortfallTotal, turretDiag.length);
+  const avgTurretManaShortfall = meanFromTotal(turretManaShortfallTotal, turretDiag.length);
+  const avgAffordableTurretPower = meanFromTotal(affordableTurretPowerTotal, affordableTurretCount);
+
+  const legalUnits = summary?.legalUnits ?? diagLegalUnits;
+  const legalTurrets = summary?.legalTurrets ?? diagLegalTurrets;
+  const unitBlockedByAge = summary?.unitBlockedByAge ?? diagUnitBlockedByAge;
+  const unitBlockedByGold = summary?.unitBlockedByGold ?? diagUnitBlockedByGold;
+  const unitBlockedByMana = summary?.unitBlockedByMana ?? diagUnitBlockedByMana;
+  const unitBlockedByQueue = summary?.unitBlockedByQueue ?? diagUnitBlockedByQueue;
+  const unitBlockedByCap = summary?.unitBlockedByCap ?? diagUnitBlockedByCap;
+  const turretBlockedByAge = summary?.turretBlockedByAge ?? diagTurretBlockedByAge;
+  const turretBlockedByGold = summary?.turretBlockedByGold ?? diagTurretBlockedByGold;
+  const turretBlockedByMana = summary?.turretBlockedByMana ?? diagTurretBlockedByMana;
+  const turretBlockedBySlot = summary?.turretBlockedBySlot ?? diagTurretBlockedBySlot;
+  const turretBlockedByQueue = summary?.turretBlockedByQueue ?? diagTurretBlockedByQueue;
+
+  const enemyMeanUnitHealth = meanFromTotal(enemyTotalUnitHealth, enemyUnitCount);
+  const playerMeanUnitHealth = meanFromTotal(playerTotalUnitHealth, playerUnitCount);
+  const enemyMeanUnitDamage = meanFromTotal(enemyTotalUnitDamage, enemyUnitCount);
+  const playerMeanUnitDamage = meanFromTotal(playerTotalUnitDamage, playerUnitCount);
+  const enemyMeanUnitRange = meanFromTotal(enemyTotalUnitRange, enemyUnitCount);
+  const playerMeanUnitRange = meanFromTotal(playerTotalUnitRange, playerUnitCount);
+  const enemyMeanUnitPosition = meanFromTotal(enemyTotalUnitPosition, enemyUnitCount);
+  const playerMeanUnitPosition = meanFromTotal(playerTotalUnitPosition, playerUnitCount);
+  const enemyMeanUnitCooldown = meanFromTotal(enemyTotalUnitCooldown, enemyUnitCount);
+  const playerMeanUnitCooldown = meanFromTotal(playerTotalUnitCooldown, playerUnitCount);
+  const enemyMeanSkillCooldown = meanFromTotal(enemyTotalSkillCooldown, enemyUnitCount);
+  const playerMeanSkillCooldown = meanFromTotal(playerTotalSkillCooldown, playerUnitCount);
+
   const legalActionTypes = countLegal(actionMask.actionTypeMask);
   const legalBuySlots = countLegal(actionMask.buySlotMask);
   const legalSellSlots = countLegal(actionMask.sellSlotMask);
-  const unitBlockedByCap =
-    summary?.unitBlockedByCap ??
-    unitDiag.filter((item) => !item.ageLocked && item.capBlocked).length;
   const queueRemaining = summary?.queueRemaining ?? Math.max(0, 10 - state.enemyQueueSize);
   const emptyUnlockedTurretSlots =
     summary?.emptyUnlockedTurretSlots ??
@@ -333,12 +433,12 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
     normalize(playerTotalUnitDamage, 4000),
     normalize(enemyTotalUnitDamage, 4000),
     normalize(enemyTotalUnitDamage - playerTotalUnitDamage, 4000),
-    normalize(mean(enemyUnitHealth), 2500),
-    normalize(mean(playerUnitHealth), 2500),
-    normalize(mean(enemyUnitDamage), 300),
-    normalize(mean(playerUnitDamage), 300),
-    normalize(mean(enemyUnitRange), 40),
-    normalize(mean(playerUnitRange), 40),
+    normalize(enemyMeanUnitHealth, 2500),
+    normalize(playerMeanUnitHealth, 2500),
+    normalize(enemyMeanUnitDamage, 300),
+    normalize(playerMeanUnitDamage, 300),
+    normalize(enemyMeanUnitRange, 40),
+    normalize(playerMeanUnitRange, 40),
     normalize(state.enemyQueueSize, 10),
     normalize(state.playerQueueSize, 10),
     normalize(state.enemyTurretQueueCount, 6),
@@ -347,14 +447,14 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
     normalize(state.enemyUnitsNearPlayerBase, 20),
     normalize(state.battlefieldWidth, 400),
     normalize(state.lastEnemyBaseAttackTime, 600),
-    normalize(mean(enemyUnitPositions), Math.max(1, state.battlefieldWidth)),
-    normalize(mean(playerUnitPositions), Math.max(1, state.battlefieldWidth)),
-    normalize(mean(enemyUnitCooldown), 3),
-    normalize(mean(playerUnitCooldown), 3),
-    normalize(mean(enemySkillCooldown), 8),
-    normalize(mean(playerSkillCooldown), 8),
-    normalize(ownProjectiles.length, 80),
-    normalize(opponentProjectiles.length, 80),
+    normalize(enemyMeanUnitPosition, Math.max(1, state.battlefieldWidth)),
+    normalize(playerMeanUnitPosition, Math.max(1, state.battlefieldWidth)),
+    normalize(enemyMeanUnitCooldown, 3),
+    normalize(playerMeanUnitCooldown, 3),
+    normalize(enemyMeanSkillCooldown, 8),
+    normalize(playerMeanSkillCooldown, 8),
+    normalize(ownProjectileCount, 80),
+    normalize(opponentProjectileCount, 80),
     normalize(ownProjectileDamage, 2500),
     normalize(opponentProjectileDamage, 2500),
     normalize(ownProjectileNearEnemyBase, 30),
@@ -367,8 +467,8 @@ function buildStaticStateVector(state: GameStateSnapshot, actionMask: MLLegalAct
     normalize(opponentProjectileDrone, 20),
     normalize(ownProjectileLife, 6000),
     normalize(opponentProjectileLife, 6000),
-    normalize(ownAbilityEffects.length, 80),
-    normalize(opponentAbilityEffects.length, 80),
+    normalize(ownAbilityEffectsCount, 80),
+    normalize(opponentAbilityEffectsCount, 80),
     normalize(ownAbilityCast, 40),
     normalize(opponentAbilityCast, 40),
     normalize(ownAbilityImpact, 40),

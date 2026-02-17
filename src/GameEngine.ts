@@ -557,8 +557,12 @@ export class GameEngine {
     const base = this.getBaseForOwner(owner);
     const opponent = this.getOpponentOwner(owner);
     const opponentBase = this.getBaseForOwner(opponent);
-    const ownUnitCount = Array.from(this.state.entities.values()).filter((entity) => entity.owner === owner).length;
-    const opponentUnitCount = Array.from(this.state.entities.values()).filter((entity) => entity.owner === opponent).length;
+    let ownUnitCount = 0;
+    let opponentUnitCount = 0;
+    for (const entity of this.state.entities.values()) {
+      if (entity.owner === owner) ownUnitCount += 1;
+      else if (entity.owner === opponent) opponentUnitCount += 1;
+    }
     const timeline = this.telemetry.bySide[owner].actionTimeline;
     timeline.push({
       tick: this.state.tick,
@@ -1774,17 +1778,25 @@ export class GameEngine {
     const econ = this.state.economy.enemy;
     const enemyAge = this.state.progression.enemy.age;
     const gameTime = (this.state.tick * FIXED_TIMESTEP) / 1000;
-    const playerUnits = Array.from(this.state.entities.values()).filter((e) => e.owner === 'PLAYER');
-    const enemyUnits = Array.from(this.state.entities.values()).filter((e) => e.owner === 'ENEMY');
-    const playerUnitCount = playerUnits.length;
-    const enemyUnitCount = enemyUnits.length;
-    const playerNearEnemyBase = playerUnits.filter((u) => Math.abs(u.transform.x - this.state.enemyBase.x) < 15).length;
+    let playerUnitCount = 0;
+    let enemyUnitCount = 0;
+    let playerNearEnemyBase = 0;
+    let playerHealthTotal = 0;
+    let playerHeavyUnits = 0;
+    for (const unit of this.state.entities.values()) {
+      if (unit.owner === 'PLAYER') {
+        playerUnitCount += 1;
+        playerHealthTotal += unit.health.current;
+        if (Math.abs(unit.transform.x - this.state.enemyBase.x) < 15) playerNearEnemyBase += 1;
+        if (unit.health.current >= 320) playerHeavyUnits += 1;
+      } else if (unit.owner === 'ENEMY') {
+        enemyUnitCount += 1;
+      }
+    }
     const severeOutnumbered = playerUnitCount >= Math.max(7, enemyUnitCount * 6) || playerNearEnemyBase >= 4;
-    const avgPlayerHp = playerUnitCount > 0
-      ? playerUnits.reduce((sum, u) => sum + u.health.current, 0) / playerUnitCount
-      : 0;
+    const avgPlayerHp = playerUnitCount > 0 ? playerHealthTotal / playerUnitCount : 0;
     const swarmPressure = playerUnitCount >= Math.max(6, enemyUnitCount + 4) || (playerUnitCount >= 4 && avgPlayerHp <= 180);
-    const heavyPressure = avgPlayerHp >= 260 || playerUnits.filter((u) => u.health.current >= 320).length >= 2;
+    const heavyPressure = avgPlayerHp >= 260 || playerHeavyUnits >= 2;
 
     const desiredSlotsByAge = enemyAge >= 6
       ? ((gameTime >= 140 && this.state.economy.enemy.mana >= 5000) ? 4 : 3)
