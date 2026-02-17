@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Any, Dict
 
 
 @dataclass(slots=True)
@@ -57,6 +58,7 @@ class RuntimeConfig:
     reward_terminal_scale_start: float = 1.0
     reward_terminal_scale_end: float = 5.0
     reward_curriculum_steps: int = 0
+    bridge_reward_profile: Dict[str, Any] = field(default_factory=dict)
     league_keep_top_n: int = 5
     league_keep_diverse_n: int = 5
     league_max_agents: int = 10

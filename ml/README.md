@@ -41,6 +41,7 @@ just install-torch-cuda
 just doctor
 just train-smoke
 just train-quick10
+just train-mid
 just train-overnight
 just serve-inference
 just clean-checkpoints
@@ -56,6 +57,7 @@ just install-torch-cuda
 ENV_BACKEND=auto RUN_NAME=my_experiment TOTAL_STEPS=5000000 NUM_ENVS=8 ROLLOUT_HORIZON=256 DEVICE=cuda just train
 ENV_BACKEND=game OPPONENT_DIFFICULTY=SMART SELF_DIFFICULTY=SMART_ML DECISION_FRAMES=30 just train-smoke
 ENV_BACKEND=game just train-quick10
+ENV_BACKEND=game SMART_ENV_AUTOSCALE=1 just train-mid
 ENV_BACKEND=game SMART_ENV_AUTOSCALE=1 just train
 ENV_BACKEND=game SMART_ENV_AUTOSCALE=1 MODEL_PRESET=large just train
 DEVICE=cuda just serve-inference
@@ -80,7 +82,10 @@ Important usage note for Git Bash:
 - Training now enables a keep-awake guard by default on Windows to prevent sleep/screensaver interruptions.
 - Non-resume training runs are clean by default: if `RUN_NAME` already exists, that run directory is deleted first.
 - `just train-quick10` is a tiny-network, short-step sanity probe for behavior checks before overnight runs.
+- `just train-mid` is a mid-large preset (`d_model=288`, `layers=9`, `heads=9`, `ffn=1152`) for shorter, stronger runs than `base`.
 - `just serve-inference` binds local-only (`127.0.0.1`) by default; `just serve-inference-public` binds `0.0.0.0` for LAN/server use.
+- Reward shaping defaults are loaded from `ml/reward_profile.json`; detailed explanation is in `ml/REWARD_SHAPING.md`.
+  - To disable profile loading and use only CLI/`just` reward args, pass `--reward-profile ""`.
 
 Cleanup helpers:
 
@@ -272,6 +277,10 @@ Optional: run inference under `systemd` and reverse proxy `/infer` through nginx
   - Scale for terminal win/loss reward from start to end of training.
 - `REWARD_CURRICULUM_STEPS`
   - Steps used for reward annealing; `0` means full `TOTAL_STEPS`.
+- `REWARD_PROFILE` / `--reward-profile`
+  - Path to reward-profile JSON (default: `ml/reward_profile.json`).
+  - Profile includes both trainer schedule and bridge-side reward components/weights.
+  - See `ml/REWARD_SHAPING.md` for exact formulas and recommended presets.
 - `RUN_NAME`
   - Folder name under `ml/checkpoints/` for one experiment.
 - `CHECKPOINT` + `ADDITIONAL_STEPS` / `TOTAL_STEPS`

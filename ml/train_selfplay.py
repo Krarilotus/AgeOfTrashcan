@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import shutil
-from typing import Callable, List
+from typing import Any, Callable, Dict, List
 
 
 def _parse_milestone_fractions(raw: str) -> List[float]:
@@ -20,10 +22,65 @@ def _parse_milestone_fractions(raw: str) -> List[float]:
     return sorted(set(values))
 
 
+def _load_reward_profile(path_raw: str) -> Dict[str, Any]:
+    path_text = (path_raw or "").strip()
+    if not path_text:
+        return {}
+    profile_path = Path(path_text)
+    if not profile_path.is_absolute():
+        profile_path = (Path.cwd() / profile_path).resolve()
+    if not profile_path.exists():
+        return {}
+    with profile_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"reward-profile must contain a JSON object: {profile_path}")
+    return payload
+
+
+def _apply_reward_profile(cfg, profile: Dict[str, Any]) -> None:
+    if not profile:
+        return
+    schedule = profile.get("schedule")
+    if isinstance(schedule, dict):
+        float_fields = {
+            "dense_start": "reward_dense_scale_start",
+            "dense_end": "reward_dense_scale_end",
+            "dense_decay_interval": "reward_dense_decay_interval",
+            "dense_decay_factor": "reward_dense_decay_factor",
+            "terminal_start": "reward_terminal_scale_start",
+            "terminal_end": "reward_terminal_scale_end",
+            "reward_clip_abs": "reward_clip_abs",
+        }
+        int_fields = {
+            "curriculum_steps": "reward_curriculum_steps",
+        }
+        bool_fields = {
+            "reward_normalize": "reward_normalize",
+        }
+        for key, attr in float_fields.items():
+            if key in schedule and isinstance(schedule[key], (int, float)):
+                setattr(cfg.runtime, attr, float(schedule[key]))
+        for key, attr in int_fields.items():
+            if key in schedule and isinstance(schedule[key], (int, float)):
+                setattr(cfg.runtime, attr, int(schedule[key]))
+        for key, attr in bool_fields.items():
+            if key in schedule and isinstance(schedule[key], bool):
+                setattr(cfg.runtime, attr, bool(schedule[key]))
+
+    bridge = profile.get("bridge")
+    if isinstance(bridge, dict):
+        cfg.runtime.bridge_reward_profile = bridge
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Age of Trashcan SMART_ML self-play policy")
     default_registry_output = str(
         (Path(__file__).resolve().parent.parent / "public" / "ml" / "checkpoints" / "index.json")
+    )
+    default_reward_profile = os.getenv(
+        "REWARD_PROFILE",
+        str((Path(__file__).resolve().parent / "reward_profile.json").resolve()),
     )
     parser.add_argument("--total-steps", type=int, default=10_000_000, help="Total environment steps")
     parser.add_argument("--num-envs", type=int, default=8, help="Number of parallel envs")
@@ -337,6 +394,12 @@ def parse_args() -> argparse.Namespace:
         help="Skip UI checkpoint registry export after training",
     )
     parser.set_defaults(export_registry=True)
+    parser.add_argument(
+        "--reward-profile",
+        type=str,
+        default=default_reward_profile,
+        help="Path to reward profile JSON (schedule + bridge component settings). Empty disables profile loading.",
+    )
     return parser.parse_args()
 
 
@@ -439,6 +502,8 @@ def main() -> None:
     cfg.runtime.smart_env_sample_hz = max(0.5, float(args.smart_env_sample_hz))
     cfg.runtime.smart_env_gpu_probe_hz = max(0.2, float(args.smart_env_gpu_probe_hz))
     cfg.runtime.smart_env_gpu_sustain_sec = max(1.0, float(args.smart_env_gpu_sustain_sec))
+    reward_profile = _load_reward_profile(args.reward_profile)
+    _apply_reward_profile(cfg, reward_profile)
     if cfg.runtime.reward_dense_scale_start < 0 or cfg.runtime.reward_dense_scale_end < 0:
         raise SystemExit("reward-dense-start and reward-dense-end must be >= 0")
     if cfg.runtime.reward_terminal_scale_start < 0 or cfg.runtime.reward_terminal_scale_end < 0:
@@ -496,6 +561,7 @@ def main() -> None:
             self_difficulty=args.self_difficulty,
             episode_seconds=args.episode_seconds,
             decision_frames=args.decision_frames,
+            reward_profile=cfg.runtime.bridge_reward_profile,
         )
     else:
         try:
@@ -505,6 +571,7 @@ def main() -> None:
                 self_difficulty=args.self_difficulty,
                 episode_seconds=args.episode_seconds,
                 decision_frames=args.decision_frames,
+                reward_profile=cfg.runtime.bridge_reward_profile,
             )
             probe_env.close()
             env_factory = lambda: GameBridgeEnv(
@@ -513,6 +580,7 @@ def main() -> None:
                 self_difficulty=args.self_difficulty,
                 episode_seconds=args.episode_seconds,
                 decision_frames=args.decision_frames,
+                reward_profile=cfg.runtime.bridge_reward_profile,
             )
             print("[env] backend=game (auto)")
         except Exception as exc:

@@ -17,6 +17,34 @@ import { BASE_CONFIG, INCOME_CONFIG, type GameDifficulty } from '../../src/confi
 import { getTurretEngineDef } from '../../src/config/turrets';
 
 type Owner = 'PLAYER' | 'ENEMY';
+type RewardComponentKey =
+  | 'enemy_unit_kill_value'
+  | 'own_unit_loss_value'
+  | 'enemy_base_damage'
+  | 'own_base_damage'
+  | 'safe_age_up_bonus'
+  | 'age_up_delay_penalty'
+  | 'lane_control_delta'
+  | 'illegal_action_penalty'
+  | 'terminal_outcome';
+
+interface RewardProfileResolved {
+  componentWeights: Record<RewardComponentKey, number>;
+  enemyUnitKillPerUnit: number;
+  ownUnitLossPerUnit: number;
+  laneControlDeltaPerUnit: number;
+  baseMilestoneRewards: [number, number, number];
+  safeAgeUpBonus: number;
+  illegalActionPenalty: number;
+  quickSellPenalty: number;
+  quickSellWindowSec: number;
+  ageDelayGracePerAgeSec: number;
+  ageDelayRampSec: number;
+  ageDelayPenaltyWeight: number;
+  terminalWin: number;
+  terminalLoss: number;
+  timeoutLoss: number;
+}
 
 type BridgeCommand =
   | {
@@ -35,6 +63,7 @@ type BridgeCommand =
         opponent_difficulty?: GameDifficulty;
         episode_seconds?: number;
         decision_frames?: number;
+        reward_profile?: Record<string, unknown> | null;
       };
     }
   | { cmd: 'reset'; seed: number }
@@ -117,6 +146,91 @@ function normalizeDifficulty(raw: unknown, fallback: GameDifficulty): GameDiffic
 }
 
 const FORCED_TIMEOUT_LOSS_SEC = 60 * 60;
+const DEFAULT_REWARD_PROFILE: RewardProfileResolved = {
+  componentWeights: {
+    enemy_unit_kill_value: 1.0,
+    own_unit_loss_value: 1.0,
+    enemy_base_damage: 1.0,
+    own_base_damage: 1.0,
+    safe_age_up_bonus: 1.0,
+    age_up_delay_penalty: 1.0,
+    lane_control_delta: 1.0,
+    illegal_action_penalty: 1.0,
+    terminal_outcome: 1.0,
+  },
+  enemyUnitKillPerUnit: 0.0,
+  ownUnitLossPerUnit: 0.0,
+  laneControlDeltaPerUnit: 0.0,
+  baseMilestoneRewards: [2, 4, 8],
+  safeAgeUpBonus: 1.2,
+  illegalActionPenalty: -0.5,
+  quickSellPenalty: -0.5,
+  quickSellWindowSec: 3.0,
+  ageDelayGracePerAgeSec: 180,
+  ageDelayRampSec: 180,
+  ageDelayPenaltyWeight: 1.0,
+  terminalWin: 40.0,
+  terminalLoss: -40.0,
+  timeoutLoss: -40.0,
+};
+
+function finiteOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function mergeRewardProfile(raw: unknown): RewardProfileResolved {
+  const merged: RewardProfileResolved = {
+    componentWeights: { ...DEFAULT_REWARD_PROFILE.componentWeights },
+    enemyUnitKillPerUnit: DEFAULT_REWARD_PROFILE.enemyUnitKillPerUnit,
+    ownUnitLossPerUnit: DEFAULT_REWARD_PROFILE.ownUnitLossPerUnit,
+    laneControlDeltaPerUnit: DEFAULT_REWARD_PROFILE.laneControlDeltaPerUnit,
+    baseMilestoneRewards: [...DEFAULT_REWARD_PROFILE.baseMilestoneRewards],
+    safeAgeUpBonus: DEFAULT_REWARD_PROFILE.safeAgeUpBonus,
+    illegalActionPenalty: DEFAULT_REWARD_PROFILE.illegalActionPenalty,
+    quickSellPenalty: DEFAULT_REWARD_PROFILE.quickSellPenalty,
+    quickSellWindowSec: DEFAULT_REWARD_PROFILE.quickSellWindowSec,
+    ageDelayGracePerAgeSec: DEFAULT_REWARD_PROFILE.ageDelayGracePerAgeSec,
+    ageDelayRampSec: DEFAULT_REWARD_PROFILE.ageDelayRampSec,
+    ageDelayPenaltyWeight: DEFAULT_REWARD_PROFILE.ageDelayPenaltyWeight,
+    terminalWin: DEFAULT_REWARD_PROFILE.terminalWin,
+    terminalLoss: DEFAULT_REWARD_PROFILE.terminalLoss,
+    timeoutLoss: DEFAULT_REWARD_PROFILE.timeoutLoss,
+  };
+  if (!raw || typeof raw !== 'object') return merged;
+  const src = raw as Record<string, unknown>;
+  const weightsRaw = src.component_weights;
+  if (weightsRaw && typeof weightsRaw === 'object') {
+    const weightsObj = weightsRaw as Record<string, unknown>;
+    (Object.keys(merged.componentWeights) as RewardComponentKey[]).forEach((key) => {
+      merged.componentWeights[key] = finiteOr(weightsObj[key], merged.componentWeights[key]);
+    });
+  }
+  const milestones = src.base_milestone_rewards;
+  if (Array.isArray(milestones) && milestones.length >= 3) {
+    merged.baseMilestoneRewards = [
+      finiteOr(milestones[0], merged.baseMilestoneRewards[0]),
+      finiteOr(milestones[1], merged.baseMilestoneRewards[1]),
+      finiteOr(milestones[2], merged.baseMilestoneRewards[2]),
+    ];
+  }
+  merged.safeAgeUpBonus = finiteOr(src.safe_age_up_bonus, merged.safeAgeUpBonus);
+  merged.enemyUnitKillPerUnit = finiteOr(src.enemy_unit_kill_per_unit, merged.enemyUnitKillPerUnit);
+  merged.ownUnitLossPerUnit = finiteOr(src.own_unit_loss_per_unit, merged.ownUnitLossPerUnit);
+  merged.laneControlDeltaPerUnit = finiteOr(src.lane_control_delta_per_unit, merged.laneControlDeltaPerUnit);
+  merged.illegalActionPenalty = finiteOr(src.illegal_action_penalty, merged.illegalActionPenalty);
+  merged.quickSellPenalty = finiteOr(src.quick_sell_penalty, merged.quickSellPenalty);
+  merged.quickSellWindowSec = Math.max(0, finiteOr(src.quick_sell_window_sec, merged.quickSellWindowSec));
+  merged.ageDelayGracePerAgeSec = Math.max(
+    1,
+    finiteOr(src.age_delay_grace_per_age_sec, merged.ageDelayGracePerAgeSec)
+  );
+  merged.ageDelayRampSec = Math.max(1, finiteOr(src.age_delay_ramp_sec, merged.ageDelayRampSec));
+  merged.ageDelayPenaltyWeight = finiteOr(src.age_delay_penalty_weight, merged.ageDelayPenaltyWeight);
+  merged.terminalWin = finiteOr(src.terminal_win, merged.terminalWin);
+  merged.terminalLoss = finiteOr(src.terminal_loss, merged.terminalLoss);
+  merged.timeoutLoss = finiteOr(src.timeout_loss, merged.timeoutLoss);
+  return merged;
+}
 
 class BridgeRuntime {
   private engine: GameEngine | null = null;
@@ -145,6 +259,7 @@ class BridgeRuntime {
   private episodeManaSpent = 0;
   private peakEnemyAge = 1;
   private peakEnemyTurretCount = 0;
+  private rewardProfile: RewardProfileResolved = mergeRewardProfile(null);
 
   init(command: Extract<BridgeCommand, { cmd: 'init' }>): Record<string, unknown> {
     this.staticDim = Math.max(1, command.model.static_dim ?? this.staticDim);
@@ -161,6 +276,7 @@ class BridgeRuntime {
       command.options?.opponent_difficulty,
       this.opponentDifficulty
     );
+    this.rewardProfile = mergeRewardProfile(command.options?.reward_profile);
 
     return {
       ok: true,
@@ -174,6 +290,7 @@ class BridgeRuntime {
         slot_dim: this.slotDim,
         self_difficulty: this.selfDifficulty,
         opponent_difficulty: this.opponentDifficulty,
+        reward_profile: this.rewardProfile,
       },
     };
   }
@@ -509,50 +626,52 @@ class BridgeRuntime {
     executedAction: AIDecision['action'],
     executedSlotIndex: number | null,
     decisionTimeSec: number
-  ): Record<string, number> {
-    const enemyUnitKillValue = 0;
-    const ownUnitLossValue = 0;
+  ): Record<RewardComponentKey, number> {
+    const rp = this.rewardProfile;
+    const enemyUnitDelta = Math.max(0, prev.playerUnitCount - next.playerUnitCount);
+    const ownUnitDelta = Math.max(0, prev.enemyUnitCount - next.enemyUnitCount);
+    const enemyUnitKillValue = enemyUnitDelta * rp.enemyUnitKillPerUnit;
+    const ownUnitLossValue = ownUnitDelta * rp.ownUnitLossPerUnit;
     const enemyBaseDamage = this.computeOneTimeBaseMilestones(
       prev.playerBaseHealth / Math.max(1, prev.playerBaseMaxHealth),
       next.playerBaseHealth / Math.max(1, next.playerBaseMaxHealth),
       this.opponentBaseMilestonesAwarded,
-      [2, 4, 8]
+      rp.baseMilestoneRewards
     );
     const ownBaseDamage = -this.computeOneTimeBaseMilestones(
       prev.enemyBaseHealth / Math.max(1, prev.enemyBaseMaxHealth),
       next.enemyBaseHealth / Math.max(1, next.enemyBaseMaxHealth),
       this.ownBaseMilestonesAwarded,
-      [2, 4, 8]
+      rp.baseMilestoneRewards
     );
-    const safeAgeUpBonus =
-      next.enemyAge > prev.enemyAge && next.enemyBaseHealth / Math.max(1, next.enemyBaseMaxHealth) > 0.6
-        ? 1.2
-        : 0;
-    const laneControlDelta = 0;
+    const safeAgeUpBonus = next.enemyAge > prev.enemyAge ? rp.safeAgeUpBonus : 0;
+    const prevLaneControl = prev.enemyUnitsNearPlayerBase - prev.playerUnitsNearEnemyBase;
+    const nextLaneControl = next.enemyUnitsNearPlayerBase - next.playerUnitsNearEnemyBase;
+    const laneControlDelta = (nextLaneControl - prevLaneControl) * rp.laneControlDeltaPerUnit;
     const ageUpDelayPenalty = this.computeAgeUpDelayPenalty(prev, next);
-    let illegalActionPenalty = legalAndApplied ? 0 : -0.5;
+    let illegalActionPenalty = legalAndApplied ? 0 : rp.illegalActionPenalty;
     if (legalAndApplied && executedAction === 'SELL_TURRET_ENGINE') {
       // Penalize quick buy->sell flips (within 3 seconds on same slot).
       if (executedSlotIndex !== null) {
         const lastBuyTime = this.lastBuyTimeBySlot.get(executedSlotIndex);
         if (lastBuyTime !== undefined) {
           const sinceBuySec = Math.max(0, decisionTimeSec - lastBuyTime);
-          if (sinceBuySec <= 3.0) {
-            illegalActionPenalty -= 0.5;
+          if (sinceBuySec <= rp.quickSellWindowSec) {
+            illegalActionPenalty += rp.quickSellPenalty;
           }
         }
       }
     }
     let terminalOutcome = 0;
     if (done) {
-      if (terminalCause === 'player_win') terminalOutcome = 40.0;
-      else if (terminalCause === 'enemy_win') terminalOutcome = -40.0;
+      if (terminalCause === 'player_win') terminalOutcome = rp.terminalWin;
+      else if (terminalCause === 'enemy_win') terminalOutcome = rp.terminalLoss;
       else if (terminalCause === 'timeout') {
         // Timeouts are treated as forced losses to eliminate draw farming.
-        terminalOutcome = -40.0;
+        terminalOutcome = rp.timeoutLoss;
       }
     }
-    return {
+    const raw: Record<RewardComponentKey, number> = {
       enemy_unit_kill_value: enemyUnitKillValue,
       own_unit_loss_value: ownUnitLossValue,
       enemy_base_damage: enemyBaseDamage,
@@ -563,21 +682,34 @@ class BridgeRuntime {
       illegal_action_penalty: illegalActionPenalty,
       terminal_outcome: terminalOutcome,
     };
+    return this.applyRewardComponentWeights(raw);
   }
 
   private computeAgeUpDelayPenalty(prev: GameStateSnapshot, next: GameStateSnapshot): number {
+    const rp = this.rewardProfile;
     if (next.enemyAge >= 6) return 0;
     const elapsedSinceAgeUp = Math.max(0, next.gameTime - this.enemyLastAgeUpTimeSec);
-    const graceSeconds = next.enemyAge * 180;
+    const graceSeconds = next.enemyAge * rp.ageDelayGracePerAgeSec;
     if (elapsedSinceAgeUp <= graceSeconds) return 0;
-    const rampSeconds = 180;
+    const rampSeconds = rp.ageDelayRampSec;
     const overdue = elapsedSinceAgeUp - graceSeconds;
     const ramp = clamp(overdue / rampSeconds, 0, 1);
     const requiredGold = Math.max(1, next.enemyAgeCost);
     const currentGold = Math.max(1, next.enemyGold);
     const ratio = requiredGold / currentGold;
     const deltaSeconds = Math.max(0, next.gameTime - prev.gameTime);
-    return -(ratio * ramp * deltaSeconds);
+    return -(ratio * ramp * deltaSeconds * rp.ageDelayPenaltyWeight);
+  }
+
+  private applyRewardComponentWeights(
+    values: Record<RewardComponentKey, number>
+  ): Record<RewardComponentKey, number> {
+    const weighted: Partial<Record<RewardComponentKey, number>> = {};
+    (Object.keys(values) as RewardComponentKey[]).forEach((key) => {
+      const weight = finiteOr(this.rewardProfile.componentWeights[key], 1.0);
+      weighted[key] = values[key] * weight;
+    });
+    return weighted as Record<RewardComponentKey, number>;
   }
 
   private computeOneTimeBaseMilestones(

@@ -219,7 +219,7 @@ class MockSelfPlayEnv(SelfPlayEnv):
             own_unit_loss_value=0.0,
             enemy_base_damage=enemy_base_bonus,
             own_base_damage=-own_base_penalty,
-            safe_age_up_bonus=1.2 if self.state.own_age > prev.own_age and self.state.own_base_hp > 500 else 0.0,
+            safe_age_up_bonus=1.2 if self.state.own_age > prev.own_age else 0.0,
             age_up_delay_penalty=age_up_delay_penalty,
             lane_control_delta=0.0,
             illegal_action_penalty=illegal_penalty,
@@ -519,12 +519,14 @@ class GameBridgeEnv(SelfPlayEnv):
         self_difficulty: str = "SMART_ML",
         episode_seconds: int = 1200,
         decision_frames: int = 30,
+        reward_profile: Dict[str, object] | None = None,
     ) -> None:
         self.model_cfg = model_cfg
         self.opponent_difficulty = opponent_difficulty
         self.self_difficulty = self_difficulty
         self.episode_seconds = int(max(60, episode_seconds))
         self.decision_frames = int(max(1, decision_frames))
+        self.reward_profile = dict(reward_profile) if reward_profile else {}
         self.repo_root = Path(__file__).resolve().parents[2]
         bundle_path = self._ensure_bundle(self.repo_root)
         self._stderr_tail: deque[str] = deque(maxlen=120)
@@ -561,6 +563,7 @@ class GameBridgeEnv(SelfPlayEnv):
                     "opponent_difficulty": self.opponent_difficulty,
                     "episode_seconds": self.episode_seconds,
                     "decision_frames": self.decision_frames,
+                    "reward_profile": self.reward_profile if self.reward_profile else None,
                 },
             }
         )

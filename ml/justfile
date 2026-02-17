@@ -1,4 +1,5 @@
 set shell := ["sh", "-eu", "-o", "pipefail", "-c"]
+set quiet
 python_cmd := `if command -v python >/dev/null 2>&1; then printf 'python'; elif command -v python3 >/dev/null 2>&1; then printf 'python3'; elif command -v py >/dev/null 2>&1; then printf 'py -3'; elif [ -x /c/Windows/py.exe ]; then printf '/c/Windows/py.exe -3'; elif [ -x '/c/Program Files/Python311/python.exe' ]; then printf '/c/Program\\ Files/Python311/python.exe'; else printf ''; fi`
 require_git_bash := `if [ -n "${MSYSTEM:-}" ] && printf '%s' "${MSYSTEM}" | grep -Eq '^MINGW|^MSYS'; then printf 'ok'; else printf ''; fi`
 

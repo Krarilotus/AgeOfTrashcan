@@ -1,0 +1,40 @@
+{
+  "schedule": {
+    "dense_start": 1.0,
+    "dense_end": 1.0,
+    "dense_decay_interval": 0.2,
+    "dense_decay_factor": 0.9,
+    "terminal_start": 1.0,
+    "terminal_end": 5.0,
+    "curriculum_steps": 0,
+    "reward_normalize": true,
+    "reward_clip_abs": 10.0
+  },
+  "bridge": {
+    "component_weights": {
+      "enemy_unit_kill_value": 1.0,
+      "own_unit_loss_value": 1.0,
+      "enemy_base_damage": 1.0,
+      "own_base_damage": 1.0,
+      "safe_age_up_bonus": 1.0,
+      "age_up_delay_penalty": 1.0,
+      "lane_control_delta": 1.0,
+      "illegal_action_penalty": 1.0,
+      "terminal_outcome": 1.0
+    },
+    "enemy_unit_kill_per_unit": 0.0,
+    "own_unit_loss_per_unit": 0.0,
+    "lane_control_delta_per_unit": 0.0,
+    "base_milestone_rewards": [2.0, 4.0, 8.0],
+    "safe_age_up_bonus": 1.2,
+    "illegal_action_penalty": -0.5,
+    "quick_sell_penalty": -0.5,
+    "quick_sell_window_sec": 3.0,
+    "age_delay_grace_per_age_sec": 180.0,
+    "age_delay_ramp_sec": 180.0,
+    "age_delay_penalty_weight": 1.0,
+    "terminal_win": 40.0,
+    "terminal_loss": -40.0,
+    "timeout_loss": -40.0
+  }
+}

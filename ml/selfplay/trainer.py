@@ -1058,6 +1058,7 @@ class SelfPlayTrainer:
                 "curriculum_steps": self.cfg.runtime.reward_curriculum_steps,
                 "reward_normalize": self.cfg.runtime.reward_normalize,
                 "reward_clip_abs": self.cfg.runtime.reward_clip_abs,
+                "bridge_reward_profile": self.cfg.runtime.bridge_reward_profile,
             },
             "league": {
                 "keep_top_n": self.cfg.runtime.league_keep_top_n,
