@@ -23,6 +23,8 @@ class LeagueEntry:
     steps: int
     elo: float = 1000.0
     winrate_vs_smart: float = 0.0
+    games_played: int = 0
+    score_sum: float = 0.0
     profile: StrategyProfile = field(default_factory=StrategyProfile)
     novelty: float = 0.0
     promoted: bool = False
@@ -70,19 +72,74 @@ class LeaguePool:
         profile: StrategyProfile | None = None,
     ) -> LeagueEntry:
         profile = profile or StrategyProfile()
-        entry = LeagueEntry(
-            checkpoint_path=checkpoint_path,
-            steps=steps,
-            elo=1000.0 + max(-200.0, min(250.0, (winrate_vs_smart - 0.5) * 500.0)),
-            winrate_vs_smart=float(winrate_vs_smart),
-            profile=profile,
-            source="checkpoint",
-            use_checkpoint=True,
-        )
-        entry.novelty = self._compute_novelty(entry)
-        self.entries.append(entry)
-        self._prune_diverse()
+        entry = self._find_checkpoint_entry(checkpoint_path)
+        if entry is None:
+            entry = LeagueEntry(
+                checkpoint_path=checkpoint_path,
+                steps=steps,
+                elo=self._seed_elo_from_winrate(winrate_vs_smart),
+                winrate_vs_smart=float(winrate_vs_smart),
+                games_played=0,
+                score_sum=0.0,
+                profile=profile,
+                source="checkpoint",
+                use_checkpoint=True,
+            )
+            entry.novelty = self._compute_novelty(entry)
+            self.entries.append(entry)
+            self._prune_diverse()
+            return entry
+
+        entry.steps = max(entry.steps, int(steps))
+        entry.winrate_vs_smart = float(winrate_vs_smart)
+        entry.profile = profile
         return entry
+
+    def record_match_result(
+        self,
+        learner_checkpoint_path: str,
+        learner_steps: int,
+        score: float,
+        opponent: LeagueEntry | None,
+        profile: StrategyProfile | None = None,
+        k_factor: float = 20.0,
+    ) -> float:
+        if not learner_checkpoint_path:
+            return 0.0
+        score = self._clamp(float(score), 0.0, 1.0)
+        learner = self._upsert_checkpoint_entry(
+            checkpoint_path=learner_checkpoint_path,
+            steps=learner_steps,
+            profile=profile or StrategyProfile(),
+        )
+        old_elo = float(learner.elo)
+        opp_elo = float(opponent.elo) if opponent is not None else 1000.0
+        expected = self._expected_score(learner.elo, opp_elo)
+        learner.elo = self._clamp(learner.elo + float(k_factor) * (score - expected), 600.0, 1800.0)
+        learner.games_played = int(learner.games_played) + 1
+        learner.score_sum = float(learner.score_sum) + score
+        learner.winrate_vs_smart = learner.score_sum / max(1, learner.games_played)
+        learner.steps = max(learner.steps, int(learner_steps))
+        if profile is not None:
+            learner.profile = profile
+
+        if (
+            opponent is not None
+            and opponent in self.entries
+            and not bool(opponent.fixed)
+            and not (
+                opponent.source == "checkpoint"
+                and str(opponent.checkpoint_path) == str(learner_checkpoint_path)
+            )
+        ):
+            opp_expected = self._expected_score(opponent.elo, old_elo)
+            opp_score = 1.0 - score
+            opponent.elo = self._clamp(opponent.elo + float(k_factor) * (opp_score - opp_expected), 600.0, 1800.0)
+            opponent.games_played = int(opponent.games_played) + 1
+            opponent.score_sum = float(opponent.score_sum) + opp_score
+            opponent.winrate_vs_smart = opponent.score_sum / max(1, opponent.games_played)
+
+        return float(learner.elo - old_elo)
 
     def promote_if_qualified(self, candidate: LeagueEntry, top3_baseline: List[float]) -> bool:
         if candidate.winrate_vs_smart < self.min_promote_winrate:
@@ -213,6 +270,8 @@ class LeaguePool:
             "steps": int(entry.steps),
             "elo": float(entry.elo),
             "winrate_vs_smart": float(entry.winrate_vs_smart),
+            "games_played": int(entry.games_played),
+            "score_sum": float(entry.score_sum),
             "novelty": float(entry.novelty),
             "promoted": bool(entry.promoted),
             "source": str(entry.source),
@@ -256,6 +315,8 @@ class LeaguePool:
             steps = int(raw.get("steps", 0))
             elo = float(raw.get("elo", 1000.0))
             winrate_vs_smart = float(raw.get("winrate_vs_smart", 0.0))
+            games_played = int(raw.get("games_played", 0))
+            score_sum = float(raw.get("score_sum", 0.0))
             novelty = float(raw.get("novelty", 0.0))
         except (TypeError, ValueError):
             return None
@@ -264,6 +325,8 @@ class LeaguePool:
             steps=max(0, steps),
             elo=elo,
             winrate_vs_smart=winrate_vs_smart,
+            games_played=max(0, games_played),
+            score_sum=max(0.0, score_sum),
             profile=profile,
             novelty=novelty,
             promoted=bool(raw.get("promoted", False)),
@@ -343,6 +406,45 @@ class LeaguePool:
 
     def _rank_tuple(self, item: LeagueEntry) -> tuple[float, float, int]:
         return (item.elo + item.novelty * 15.0, item.winrate_vs_smart, item.steps)
+
+    def _seed_elo_from_winrate(self, winrate_vs_smart: float) -> float:
+        return 1000.0 + max(-200.0, min(250.0, (float(winrate_vs_smart) - 0.5) * 500.0))
+
+    def _expected_score(self, rating_a: float, rating_b: float) -> float:
+        return 1.0 / (1.0 + math.pow(10.0, (float(rating_b) - float(rating_a)) / 400.0))
+
+    def _find_checkpoint_entry(self, checkpoint_path: str) -> LeagueEntry | None:
+        for entry in self.entries:
+            if entry.source == "checkpoint" and str(entry.checkpoint_path) == str(checkpoint_path):
+                return entry
+        return None
+
+    def _upsert_checkpoint_entry(
+        self,
+        checkpoint_path: str,
+        steps: int,
+        profile: StrategyProfile,
+    ) -> LeagueEntry:
+        existing = self._find_checkpoint_entry(checkpoint_path)
+        if existing is not None:
+            existing.steps = max(existing.steps, int(steps))
+            existing.profile = profile
+            return existing
+        entry = LeagueEntry(
+            checkpoint_path=str(checkpoint_path),
+            steps=max(0, int(steps)),
+            elo=1000.0,
+            winrate_vs_smart=0.5,
+            games_played=0,
+            score_sum=0.0,
+            profile=profile,
+            source="checkpoint",
+            use_checkpoint=True,
+        )
+        entry.novelty = self._compute_novelty(entry)
+        self.entries.append(entry)
+        self._prune_diverse()
+        return entry
 
     def _expanded_sampling_pool(self, candidates: List[LeagueEntry]) -> List[LeagueEntry]:
         if not candidates:

@@ -127,7 +127,7 @@ export interface MatchTelemetry {
 // AIState removed - using AIController from ai/AIController.ts
 
 export interface GameCallbacks {
-  onStateUpdate: (state: GameState) => void;
+  onStateUpdate?: (state: GameState) => void;
   onGameOver: (winner: string) => void;
   onAgeUpgrade?: () => void;
 }
@@ -976,8 +976,10 @@ export class GameEngine {
     // Telemetry snapshots for long-horizon evaluation
     this.recordBaseHealthTimelineIfNeeded();
 
-    // Call state update callback
-    this.callbacks.onStateUpdate(this.getState());
+    // Headless bridge runs don't need full UI snapshots each tick.
+    if (this.callbacks.onStateUpdate) {
+      this.callbacks.onStateUpdate(this.getState());
+    }
 
     this.state.tick++;
   }

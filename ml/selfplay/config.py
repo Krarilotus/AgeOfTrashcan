@@ -17,7 +17,10 @@ from .defaults import (
     DEFAULT_ENTROPY_COEF_MIN,
     DEFAULT_ENTROPY_FLOOR_ALERT,
     DEFAULT_EVAL_EVERY,
+    DEFAULT_EVAL_EARLY_EVERY,
+    DEFAULT_EVAL_LATE_EVERY,
     DEFAULT_EVAL_MATCHES,
+    DEFAULT_EVAL_SWITCH_PROGRESS,
     DEFAULT_EVAL_WORKERS,
     DEFAULT_FFN_DIM,
     DEFAULT_GAE_LAMBDA,
@@ -125,6 +128,9 @@ class RuntimeConfig:
     total_steps: int = DEFAULT_TOTAL_STEPS
     checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY
     eval_every: int = DEFAULT_EVAL_EVERY
+    eval_early_every: int = DEFAULT_EVAL_EARLY_EVERY
+    eval_late_every: int = DEFAULT_EVAL_LATE_EVERY
+    eval_switch_progress: float = DEFAULT_EVAL_SWITCH_PROGRESS
     eval_matches: int = DEFAULT_EVAL_MATCHES
     eval_workers: int = DEFAULT_EVAL_WORKERS
     save_dir: str = DEFAULT_SAVE_DIR

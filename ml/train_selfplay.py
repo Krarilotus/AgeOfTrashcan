@@ -20,7 +20,10 @@ from selfplay.defaults import (
     DEFAULT_ENV_BACKEND,
     DEFAULT_EPISODE_SECONDS,
     DEFAULT_EVAL_EVERY,
+    DEFAULT_EVAL_EARLY_EVERY,
+    DEFAULT_EVAL_LATE_EVERY,
     DEFAULT_EVAL_MATCHES,
+    DEFAULT_EVAL_SWITCH_PROGRESS,
     DEFAULT_EVAL_WORKERS,
     DEFAULT_EXPORT_REGISTRY,
     DEFAULT_KEEP_AWAKE,
@@ -176,6 +179,24 @@ def parse_args() -> argparse.Namespace:
         help="Checkpoint interval in steps",
     )
     parser.add_argument("--eval-every", type=int, default=DEFAULT_EVAL_EVERY, help="Evaluation interval in steps")
+    parser.add_argument(
+        "--eval-early-every",
+        type=int,
+        default=DEFAULT_EVAL_EARLY_EVERY,
+        help="Optional early-phase eval interval in steps (requires eval-late-every > 0)",
+    )
+    parser.add_argument(
+        "--eval-late-every",
+        type=int,
+        default=DEFAULT_EVAL_LATE_EVERY,
+        help="Optional late-phase eval interval in steps (requires eval-early-every > 0)",
+    )
+    parser.add_argument(
+        "--eval-switch-progress",
+        type=float,
+        default=DEFAULT_EVAL_SWITCH_PROGRESS,
+        help="Progress fraction [0..1] where eval cadence switches from early to late interval",
+    )
     parser.add_argument(
         "--eval-matches",
         type=int,
@@ -630,6 +651,9 @@ def main() -> None:
     cfg.runtime.device = args.device
     cfg.runtime.checkpoint_every = args.checkpoint_every
     cfg.runtime.eval_every = args.eval_every
+    cfg.runtime.eval_early_every = max(0, int(args.eval_early_every))
+    cfg.runtime.eval_late_every = max(0, int(args.eval_late_every))
+    cfg.runtime.eval_switch_progress = float(args.eval_switch_progress)
     cfg.runtime.eval_matches = args.eval_matches
     cfg.runtime.eval_workers = max(0, int(args.eval_workers))
     cfg.runtime.log_interval = args.log_interval
@@ -713,6 +737,12 @@ def main() -> None:
         raise SystemExit("smart-env-max must be >= smart-env-min (or 0 for auto)")
     if cfg.runtime.smart_env_gpu_sustain_sec < 1.0:
         raise SystemExit("smart-env-gpu-sustain-sec must be >= 1.0")
+    if cfg.runtime.eval_switch_progress < 0.0 or cfg.runtime.eval_switch_progress > 1.0:
+        raise SystemExit("eval-switch-progress must be in [0, 1]")
+    early_set = cfg.runtime.eval_early_every > 0
+    late_set = cfg.runtime.eval_late_every > 0
+    if early_set != late_set:
+        raise SystemExit("eval-early-every and eval-late-every must both be > 0 or both be 0")
     if float(args.keep_awake_interval_sec) < 30.0:
         raise SystemExit("keep-awake-interval-sec must be >= 30")
     if cfg.runtime.dead_unit_zero_epsilon > 1e-4:

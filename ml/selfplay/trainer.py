@@ -17,7 +17,7 @@ from torch.optim import AdamW
 
 from .config import OvernightConfig
 from .env import ACTIONS, MockSelfPlayEnv, SelfPlayEnv
-from .league import LeaguePool, StrategyProfile
+from .league import LeagueEntry, LeaguePool, StrategyProfile
 from .model import TransformerActorCritic
 from .ppo import PPOUpdater, RolloutBatch, compute_gae
 from .resource_monitor import ResourceMonitor, ResourceSample
@@ -39,6 +39,15 @@ class SelfPlayTrainer:
         self.cfg = cfg
         runtime = cfg.runtime
         self.device = torch.device(runtime.device if torch.cuda.is_available() else "cpu")
+        if self.device.type == "cuda":
+            # Favor Tensor Core paths on Ada GPUs (e.g. RTX 4090) for better throughput.
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision("high")
+            except Exception:
+                pass
         self.run_name = run_name or Path(runtime.save_dir).name
         self.model = TransformerActorCritic(cfg.model).to(self.device)
         self.optimizer = AdamW(
@@ -97,6 +106,11 @@ class SelfPlayTrainer:
         self.last_rollout_profile = StrategyProfile()
         self.last_rollout_telemetry_line = ""
         self.last_rollout_resource_sample: Optional[ResourceSample] = None
+        self.last_rollout_timing: Dict[str, float] = {}
+        self.last_rollout_elo_matches = 0
+        self.last_rollout_elo_delta = 0.0
+        self.last_update_duration_s = 0.0
+        self.last_loop_duration_s = 0.0
         self.last_log_perf = self.train_start_perf
         self.update_count = 0
         self.dead_row_streaks: Dict[str, np.ndarray] = {}
@@ -108,6 +122,13 @@ class SelfPlayTrainer:
         self.obs: List[Observation] = [
             env.reset(runtime.seed + env_idx) for env_idx, env in enumerate(self.envs)
         ]
+        self.env_opponents: List[LeagueEntry | None] = [None for _ in range(len(self.envs))]
+        for env_idx, env in enumerate(self.envs):
+            self.env_opponents[env_idx] = self._assign_opponent_to_env(
+                env=env,
+                current_checkpoint=self.last_good_checkpoint,
+            )
+            self.obs[env_idx] = env.reset(runtime.seed + 10_000 + env_idx)
         if self.autoscale_enabled:
             self.resource_monitor = ResourceMonitor(
                 sample_hz=runtime.smart_env_sample_hz,
@@ -123,6 +144,14 @@ class SelfPlayTrainer:
                 f"gpu_sustain={runtime.smart_env_gpu_sustain_sec:.1f}s "
                 f"env_range={self.autoscale_min_envs}-{max_label}"
             )
+        if int(getattr(runtime, "eval_early_every", 0)) > 0 and int(getattr(runtime, "eval_late_every", 0)) > 0:
+            switch_step = int(runtime.total_steps * float(runtime.eval_switch_progress))
+            print(
+                f"[eval-schedule] early_every={int(runtime.eval_early_every)} "
+                f"late_every={int(runtime.eval_late_every)} "
+                f"switch_progress={float(runtime.eval_switch_progress):.3f} "
+                f"switch_step={switch_step}"
+            )
 
     def train(self) -> None:
         runtime = self.cfg.runtime
@@ -131,8 +160,12 @@ class SelfPlayTrainer:
                 self._maybe_autoscale_envs()
                 previous_step = self.global_step
                 active_envs = len(self.envs)
+                loop_start_perf = time.perf_counter()
                 batch = self._collect_rollout()
+                update_start_perf = time.perf_counter()
                 metrics = self.ppo.update(batch)
+                self.last_update_duration_s = max(0.0, time.perf_counter() - update_start_perf)
+                self.last_loop_duration_s = max(0.0, time.perf_counter() - loop_start_perf)
                 self.update_count += 1
                 self._maybe_revive_dead_units()
                 self._anneal_entropy()
@@ -168,6 +201,9 @@ class SelfPlayTrainer:
                     )
                     if self.last_rollout_telemetry_line:
                         print(self.last_rollout_telemetry_line)
+                    perf_line = self._format_perf_telemetry_line(active_envs)
+                    if perf_line:
+                        print(perf_line)
                     self.last_log_perf = now_perf
                     if metrics["entropy"] < runtime.entropy_floor_alert:
                         print(
@@ -187,12 +223,15 @@ class SelfPlayTrainer:
 
                 self._save_crossed_milestones(previous_step, self.global_step)
 
+                eval_interval = self._current_eval_interval(previous_step)
                 crossed_eval_boundary = (
-                    runtime.eval_every > 0
-                    and (previous_step // runtime.eval_every) < (self.global_step // runtime.eval_every)
+                    eval_interval > 0
+                    and (previous_step // eval_interval) < (self.global_step // eval_interval)
                 )
                 if crossed_eval_boundary:
+                    eval_start_perf = time.perf_counter()
                     winrate = self.evaluate(runtime.eval_matches)
+                    eval_elapsed_s = max(1e-6, time.perf_counter() - eval_start_perf)
                     if self.last_good_checkpoint:
                         style = self.last_rollout_profile
                         entry = self.league.add_checkpoint(
@@ -229,6 +268,12 @@ class SelfPlayTrainer:
                         f"league_size={len(roster)} "
                         f"top_all={roster_summary_all or 'n/a'} "
                         f"top_ml={roster_summary_ml or 'n/a'}"
+                    )
+                    print(
+                        f"[eval-perf] matches={runtime.eval_matches} "
+                        f"interval={eval_interval} "
+                        f"elapsed={eval_elapsed_s:.2f}s "
+                        f"mps={runtime.eval_matches / eval_elapsed_s:.2f}"
                     )
             print("[done] training complete")
         finally:
@@ -278,13 +323,19 @@ class SelfPlayTrainer:
         if target > current:
             added_envs: List[SelfPlayEnv] = []
             added_obs: List[Observation] = []
+            added_opponents: List[LeagueEntry | None] = []
             try:
                 for idx in range(current, target):
                     env = self.env_factory()
+                    opponent = self._assign_opponent_to_env(
+                        env=env,
+                        current_checkpoint=self.last_good_checkpoint,
+                    )
                     seed = int(self.cfg.runtime.seed + self.global_step + (idx + 1) * 977)
                     obs = env.reset(seed)
                     added_envs.append(env)
                     added_obs.append(obs)
+                    added_opponents.append(opponent)
             except Exception:
                 for env in added_envs:
                     try:
@@ -294,11 +345,14 @@ class SelfPlayTrainer:
                 raise
             self.envs.extend(added_envs)
             self.obs.extend(added_obs)
+            self.env_opponents.extend(added_opponents)
         else:
             remove_count = current - target
             for _ in range(remove_count):
                 env = self.envs.pop()
                 self.obs.pop()
+                if self.env_opponents:
+                    self.env_opponents.pop()
                 try:
                     env.close()
                 except Exception:
@@ -607,9 +661,68 @@ class SelfPlayTrainer:
 
         return wins / max(1, total_matches)
 
+    def _build_opponent_payload(self, opponent: LeagueEntry) -> Dict[str, float | str]:
+        payload: Dict[str, float | str] = {
+            "elo": float(opponent.elo),
+            "winrate_vs_smart": float(opponent.winrate_vs_smart),
+            "steps": float(opponent.steps),
+            "archetype": str(opponent.profile.archetype),
+            "aggression": float(opponent.profile.aggression),
+            "teching": float(opponent.profile.teching),
+            "defense": float(opponent.profile.defense),
+        }
+        if isinstance(opponent.difficulty, str) and opponent.difficulty:
+            payload["difficulty"] = opponent.difficulty
+        if (
+            opponent.use_checkpoint
+            and isinstance(opponent.checkpoint_path, str)
+            and opponent.checkpoint_path.strip()
+        ):
+            payload["checkpoint_id"] = str(opponent.checkpoint_path)
+        return payload
+
+    def _assign_opponent_to_env(
+        self,
+        env: SelfPlayEnv,
+        current_checkpoint: str | None,
+    ) -> LeagueEntry | None:
+        opponent = self.league.sample_opponent(current_checkpoint)
+        if opponent is None:
+            env.set_opponent_profile(None)
+            return None
+        env.set_opponent_profile(self._build_opponent_payload(opponent))
+        return opponent
+
+    def _score_from_terminal_info(self, info: Dict[str, float]) -> float | None:
+        own_hp = info.get("own_base_hp")
+        opp_hp = info.get("opp_base_hp")
+        if own_hp is None or opp_hp is None:
+            return None
+        own_hp_f = float(own_hp)
+        opp_hp_f = float(opp_hp)
+        if not np.isfinite(own_hp_f) or not np.isfinite(opp_hp_f):
+            return None
+        if opp_hp_f < own_hp_f:
+            return 1.0
+        if opp_hp_f > own_hp_f:
+            return 0.0
+        return 0.5
+
     def _collect_rollout(self) -> RolloutBatch:
         runtime = self.cfg.runtime
         rollout_start_perf = time.perf_counter()
+        timing: Dict[str, float] = {
+            "obs_tensor_s": 0.0,
+            "policy_infer_s": 0.0,
+            "cpu_copy_s": 0.0,
+            "action_decode_s": 0.0,
+            "env_step_s": 0.0,
+            "reward_bookkeeping_s": 0.0,
+            "next_value_s": 0.0,
+            "gae_s": 0.0,
+            "batch_pack_s": 0.0,
+            "total_s": 0.0,
+        }
         horizon = runtime.rollout_horizon
         num_envs = len(self.envs)
         if num_envs <= 0:
@@ -639,29 +752,16 @@ class SelfPlayTrainer:
         }
 
         current_checkpoint = self.last_good_checkpoint
-        for env in self.envs:
-            opponent = self.league.sample_opponent(current_checkpoint)
-            if opponent:
-                opponent_payload: Dict[str, float | str] = {
-                    "elo": float(opponent.elo),
-                    "winrate_vs_smart": float(opponent.winrate_vs_smart),
-                    "steps": float(opponent.steps),
-                    "archetype": str(opponent.profile.archetype),
-                    "aggression": float(opponent.profile.aggression),
-                    "teching": float(opponent.profile.teching),
-                    "defense": float(opponent.profile.defense),
-                }
-                if isinstance(opponent.difficulty, str) and opponent.difficulty:
-                    opponent_payload["difficulty"] = opponent.difficulty
-                if (
-                    opponent.use_checkpoint
-                    and isinstance(opponent.checkpoint_path, str)
-                    and opponent.checkpoint_path.strip()
-                ):
-                    opponent_payload["checkpoint_id"] = str(opponent.checkpoint_path)
-                env.set_opponent_profile(opponent_payload)
-            else:
-                env.set_opponent_profile(None)
+        if len(self.env_opponents) != num_envs:
+            self.env_opponents = [None for _ in range(num_envs)]
+            for env_idx, env in enumerate(self.envs):
+                self.env_opponents[env_idx] = self._assign_opponent_to_env(
+                    env=env,
+                    current_checkpoint=current_checkpoint,
+                )
+                self.obs[env_idx] = env.reset(
+                    self.cfg.runtime.seed + self.global_step + env_idx + 1
+                )
 
         action_counts = np.zeros((len(ACTIONS),), dtype=np.float64)
         reward_sums = {
@@ -674,13 +774,21 @@ class SelfPlayTrainer:
         }
         env_latest_info: List[Dict[str, float] | None] = [None for _ in range(num_envs)]
         completed_game_stats: List[Dict[str, object]] = []
+        elo_matches = 0
+        elo_delta = 0.0
 
         for t in range(horizon):
+            seg_start_perf = time.perf_counter()
             static_t, seq_t, masks_t = self._obs_batch_to_tensors(self.obs)
+            timing["obs_tensor_s"] += max(0.0, time.perf_counter() - seg_start_perf)
+
+            seg_start_perf = time.perf_counter()
             with torch.no_grad():
                 outputs = self.model(static_t, seq_t)
                 sampled = self.model.sample_action(outputs, masks_t, deterministic=False)
+            timing["policy_infer_s"] += max(0.0, time.perf_counter() - seg_start_perf)
 
+            seg_start_perf = time.perf_counter()
             static_np[t] = static_t.detach().cpu().numpy()
             seq_np[t] = seq_t.detach().cpu().numpy()
             values_np[t] = sampled["value"].detach().cpu().numpy()
@@ -698,8 +806,13 @@ class SelfPlayTrainer:
             for idx in sampled_action_batch:
                 if 0 <= int(idx) < len(ACTIONS):
                     action_counts[int(idx)] += 1
+            timing["cpu_copy_s"] += max(0.0, time.perf_counter() - seg_start_perf)
 
+            seg_start_perf = time.perf_counter()
             actions = [self._indices_to_action(sampled, env_idx) for env_idx in range(num_envs)]
+            timing["action_decode_s"] += max(0.0, time.perf_counter() - seg_start_perf)
+
+            seg_start_perf = time.perf_counter()
             if self.env_step_pool is not None:
                 futures = [
                     self.env_step_pool.submit(self.envs[env_idx].step, actions[env_idx])
@@ -711,7 +824,9 @@ class SelfPlayTrainer:
                     self.envs[env_idx].step(actions[env_idx])
                     for env_idx in range(num_envs)
                 ]
+            timing["env_step_s"] += max(0.0, time.perf_counter() - seg_start_perf)
 
+            seg_start_perf = time.perf_counter()
             for env_idx, (next_obs, reward, done, info, reward_components) in enumerate(step_results):
                 progress_step = self.global_step + t * num_envs + env_idx
                 shaped_reward = self._compose_reward(reward_components, progress_step)
@@ -725,14 +840,30 @@ class SelfPlayTrainer:
                 reward_sums["illegal_action_penalty"] += float(reward_components.illegal_action_penalty)
                 reward_sums["terminal_outcome"] += float(reward_components.terminal_outcome)
                 if done:
+                    score = self._score_from_terminal_info(info)
+                    if score is not None and current_checkpoint:
+                        delta = self.league.record_match_result(
+                            learner_checkpoint_path=current_checkpoint,
+                            learner_steps=progress_step,
+                            score=score,
+                            opponent=self.env_opponents[env_idx],
+                            profile=self.last_rollout_profile,
+                        )
+                        elo_matches += 1
+                        elo_delta += float(delta)
                     parsed_done_stats = self._parse_rollout_game_stats(info)
                     if parsed_done_stats is not None:
                         completed_game_stats.append(parsed_done_stats)
                     env_latest_info[env_idx] = None
+                    self.env_opponents[env_idx] = self._assign_opponent_to_env(
+                        env=self.envs[env_idx],
+                        current_checkpoint=current_checkpoint,
+                    )
                     next_obs = self.envs[env_idx].reset(
                         self.cfg.runtime.seed + self.global_step + t * num_envs + env_idx + 1
                     )
                 self.obs[env_idx] = next_obs
+            timing["reward_bookkeeping_s"] += max(0.0, time.perf_counter() - seg_start_perf)
 
         env_latest_game_stats: List[Dict[str, object] | None] = [
             self._parse_rollout_game_stats(sample) if sample is not None else None
@@ -743,6 +874,13 @@ class SelfPlayTrainer:
             completed_game_stats,
             env_latest_game_stats,
         )
+        self.last_rollout_elo_matches = int(elo_matches)
+        self.last_rollout_elo_delta = float(elo_delta)
+        if self.last_rollout_elo_matches > 0:
+            self.last_rollout_telemetry_line += (
+                f" elo_matches={self.last_rollout_elo_matches}"
+                f" elo_delta={self.last_rollout_elo_delta:+.2f}"
+            )
 
         if self.cfg.runtime.reward_normalize:
             reward_mean = float(np.mean(rewards_np))
@@ -752,10 +890,13 @@ class SelfPlayTrainer:
             if clip_abs > 0:
                 rewards_np = np.clip(rewards_np, -clip_abs, clip_abs)
 
+        seg_start_perf = time.perf_counter()
         with torch.no_grad():
             next_static, next_seq, _ = self._obs_batch_to_tensors(self.obs)
             next_values = self.model(next_static, next_seq).value.detach().cpu().numpy()
+        timing["next_value_s"] += max(0.0, time.perf_counter() - seg_start_perf)
 
+        seg_start_perf = time.perf_counter()
         advantages_np, returns_np = compute_gae(
             rewards_np,
             values_np,
@@ -764,6 +905,7 @@ class SelfPlayTrainer:
             self.cfg.ppo.gamma,
             self.cfg.ppo.gae_lambda,
         )
+        timing["gae_s"] += max(0.0, time.perf_counter() - seg_start_perf)
 
         if self.autoscale_enabled and self.resource_monitor is not None:
             rollout_end_perf = time.perf_counter()
@@ -779,11 +921,18 @@ class SelfPlayTrainer:
         def flatten(arr: np.ndarray) -> np.ndarray:
             return arr.reshape(horizon * num_envs, *arr.shape[2:])
 
+        seg_start_perf = time.perf_counter()
         flat_masks = {name: torch.tensor(flatten(value), device=self.device) for name, value in mask_np.items()}
         flat_actions = {
             name: torch.tensor(value.reshape(horizon * num_envs), device=self.device, dtype=torch.long)
             for name, value in action_indices.items()
         }
+        timing["batch_pack_s"] += max(0.0, time.perf_counter() - seg_start_perf)
+        timing["total_s"] = max(0.0, time.perf_counter() - rollout_start_perf)
+        decisions = float(horizon * num_envs)
+        timing["decisions"] = decisions
+        timing["env_steps_per_sec"] = decisions / max(1e-6, timing["total_s"])
+        self.last_rollout_timing = timing
 
         return RolloutBatch(
             static_state=torch.tensor(flatten(static_np), device=self.device),
@@ -963,6 +1112,58 @@ class SelfPlayTrainer:
             f"league_top={league_top_text} "
             f"league_top_ml={league_top_ml_text} "
             f"league_top_ckpt={league_top_ckpt_text}"
+        )
+
+    def _format_perf_telemetry_line(self, active_envs: int) -> str:
+        rollout = dict(self.last_rollout_timing)
+        rollout_total = float(rollout.get("total_s", 0.0))
+        update_total = float(self.last_update_duration_s)
+        loop_total = float(self.last_loop_duration_s)
+        if rollout_total <= 0 and update_total <= 0 and loop_total <= 0:
+            return ""
+
+        other_total = max(0.0, loop_total - rollout_total - update_total)
+        candidates = [
+            ("rollout", rollout_total),
+            ("update", update_total),
+            ("other", other_total),
+        ]
+        bottleneck_name, bottleneck_value = max(candidates, key=lambda item: item[1])
+        bottleneck_pct = (bottleneck_value / max(1e-6, loop_total)) * 100.0 if loop_total > 0 else 0.0
+        env_steps_per_sec = float(rollout.get("env_steps_per_sec", 0.0))
+
+        obs_tensor_s = float(rollout.get("obs_tensor_s", 0.0))
+        policy_infer_s = float(rollout.get("policy_infer_s", 0.0))
+        cpu_copy_s = float(rollout.get("cpu_copy_s", 0.0))
+        action_decode_s = float(rollout.get("action_decode_s", 0.0))
+        env_step_s = float(rollout.get("env_step_s", 0.0))
+        reward_bookkeeping_s = float(rollout.get("reward_bookkeeping_s", 0.0))
+        next_value_s = float(rollout.get("next_value_s", 0.0))
+        gae_s = float(rollout.get("gae_s", 0.0))
+        batch_pack_s = float(rollout.get("batch_pack_s", 0.0))
+
+        rollout_div = max(1e-6, rollout_total)
+        breakdown = (
+            f"obs={obs_tensor_s:.2f}s/{(obs_tensor_s / rollout_div) * 100.0:.0f}% "
+            f"policy={policy_infer_s:.2f}s/{(policy_infer_s / rollout_div) * 100.0:.0f}% "
+            f"cpu_copy={cpu_copy_s:.2f}s/{(cpu_copy_s / rollout_div) * 100.0:.0f}% "
+            f"act_decode={action_decode_s:.2f}s/{(action_decode_s / rollout_div) * 100.0:.0f}% "
+            f"env_step={env_step_s:.2f}s/{(env_step_s / rollout_div) * 100.0:.0f}% "
+            f"bookkeep={reward_bookkeeping_s:.2f}s/{(reward_bookkeeping_s / rollout_div) * 100.0:.0f}% "
+            f"next_v={next_value_s:.2f}s/{(next_value_s / rollout_div) * 100.0:.0f}% "
+            f"gae={gae_s:.2f}s/{(gae_s / rollout_div) * 100.0:.0f}% "
+            f"pack={batch_pack_s:.2f}s/{(batch_pack_s / rollout_div) * 100.0:.0f}%"
+        )
+
+        resource_text = ""
+        if self.last_rollout_resource_sample is not None:
+            resource_text = " " + self._sample_to_text(self.last_rollout_resource_sample)
+
+        return (
+            f"[perf] loop={loop_total:.2f}s rollout={rollout_total:.2f}s update={update_total:.2f}s "
+            f"other={other_total:.2f}s bottleneck={bottleneck_name}:{bottleneck_pct:.1f}% "
+            f"envs={active_envs} env_steps/s={env_steps_per_sec:.1f}{resource_text} "
+            f"rollout_breakdown({breakdown})"
         )
 
     def _format_league_top_telemetry(
@@ -1324,6 +1525,16 @@ class SelfPlayTrainer:
             return max(1, min(matches, requested))
         auto = max(1, min(matches, max(1, len(self.envs))))
         return int(auto)
+
+    def _current_eval_interval(self, step: int) -> int:
+        runtime = self.cfg.runtime
+        early = int(getattr(runtime, "eval_early_every", 0))
+        late = int(getattr(runtime, "eval_late_every", 0))
+        if early > 0 and late > 0:
+            switch_progress = float(np.clip(getattr(runtime, "eval_switch_progress", 0.4), 0.0, 1.0))
+            switch_step = int(runtime.total_steps * switch_progress)
+            return early if int(step) < switch_step else late
+        return int(runtime.eval_every)
 
     def _reward_progress(self, step: int) -> float:
         runtime = self.cfg.runtime

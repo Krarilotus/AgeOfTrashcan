@@ -191,12 +191,25 @@ export default function App() {
   }, [loadCheckpointRegistry]);
 
   useEffect(() => {
-    if (isRunning) return;
     const intervalId = window.setInterval(() => {
       void loadCheckpointRegistry();
-    }, 10000);
-    return () => window.clearInterval(intervalId);
-  }, [isRunning, loadCheckpointRegistry]);
+    }, 3000);
+    const onFocus = () => {
+      void loadCheckpointRegistry();
+    };
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        void loadCheckpointRegistry();
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [loadCheckpointRegistry]);
 
   useEffect(() => {
     if (!isRunning || gameRef.current) return;

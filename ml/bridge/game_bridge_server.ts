@@ -369,7 +369,6 @@ class BridgeRuntime {
       },
     };
     this.engine = new GameEngine(config, command.seed, {
-      onStateUpdate: () => undefined,
       onGameOver: () => undefined,
     });
     this.engine.setAIDecisionEnabled('ENEMY', false);

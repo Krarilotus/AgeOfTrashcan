@@ -33,6 +33,10 @@ export interface DecodedPolicyDecision {
   };
 }
 
+export interface DecodePolicyOptions {
+  disallowWait?: boolean;
+}
+
 export interface IMLPolicy {
   getName(): string;
   infer(input: MLPolicyInput): MLPolicyOutput | null;
@@ -89,13 +93,23 @@ function selectIndex(logits: number[] | undefined, mask: number[]): number {
 
 export function decodePolicyOutput(
   output: MLPolicyOutput,
-  legalMask: MLLegalActionMask
+  legalMask: MLLegalActionMask,
+  options: DecodePolicyOptions = {}
 ): DecodedPolicyDecision | null {
-  const actionIndex = maskedArgmax(output.actionTypeLogits, legalMask.actionTypeMask);
+  const actionMask = [...legalMask.actionTypeMask];
+  if (options.disallowWait) {
+    const waitIndex = getActionTypeIndex('WAIT');
+    const hasNonWaitLegal = actionMask.some((value, index) => index !== waitIndex && value > 0);
+    if (hasNonWaitLegal) {
+      actionMask[waitIndex] = 0;
+    }
+  }
+
+  const actionIndex = maskedArgmax(output.actionTypeLogits, actionMask);
   if (actionIndex < 0) return null;
 
   const action = ML_ACTION_TYPES[actionIndex] ?? 'WAIT';
-  const confidence = approximateConfidence(output.actionTypeLogits, actionIndex, legalMask.actionTypeMask);
+  const confidence = approximateConfidence(output.actionTypeLogits, actionIndex, actionMask);
 
   if (action === 'RECRUIT_UNIT') {
     const unitIndex = selectIndex(output.unitLogits, legalMask.unitMask);

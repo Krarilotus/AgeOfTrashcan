@@ -43,6 +43,7 @@ just train-smoke
 just train-quick10
 just train-mid
 just train-overnight
+just bench-game-bridge
 just serve-inference
 just clean-checkpoints
 just sync-checkpoints
@@ -54,6 +55,7 @@ Other useful targets:
 just doctor
 just doctor-cpu
 just install-torch-cuda
+just bench-game-bridge
 ENV_BACKEND=auto RUN_NAME=my_experiment TOTAL_STEPS=5000000 NUM_ENVS=8 ROLLOUT_HORIZON=256 DEVICE=cuda just train
 ENV_BACKEND=game OPPONENT_DIFFICULTY=SMART SELF_DIFFICULTY=SMART_ML DECISION_FRAMES=30 just train-smoke
 ENV_BACKEND=game just train-quick10
@@ -69,6 +71,12 @@ MINIBATCH_SIZE=32 just train-smoke
 just clean-checkpoints
 just clean-run my_experiment
 just sync-checkpoints
+```
+
+Game bridge throughput sweep:
+
+```bash
+BENCH_NUM_ENVS=8,16,24,32,40,48 BENCH_DECISION_FRAMES=30 BENCH_SEC=20 just bench-game-bridge
 ```
 
 Important usage note for Git Bash:
@@ -263,6 +271,11 @@ Optional: run inference under `systemd` and reverse proxy `/infer` through nginx
   - Save interval in steps for periodic checkpoints.
 - `EVAL_EVERY`
   - Evaluation interval in steps.
+- `EVAL_EARLY_EVERY`, `EVAL_LATE_EVERY`, `EVAL_SWITCH_PROGRESS`
+  - Optional two-phase eval cadence.
+  - If both early/late are > 0, trainer uses `EVAL_EARLY_EVERY` before `TOTAL_STEPS * EVAL_SWITCH_PROGRESS`,
+    then switches to `EVAL_LATE_EVERY`.
+  - If either is `0`, trainer uses `EVAL_EVERY` only.
 - `EVAL_MATCHES`
   - Number of matches per evaluation pass.
   - Higher gives stabler metrics but slows training wall-clock.

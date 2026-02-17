@@ -15,6 +15,8 @@ interface MLSelfPlayBehaviorOptions {
   modelVersionOverride?: string;
   selectedCheckpointId?: string;
   requireCheckpointInference?: boolean;
+  antiIdleEnabled?: boolean;
+  antiIdleWaitThreshold?: number;
 }
 
 interface MLDecisionDebugState {
@@ -30,6 +32,10 @@ interface MLDecisionDebugState {
   fallbackUsed: boolean;
   lastFallbackReason: string;
   fallbackRate: number;
+  antiIdleEnabled: boolean;
+  antiIdleWaitThreshold: number;
+  passiveWaitStreak: number;
+  antiIdleOverrides: number;
   policyDecisions: number;
   fallbackDecisions: number;
   lastAction: string;
@@ -48,6 +54,10 @@ export class MLSelfPlayBehavior implements IAIBehavior {
   private modelVersionOverride: string | null;
   private selectedCheckpointId: string | null;
   private requireCheckpointInference: boolean;
+  private antiIdleEnabled: boolean;
+  private antiIdleWaitThreshold: number;
+  private passiveWaitStreak = 0;
+  private antiIdleOverrides = 0;
   private totalDecisions = 0;
   private fallbackDecisions = 0;
   private policyDecisions = 0;
@@ -60,6 +70,8 @@ export class MLSelfPlayBehavior implements IAIBehavior {
     this.modelVersionOverride = options.modelVersionOverride ?? null;
     this.selectedCheckpointId = options.selectedCheckpointId ?? null;
     this.requireCheckpointInference = options.requireCheckpointInference ?? false;
+    this.antiIdleEnabled = options.antiIdleEnabled ?? true;
+    this.antiIdleWaitThreshold = Math.max(1, options.antiIdleWaitThreshold ?? 8);
     this.sequenceLength = options.sequenceLength ?? 240;
     this.lastDebug = {
       policyName: this.policy.getName(),
@@ -74,6 +86,10 @@ export class MLSelfPlayBehavior implements IAIBehavior {
       fallbackUsed: false,
       lastFallbackReason: '',
       fallbackRate: 0,
+      antiIdleEnabled: this.antiIdleEnabled,
+      antiIdleWaitThreshold: this.antiIdleWaitThreshold,
+      passiveWaitStreak: 0,
+      antiIdleOverrides: 0,
       policyDecisions: 0,
       fallbackDecisions: 0,
       lastAction: 'WAIT',
@@ -129,7 +145,31 @@ export class MLSelfPlayBehavior implements IAIBehavior {
         policySource = policyOutput.inferenceSource ?? 'unknown';
         modelVersion = policyOutput.modelVersion ?? 'unknown';
         valueEstimate = policyOutput.valueEstimate;
-        const decoded = decodePolicyOutput(policyOutput, legalMask);
+        let decoded = decodePolicyOutput(policyOutput, legalMask);
+        if (
+          decoded &&
+          decoded.decision.action === 'WAIT' &&
+          this.antiIdleEnabled &&
+          this.hasLegalNonWaitAction(legalMask)
+        ) {
+          const nextStreak = this.passiveWaitStreak + 1;
+          if (nextStreak >= this.antiIdleWaitThreshold) {
+            const forced = decodePolicyOutput(policyOutput, legalMask, { disallowWait: true });
+            if (forced && forced.decision.action !== 'WAIT' && this.isDecisionLegal(forced.decision, legalMask)) {
+              decoded = forced;
+              this.passiveWaitStreak = 0;
+              this.antiIdleOverrides += 1;
+            } else {
+              this.passiveWaitStreak = nextStreak;
+            }
+          } else {
+            this.passiveWaitStreak = nextStreak;
+          }
+        } else if (decoded && decoded.decision.action !== 'WAIT') {
+          this.passiveWaitStreak = 0;
+        } else if (decoded && decoded.decision.action === 'WAIT') {
+          this.passiveWaitStreak = 0;
+        }
         if (decoded && this.isDecisionLegal(decoded.decision, legalMask)) {
           selectedDecision = {
             ...decoded.decision,
@@ -218,6 +258,10 @@ export class MLSelfPlayBehavior implements IAIBehavior {
       fallbackUsed,
       lastFallbackReason: fallbackReason,
       fallbackRate: this.fallbackDecisions / Math.max(1, this.totalDecisions),
+      antiIdleEnabled: this.antiIdleEnabled,
+      antiIdleWaitThreshold: this.antiIdleWaitThreshold,
+      passiveWaitStreak: this.passiveWaitStreak,
+      antiIdleOverrides: this.antiIdleOverrides,
       policyDecisions: this.policyDecisions,
       fallbackDecisions: this.fallbackDecisions,
       lastAction: selectedDecision.action,
@@ -238,6 +282,8 @@ export class MLSelfPlayBehavior implements IAIBehavior {
     this.totalDecisions = 0;
     this.fallbackDecisions = 0;
     this.policyDecisions = 0;
+    this.passiveWaitStreak = 0;
+    this.antiIdleOverrides = 0;
     this.policy.reset?.();
     this.fallbackBehavior.reset?.();
   }
@@ -253,6 +299,10 @@ export class MLSelfPlayBehavior implements IAIBehavior {
       modelVersionOverride: this.modelVersionOverride,
       selectedCheckpointId: this.selectedCheckpointId,
       requireCheckpointInference: this.requireCheckpointInference,
+      antiIdleEnabled: this.antiIdleEnabled,
+      antiIdleWaitThreshold: this.antiIdleWaitThreshold,
+      passiveWaitStreak: this.passiveWaitStreak,
+      antiIdleOverrides: this.antiIdleOverrides,
     };
   }
 
@@ -265,6 +315,12 @@ export class MLSelfPlayBehavior implements IAIBehavior {
     }
     if (typeof params.requireCheckpointInference === 'boolean') {
       this.requireCheckpointInference = params.requireCheckpointInference;
+    }
+    if (typeof params.antiIdleEnabled === 'boolean') {
+      this.antiIdleEnabled = params.antiIdleEnabled;
+    }
+    if (typeof params.antiIdleWaitThreshold === 'number' && Number.isFinite(params.antiIdleWaitThreshold)) {
+      this.antiIdleWaitThreshold = Math.max(1, Math.floor(params.antiIdleWaitThreshold));
     }
     if (typeof params.selectedCheckpointId === 'string') {
       const normalized = params.selectedCheckpointId.trim();
@@ -307,6 +363,11 @@ export class MLSelfPlayBehavior implements IAIBehavior {
 
   private hasSelectedCheckpoint(): boolean {
     return typeof this.selectedCheckpointId === 'string' && this.selectedCheckpointId.trim().length > 0;
+  }
+
+  private hasLegalNonWaitAction(mask: ReturnType<typeof buildLegalActionMask>): boolean {
+    const waitIndex = getActionTypeIndex('WAIT');
+    return mask.actionTypeMask.some((value, index) => index !== waitIndex && value > 0);
   }
 
   private buildStrictCheckpointFailureReason(baseReason: string): string {
