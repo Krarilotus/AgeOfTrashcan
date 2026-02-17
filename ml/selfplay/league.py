@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 import math
 import random
-
 
 @dataclass(slots=True)
 class StrategyProfile:
@@ -27,6 +26,10 @@ class LeagueEntry:
     profile: StrategyProfile = field(default_factory=StrategyProfile)
     novelty: float = 0.0
     promoted: bool = False
+    source: str = "checkpoint"
+    use_checkpoint: bool = True
+    difficulty: str | None = None
+    fixed: bool = False
 
 
 class LeaguePool:
@@ -37,13 +40,27 @@ class LeaguePool:
         max_agents: int = 10,
         min_promote_winrate: float = 0.55,
         archetype_winrate_floor: float = 0.52,
+        arbiters_csv: str = "EASY,MEDIUM,HARD,SMART,CHEATER",
+        min_games_per_agent: int = 3,
+        elo_random_factor: float = 0.15,
+        use_checkpoint_opponents: bool = False,
+        spinoffs_per_anchor: int = 0,
+        spinoff_noise: float = 0.12,
     ) -> None:
         self.keep_top_n = max(1, int(keep_top_n))
         self.keep_diverse_n = max(0, int(keep_diverse_n))
         self.max_agents = max(self.keep_top_n, int(max_agents))
         self.min_promote_winrate = float(min_promote_winrate)
         self.archetype_winrate_floor = float(archetype_winrate_floor)
+        self.arbiters_csv = str(arbiters_csv or "").strip()
+        self.min_games_per_agent = max(1, int(min_games_per_agent))
+        self.elo_random_factor = max(0.0, min(1.0, float(elo_random_factor)))
+        self.use_checkpoint_opponents = bool(use_checkpoint_opponents)
+        self.spinoffs_per_anchor = max(0, int(spinoffs_per_anchor))
+        self.spinoff_noise = max(0.0, float(spinoff_noise))
         self.entries: List[LeagueEntry] = []
+        self.baseline_entries: List[LeagueEntry] = self._build_baseline_entries()
+        self.sample_counts: Dict[str, int] = {}
 
     def add_checkpoint(
         self,
@@ -59,6 +76,8 @@ class LeaguePool:
             elo=1000.0 + max(-200.0, min(250.0, (winrate_vs_smart - 0.5) * 500.0)),
             winrate_vs_smart=float(winrate_vs_smart),
             profile=profile,
+            source="checkpoint",
+            use_checkpoint=True,
         )
         entry.novelty = self._compute_novelty(entry)
         self.entries.append(entry)
@@ -87,16 +106,46 @@ class LeaguePool:
         return sorted(self.entries, key=self._rank_tuple, reverse=True)[:n]
 
     def sample_opponent(self, current_checkpoint: Optional[str]) -> Optional[LeagueEntry]:
-        if not self.entries:
+        full_roster = self._all_entries()
+        if not full_roster:
             return None
-        candidates = [entry for entry in self.entries if entry.checkpoint_path != current_checkpoint]
+        candidates = [entry for entry in full_roster if entry.checkpoint_path != current_checkpoint]
         if not candidates:
-            candidates = self.entries
+            candidates = full_roster
+        expanded_candidates = self._expanded_sampling_pool(candidates)
+        if not expanded_candidates:
+            return None
+
+        cycle_keys = {self._cycle_key(item) for item in expanded_candidates}
+        self._prune_sample_counts(cycle_keys)
+        underplayed_keys = {
+            key for key in cycle_keys if self.sample_counts.get(key, 0) < self.min_games_per_agent
+        }
+        if not underplayed_keys:
+            for key in cycle_keys:
+                self.sample_counts[key] = 0
+            underplayed_keys = set(cycle_keys)
+        cycle_filtered = [item for item in expanded_candidates if self._cycle_key(item) in underplayed_keys]
+        selection_pool = cycle_filtered if cycle_filtered else expanded_candidates
+
+        entry = self._weighted_pick(selection_pool)
+        self.sample_counts[self._cycle_key(entry)] = self.sample_counts.get(self._cycle_key(entry), 0) + 1
+        return entry
+
+    def _weighted_pick(self, candidates: List[LeagueEntry]) -> LeagueEntry:
+        if len(candidates) == 1:
+            return candidates[0]
 
         weights: List[float] = []
         archetype_counts: Dict[str, int] = {}
         for item in candidates:
             archetype_counts[item.profile.archetype] = archetype_counts.get(item.profile.archetype, 0) + 1
+
+        elos = [float(item.elo) for item in candidates]
+        median_elo = float(sorted(elos)[len(elos) // 2]) if elos else 1000.0
+        elo_jitter = (random.random() * 2.0 - 1.0) * (120.0 * self.elo_random_factor)
+        target_elo = median_elo + elo_jitter
+        elo_sigma = max(50.0, 220.0 * max(0.05, self.elo_random_factor))
 
         for entry in candidates:
             archetype_count = archetype_counts.get(entry.profile.archetype, 1)
@@ -104,14 +153,125 @@ class LeaguePool:
             novelty = 0.6 + max(0.0, entry.novelty)
             diversity_boost = 1.0 / math.sqrt(archetype_count)
             promotion_boost = 1.15 if entry.promoted else 1.0
-            weights.append(max(0.01, quality * novelty * diversity_boost * promotion_boost))
+            elo_bias = math.exp(-abs(float(entry.elo) - target_elo) / elo_sigma)
+            randomness = max(0.05, 1.0 + random.uniform(-self.elo_random_factor, self.elo_random_factor))
+            if entry.source == "checkpoint":
+                source_boost = 1.0
+            elif entry.source == "baseline":
+                source_boost = 0.95
+            else:
+                source_boost = 0.95
+            weights.append(
+                max(0.01, quality * novelty * diversity_boost * promotion_boost * max(0.05, elo_bias) * randomness)
+            )
+            weights[-1] *= source_boost
         return random.choices(candidates, weights=weights, k=1)[0]
 
     def ensure_path(self, path: str) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
     def roster(self) -> List[LeagueEntry]:
-        return sorted(self.entries, key=self._rank_tuple, reverse=True)[: self.max_agents]
+        learned = sorted(self.entries, key=self._rank_tuple, reverse=True)[: self.max_agents]
+        combined = [*self.baseline_entries, *learned]
+        return sorted(combined, key=self._rank_tuple, reverse=True)
+
+    def export_state(self) -> Dict[str, object]:
+        return {
+            "entries": [self._entry_to_dict(entry) for entry in self.entries],
+            "sample_counts": {str(key): int(value) for key, value in self.sample_counts.items()},
+        }
+
+    def import_state(self, state: Dict[str, object] | None) -> None:
+        self.entries = []
+        self.sample_counts = {}
+        if not isinstance(state, dict):
+            return
+        raw_entries = state.get("entries")
+        if isinstance(raw_entries, list):
+            parsed_entries: List[LeagueEntry] = []
+            for raw in raw_entries:
+                entry = self._entry_from_dict(raw)
+                if entry is None:
+                    continue
+                if entry.fixed or entry.source == "baseline":
+                    continue
+                parsed_entries.append(entry)
+            self.entries = sorted(parsed_entries, key=self._rank_tuple, reverse=True)[: self.max_agents]
+            self._prune_diverse()
+        raw_counts = state.get("sample_counts")
+        if isinstance(raw_counts, dict):
+            for key, value in raw_counts.items():
+                if isinstance(key, str):
+                    try:
+                        self.sample_counts[key] = max(0, int(value))
+                    except (TypeError, ValueError):
+                        continue
+
+    def _entry_to_dict(self, entry: LeagueEntry) -> Dict[str, object]:
+        return {
+            "checkpoint_path": str(entry.checkpoint_path),
+            "steps": int(entry.steps),
+            "elo": float(entry.elo),
+            "winrate_vs_smart": float(entry.winrate_vs_smart),
+            "novelty": float(entry.novelty),
+            "promoted": bool(entry.promoted),
+            "source": str(entry.source),
+            "use_checkpoint": bool(entry.use_checkpoint),
+            "difficulty": entry.difficulty if isinstance(entry.difficulty, str) else None,
+            "fixed": bool(entry.fixed),
+            "profile": {
+                "archetype": str(entry.profile.archetype),
+                "codename": str(entry.profile.codename),
+                "aggression": float(entry.profile.aggression),
+                "teching": float(entry.profile.teching),
+                "defense": float(entry.profile.defense),
+                "action_mix": {
+                    str(key): float(value)
+                    for key, value in entry.profile.action_mix.items()
+                    if isinstance(key, str)
+                },
+            },
+        }
+
+    def _entry_from_dict(self, raw: object) -> LeagueEntry | None:
+        if not isinstance(raw, dict):
+            return None
+        profile_raw = raw.get("profile")
+        profile = StrategyProfile()
+        if isinstance(profile_raw, dict):
+            profile = StrategyProfile(
+                archetype=str(profile_raw.get("archetype", "balanced")),
+                codename=str(profile_raw.get("codename", "Balanced Vanguard")),
+                aggression=float(profile_raw.get("aggression", 0.5)),
+                teching=float(profile_raw.get("teching", 0.5)),
+                defense=float(profile_raw.get("defense", 0.5)),
+                action_mix={
+                    str(key): float(value)
+                    for key, value in (profile_raw.get("action_mix", {}) or {}).items()
+                    if isinstance(key, str)
+                } if isinstance(profile_raw.get("action_mix", {}), dict) else {},
+            )
+        checkpoint_path = str(raw.get("checkpoint_path", ""))
+        try:
+            steps = int(raw.get("steps", 0))
+            elo = float(raw.get("elo", 1000.0))
+            winrate_vs_smart = float(raw.get("winrate_vs_smart", 0.0))
+            novelty = float(raw.get("novelty", 0.0))
+        except (TypeError, ValueError):
+            return None
+        return LeagueEntry(
+            checkpoint_path=checkpoint_path,
+            steps=max(0, steps),
+            elo=elo,
+            winrate_vs_smart=winrate_vs_smart,
+            profile=profile,
+            novelty=novelty,
+            promoted=bool(raw.get("promoted", False)),
+            source=str(raw.get("source", "checkpoint")),
+            use_checkpoint=bool(raw.get("use_checkpoint", True)),
+            difficulty=str(raw.get("difficulty")) if isinstance(raw.get("difficulty"), str) else None,
+            fixed=bool(raw.get("fixed", False)),
+        )
 
     def _is_archetype_champion(self, candidate: LeagueEntry) -> bool:
         same_archetype = [item for item in self.entries if item.profile.archetype == candidate.profile.archetype]
@@ -183,3 +343,147 @@ class LeaguePool:
 
     def _rank_tuple(self, item: LeagueEntry) -> tuple[float, float, int]:
         return (item.elo + item.novelty * 15.0, item.winrate_vs_smart, item.steps)
+
+    def _expanded_sampling_pool(self, candidates: List[LeagueEntry]) -> List[LeagueEntry]:
+        if not candidates:
+            return []
+        expanded: List[LeagueEntry] = list(candidates)
+        per_anchor = self._effective_spinoffs_per_anchor()
+        if per_anchor <= 0:
+            return expanded
+        anchors = self._sampling_anchors(candidates)
+        for anchor in anchors:
+            for spinoff_idx in range(per_anchor):
+                expanded.append(self._make_spinoff(anchor, spinoff_idx))
+        return expanded
+
+    def _effective_spinoffs_per_anchor(self) -> int:
+        if self.spinoffs_per_anchor > 0:
+            return self.spinoffs_per_anchor
+        kept = max(1, self.keep_top_n + self.keep_diverse_n)
+        return max(0, (self.max_agents // kept) - 1)
+
+    def _sampling_anchors(self, candidates: List[LeagueEntry]) -> List[LeagueEntry]:
+        ranked = [entry for entry in sorted(candidates, key=self._rank_tuple, reverse=True) if not entry.fixed]
+        if not ranked:
+            return []
+        target = min(len(ranked), max(1, self.keep_top_n + self.keep_diverse_n))
+        return ranked[:target]
+
+    def _make_spinoff(self, anchor: LeagueEntry, spinoff_idx: int) -> LeagueEntry:
+        noise = self.spinoff_noise
+        aggression = self._clamp(anchor.profile.aggression + random.uniform(-noise, noise), 0.0, 2.0)
+        teching = self._clamp(anchor.profile.teching + random.uniform(-noise, noise), 0.0, 2.0)
+        defense = self._clamp(anchor.profile.defense + random.uniform(-noise, noise), 0.0, 2.0)
+        archetype = self._archetype_from_axes(aggression=aggression, teching=teching, defense=defense)
+        codename = f"{anchor.profile.codename} Evo{spinoff_idx + 1}"
+        use_checkpoint = self.use_checkpoint_opponents and bool(anchor.checkpoint_path)
+        checkpoint_path = anchor.checkpoint_path if use_checkpoint else ""
+        profile = StrategyProfile(
+            archetype=archetype,
+            codename=codename,
+            aggression=aggression,
+            teching=teching,
+            defense=defense,
+            action_mix=dict(anchor.profile.action_mix),
+        )
+        novelty = max(anchor.novelty, abs(aggression - anchor.profile.aggression) + abs(teching - anchor.profile.teching) + abs(defense - anchor.profile.defense))
+        return LeagueEntry(
+            checkpoint_path=checkpoint_path,
+            steps=anchor.steps,
+            elo=self._clamp(anchor.elo + random.uniform(-35.0, 35.0), 800.0, 1800.0),
+            winrate_vs_smart=self._clamp(anchor.winrate_vs_smart + random.uniform(-0.08, 0.08), 0.0, 1.0),
+            profile=profile,
+            novelty=float(novelty),
+            promoted=False,
+            source="spinoff",
+            use_checkpoint=use_checkpoint,
+            difficulty=None,
+            fixed=False,
+        )
+
+    def _archetype_from_axes(self, aggression: float, teching: float, defense: float) -> str:
+        if aggression > teching + 0.12 and aggression > defense + 0.1:
+            return "raider"
+        if teching > aggression + 0.12 and teching > defense:
+            return "techer"
+        if defense > aggression + 0.1 and defense > teching:
+            return "fortress"
+        return "balanced"
+
+    def _clamp(self, value: float, min_value: float, max_value: float) -> float:
+        return max(min_value, min(max_value, float(value)))
+
+    def _all_entries(self) -> List[LeagueEntry]:
+        if not self.baseline_entries:
+            return list(self.entries)
+        return [*self.baseline_entries, *self.entries]
+
+    def _prune_sample_counts(self, valid_keys: Set[str]) -> None:
+        stale = [key for key in self.sample_counts.keys() if key not in valid_keys]
+        for key in stale:
+            self.sample_counts.pop(key, None)
+        for key in valid_keys:
+            self.sample_counts.setdefault(key, 0)
+
+    def _cycle_key(self, entry: LeagueEntry) -> str:
+        if entry.fixed and entry.difficulty:
+            return f"baseline:{entry.difficulty}"
+        if entry.source == "spinoff":
+            if entry.checkpoint_path:
+                return f"anchor:{entry.checkpoint_path}"
+            anchor_name = entry.profile.codename.split(" Evo", 1)[0]
+            return f"anchor:{anchor_name}"
+        if entry.checkpoint_path:
+            return f"checkpoint:{entry.checkpoint_path}"
+        return f"profile:{entry.profile.codename}:{entry.source}"
+
+    def _parse_arbiters(self) -> List[str]:
+        allowed = {"EASY", "MEDIUM", "HARD", "SMART", "CHEATER"}
+        parsed: List[str] = []
+        for token in self.arbiters_csv.split(","):
+            key = token.strip().upper()
+            if not key:
+                continue
+            if key in allowed and key not in parsed:
+                parsed.append(key)
+        return parsed
+
+    def _build_baseline_entries(self) -> List[LeagueEntry]:
+        spec_map: Dict[str, Tuple[float, str, str, float, float, float]] = {
+            "EASY": (860.0, "baseline_easy", "Baseline Easy", 0.30, 0.30, 0.40),
+            "MEDIUM": (950.0, "baseline_medium", "Baseline Medium", 0.45, 0.45, 0.45),
+            "HARD": (1025.0, "baseline_hard", "Baseline Hard", 0.58, 0.55, 0.55),
+            "SMART": (1125.0, "baseline_smart", "Baseline Smart", 0.65, 0.70, 0.60),
+            "CHEATER": (1250.0, "baseline_cheater", "Baseline Cheater", 0.80, 0.72, 0.62),
+        }
+        baseline_order = self._parse_arbiters()
+        if not baseline_order:
+            return []
+        entries: List[LeagueEntry] = []
+        for difficulty in baseline_order:
+            elo, archetype, codename, aggression, teching, defense = spec_map[difficulty]
+            profile = StrategyProfile(
+                archetype=archetype,
+                codename=codename,
+                aggression=float(aggression),
+                teching=float(teching),
+                defense=float(defense),
+                action_mix={},
+            )
+            entries.append(
+                LeagueEntry(
+                    checkpoint_path="",
+                    steps=0,
+                    elo=float(elo),
+                    winrate_vs_smart=0.0,
+                    profile=profile,
+                    novelty=0.0,
+                    promoted=True,
+                    source="baseline",
+                    use_checkpoint=False,
+                    difficulty=difficulty,
+                    fixed=True,
+                )
+            )
+        return entries

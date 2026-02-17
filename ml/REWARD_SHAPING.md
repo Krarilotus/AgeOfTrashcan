@@ -38,7 +38,7 @@ Current behavior in this repo:
 - `own_unit_loss_value`:
   - computed as `max(0, prev.enemyUnitCount - next.enemyUnitCount) * own_unit_loss_per_unit`
 - `enemy_base_damage`: one-time milestone reward when enemy base crosses HP thresholds:
-  - 75%, 50%, 25% using `base_milestone_rewards`
+  - thresholds from `base_milestone_thresholds` (default: 75%, 50%, 25%) using `base_milestone_rewards`
 - `own_base_damage`: one-time mirrored penalty with same thresholds
 - `safe_age_up_bonus`: awarded on every successful age-up
 - `age_up_delay_penalty`: per-step penalty after grace window:
@@ -63,12 +63,13 @@ All components are multiplied by `bridge.component_weights.<component_name>` bef
 Bridge defaults:
 
 - `component_weights.* = 1.0`
-- `enemy_unit_kill_per_unit = 0.0`
-- `own_unit_loss_per_unit = 0.0`
+- `enemy_unit_kill_per_unit = 0.01`
+- `own_unit_loss_per_unit = -0.01`
 - `lane_control_delta_per_unit = 0.0`
 - `base_milestone_rewards = [2.0, 4.0, 8.0]`
+- `base_milestone_thresholds = [0.75, 0.5, 0.25]`
 - `safe_age_up_bonus = 1.2`
-- `illegal_action_penalty = -0.5`
+- `illegal_action_penalty = -0.35`
 - `quick_sell_penalty = -0.5`
 - `quick_sell_window_sec = 3.0`
 - `age_delay_grace_per_age_sec = 180.0`
@@ -81,12 +82,17 @@ Bridge defaults:
 Schedule defaults:
 
 - `dense_start = 1.0`
-- `dense_end = 1.0`
+- `dense_end = 0.0`
 - `dense_decay_interval = 0.2`
 - `dense_decay_factor = 0.9`
 - `terminal_start = 1.0`
 - `terminal_end = 5.0`
 - `curriculum_steps = 0` (means total training steps)
+- `unit_curriculum_end_progress = 0.2`
+- `unit_curriculum_start_scale = 1.0`
+- `unit_curriculum_end_scale = 0.0`
+- `dense_cutoff_progress = 0.6`
+- `keep_enemy_base_milestone_after_dense_cutoff = true`
 - `reward_normalize = true`
 - `reward_clip_abs = 10.0`
 
@@ -98,14 +104,30 @@ Schedule defaults:
 
 ## Final Training Reward (Trainer)
 
-Trainer composes reward as:
+Trainer composes reward in phases:
 
-`final_reward = dense_reward * dense_scale + terminal_outcome * terminal_scale`
+- `0% -> unit_curriculum_end_progress`:
+  - unit kill/loss components are multiplied by a curriculum multiplier that decays from
+  - `unit_curriculum_start_scale` to `unit_curriculum_end_scale`
+- `unit_curriculum_end_progress -> dense_cutoff_progress`:
+  - dense rewards are active (scaled by `dense_scale`)
+- `>= dense_cutoff_progress`:
+  - dense rewards are shut off
+  - optional exception: keep `enemy_base_damage` milestones if
+  - `keep_enemy_base_milestone_after_dense_cutoff = true`
+
+Core formula:
+
+- before dense cutoff:
+  - `final_reward = (unit_curriculum_reward + dense_non_milestone + enemy_base_milestone) * dense_scale + terminal_outcome * terminal_scale`
+- after dense cutoff:
+  - `final_reward = (enemy_base_milestone if enabled else 0) + terminal_outcome * terminal_scale`
 
 Where:
 
-- `dense_reward` is the sum of:
-  - `enemy_unit_kill_value + own_unit_loss_value + enemy_base_damage + own_base_damage + safe_age_up_bonus + age_up_delay_penalty + lane_control_delta + illegal_action_penalty`
+- `unit_curriculum_reward = (enemy_unit_kill_value + own_unit_loss_value) * unit_curriculum_scale`
+- `dense_non_milestone = own_base_damage + safe_age_up_bonus + age_up_delay_penalty + lane_control_delta + illegal_action_penalty`
+- `enemy_base_milestone = enemy_base_damage` (one-time thresholds only)
 - `dense_scale` and `terminal_scale` come from `schedule` and training progress.
 - optional reward normalization/clipping is controlled by:
   - `schedule.reward_normalize`
@@ -127,6 +149,10 @@ Terminal-dominance rule of thumb:
 - `dense_start`, `dense_end`
 - `dense_decay_interval`, `dense_decay_factor`
 - `terminal_start`, `terminal_end`
+- `unit_curriculum_end_progress`
+- `unit_curriculum_start_scale`, `unit_curriculum_end_scale`
+- `dense_cutoff_progress`
+- `keep_enemy_base_milestone_after_dense_cutoff`
 - `curriculum_steps` (`0` means full run length)
 - `reward_normalize`, `reward_clip_abs`
 

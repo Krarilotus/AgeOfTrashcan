@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=str,
-        default="../public/ml/checkpoints/index.json",
+        default="../assets/ml/checkpoints/index.json",
         help="Output JSON path for UI registry",
     )
     return parser.parse_args()
@@ -64,6 +64,9 @@ def _collect_from_manifest(run_dir: Path, manifest: Dict[str, Any]) -> List[Dict
             continue
         filename = str(item.get("path", "")).strip()
         if not filename:
+            continue
+        checkpoint_file = (run_dir / filename)
+        if not checkpoint_file.exists() or not checkpoint_file.is_file():
             continue
         step = int(item.get("step", 0) or 0)
         kind = str(item.get("kind", "periodic"))

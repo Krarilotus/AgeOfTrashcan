@@ -71,7 +71,7 @@ class InferenceRuntime:
         self.checkpoint_path = checkpoint_path
         self.device = device
         self.model_cfg = ModelConfig()
-        payload = torch.load(str(checkpoint_path), map_location=device)
+        payload = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
         cfg_dict = payload.get("config", {})
         model_cfg_dict = cfg_dict.get("model", {}) if isinstance(cfg_dict, dict) else {}
         if isinstance(model_cfg_dict, dict):
@@ -180,16 +180,21 @@ class InferenceService:
 class InferenceHandler(BaseHTTPRequestHandler):
     service: InferenceService
 
-    def _send_json(self, payload: Dict[str, Any], status: int = HTTPStatus.OK) -> None:
+    def _send_json(self, payload: Dict[str, Any], status: int = HTTPStatus.OK) -> bool:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            # Browser/client cancelled request while response was being written.
+            return False
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._send_json({"ok": True}, status=HTTPStatus.NO_CONTENT)
@@ -213,8 +218,10 @@ class InferenceHandler(BaseHTTPRequestHandler):
             response = self.service.infer(checkpoint_id, observation, deterministic=deterministic)
             self._send_json(response, status=HTTPStatus.OK)
         except FileNotFoundError as exc:
+            print(f"[inference] 404: {exc}")
             self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.NOT_FOUND)
         except Exception as exc:  # noqa: BLE001
+            print(f"[inference] 400: {exc}")
             self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
 

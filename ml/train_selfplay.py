@@ -8,6 +8,69 @@ from pathlib import Path
 import shutil
 from typing import Any, Callable, Dict, List
 
+from selfplay.defaults import (
+    DEFAULT_CHECKPOINT_EVERY,
+    DEFAULT_CLEAN_RUN,
+    DEFAULT_DECISION_FRAMES,
+    DEFAULT_DEAD_UNIT_CHECK_EVERY,
+    DEFAULT_DEAD_UNIT_REVIVAL_ENABLED,
+    DEFAULT_DEAD_UNIT_STREAK,
+    DEFAULT_DEAD_UNIT_ZERO_EPSILON,
+    DEFAULT_DEVICE,
+    DEFAULT_ENV_BACKEND,
+    DEFAULT_EPISODE_SECONDS,
+    DEFAULT_EVAL_EVERY,
+    DEFAULT_EVAL_MATCHES,
+    DEFAULT_EVAL_WORKERS,
+    DEFAULT_EXPORT_REGISTRY,
+    DEFAULT_KEEP_AWAKE,
+    DEFAULT_KEEP_AWAKE_INTERVAL_SEC,
+    DEFAULT_LEAGUE_ARBITERS,
+    DEFAULT_LEAGUE_ARCHETYPE_WINRATE_FLOOR,
+    DEFAULT_LEAGUE_ELO_RANDOM_FACTOR,
+    DEFAULT_LEAGUE_KEEP_DIVERSE,
+    DEFAULT_LEAGUE_KEEP_TOP,
+    DEFAULT_LEAGUE_MAX_AGENTS,
+    DEFAULT_LEAGUE_MIN_GAMES_PER_AGENT,
+    DEFAULT_LEAGUE_MIN_PROMOTE_WINRATE,
+    DEFAULT_LEAGUE_SPINOFF_NOISE,
+    DEFAULT_LEAGUE_SPINOFFS_PER_ANCHOR,
+    DEFAULT_LEAGUE_USE_CHECKPOINT_OPPONENTS,
+    DEFAULT_LOG_INTERVAL,
+    DEFAULT_MILESTONE_FRACTIONS,
+    DEFAULT_MIXED_PRECISION,
+    DEFAULT_MODEL_PRESET,
+    DEFAULT_NUM_ENVS,
+    DEFAULT_OPPONENT_DIFFICULTY,
+    DEFAULT_REWARD_CURRICULUM_STEPS,
+    DEFAULT_REWARD_DENSE_CUTOFF_PROGRESS,
+    DEFAULT_REWARD_DENSE_DECAY_FACTOR,
+    DEFAULT_REWARD_DENSE_DECAY_INTERVAL,
+    DEFAULT_REWARD_DENSE_SCALE_END,
+    DEFAULT_REWARD_DENSE_SCALE_START,
+    DEFAULT_REWARD_KEEP_ENEMY_BASE_MILESTONE_AFTER_DENSE_CUTOFF,
+    DEFAULT_REWARD_TERMINAL_SCALE_END,
+    DEFAULT_REWARD_TERMINAL_SCALE_START,
+    DEFAULT_REWARD_UNIT_CURRICULUM_END_PROGRESS,
+    DEFAULT_REWARD_UNIT_CURRICULUM_END_SCALE,
+    DEFAULT_REWARD_UNIT_CURRICULUM_START_SCALE,
+    DEFAULT_ROLLOUT_HORIZON,
+    DEFAULT_SAVE_DIR,
+    DEFAULT_SELF_DIFFICULTY,
+    DEFAULT_SMART_ENV_ADJUST_COOLDOWN_SEC,
+    DEFAULT_SMART_ENV_AUTOSCALE,
+    DEFAULT_SMART_ENV_GPU_PROBE_HZ,
+    DEFAULT_SMART_ENV_GPU_SUSTAIN_SEC,
+    DEFAULT_SMART_ENV_MAX_ENVS,
+    DEFAULT_SMART_ENV_MIN_ENVS,
+    DEFAULT_SMART_ENV_SAMPLE_HZ,
+    DEFAULT_SMART_ENV_SCALE_DOWN_TRIGGER_PERCENT,
+    DEFAULT_SMART_ENV_SCALE_STEP,
+    DEFAULT_SMART_ENV_TARGET_UTIL_PERCENT,
+    DEFAULT_TOTAL_STEPS,
+    MODEL_PRESET_OVERRIDES,
+)
+
 
 def _parse_milestone_fractions(raw: str) -> List[float]:
     values: List[float] = []
@@ -51,12 +114,17 @@ def _apply_reward_profile(cfg, profile: Dict[str, Any]) -> None:
             "terminal_start": "reward_terminal_scale_start",
             "terminal_end": "reward_terminal_scale_end",
             "reward_clip_abs": "reward_clip_abs",
+            "unit_curriculum_end_progress": "reward_unit_curriculum_end_progress",
+            "unit_curriculum_start_scale": "reward_unit_curriculum_start_scale",
+            "unit_curriculum_end_scale": "reward_unit_curriculum_end_scale",
+            "dense_cutoff_progress": "reward_dense_cutoff_progress",
         }
         int_fields = {
             "curriculum_steps": "reward_curriculum_steps",
         }
         bool_fields = {
             "reward_normalize": "reward_normalize",
+            "keep_enemy_base_milestone_after_dense_cutoff": "reward_keep_enemy_base_milestone_after_dense_cutoff",
         }
         for key, attr in float_fields.items():
             if key in schedule and isinstance(schedule[key], (int, float)):
@@ -75,18 +143,24 @@ def _apply_reward_profile(cfg, profile: Dict[str, Any]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Age of Trashcan SMART_ML self-play policy")
+    model_preset_choices = ["base", *MODEL_PRESET_OVERRIDES.keys()]
     default_registry_output = str(
-        (Path(__file__).resolve().parent.parent / "public" / "ml" / "checkpoints" / "index.json")
+        (Path(__file__).resolve().parent.parent / "assets" / "ml" / "checkpoints" / "index.json")
     )
     default_reward_profile = os.getenv(
         "REWARD_PROFILE",
         str((Path(__file__).resolve().parent / "reward_profile.json").resolve()),
     )
-    parser.add_argument("--total-steps", type=int, default=10_000_000, help="Total environment steps")
-    parser.add_argument("--num-envs", type=int, default=8, help="Number of parallel envs")
-    parser.add_argument("--rollout-horizon", type=int, default=256, help="Rollout steps per env per update")
-    parser.add_argument("--device", type=str, default="cuda", help="Torch device (cuda/cpu)")
-    parser.add_argument("--save-dir", type=str, default="checkpoints", help="Root directory for run outputs")
+    parser.add_argument("--total-steps", type=int, default=DEFAULT_TOTAL_STEPS, help="Total environment steps")
+    parser.add_argument("--num-envs", type=int, default=DEFAULT_NUM_ENVS, help="Number of parallel envs")
+    parser.add_argument(
+        "--rollout-horizon",
+        type=int,
+        default=DEFAULT_ROLLOUT_HORIZON,
+        help="Rollout steps per env per update",
+    )
+    parser.add_argument("--device", type=str, default=DEFAULT_DEVICE, help="Torch device (cuda/cpu)")
+    parser.add_argument("--save-dir", type=str, default=DEFAULT_SAVE_DIR, help="Root directory for run outputs")
     parser.add_argument("--run-name", type=str, default="", help="Run name (default: timestamp)")
     parser.add_argument("--resume-from", type=str, default="", help="Checkpoint path to resume from")
     parser.add_argument(
@@ -95,21 +169,31 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="If resuming, train this many extra steps beyond checkpoint step",
     )
-    parser.add_argument("--checkpoint-every", type=int, default=100_000, help="Checkpoint interval in steps")
-    parser.add_argument("--eval-every", type=int, default=200_000, help="Evaluation interval in steps")
-    parser.add_argument("--eval-matches", type=int, default=200, help="Evaluation matches per eval interval")
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=DEFAULT_CHECKPOINT_EVERY,
+        help="Checkpoint interval in steps",
+    )
+    parser.add_argument("--eval-every", type=int, default=DEFAULT_EVAL_EVERY, help="Evaluation interval in steps")
+    parser.add_argument(
+        "--eval-matches",
+        type=int,
+        default=DEFAULT_EVAL_MATCHES,
+        help="Evaluation matches per eval interval",
+    )
     parser.add_argument(
         "--eval-workers",
         type=int,
-        default=0,
+        default=DEFAULT_EVAL_WORKERS,
         help="Parallel workers for evaluation matches (0 = auto from num-envs)",
     )
-    parser.add_argument("--log-interval", type=int, default=2_048, help="Log interval in steps")
+    parser.add_argument("--log-interval", type=int, default=DEFAULT_LOG_INTERVAL, help="Log interval in steps")
     parser.add_argument(
         "--model-preset",
         type=str,
-        default="base",
-        choices=["tiny", "base", "large"],
+        default=DEFAULT_MODEL_PRESET,
+        choices=model_preset_choices,
         help="Model size preset for quick tests vs long runs",
     )
     parser.add_argument("--model-d-model", type=int, default=0, help="Override transformer model dim (>0)")
@@ -130,11 +214,11 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable mixed precision for PPO updates",
     )
-    parser.set_defaults(mixed_precision=True)
+    parser.set_defaults(mixed_precision=DEFAULT_MIXED_PRECISION)
     parser.add_argument(
         "--milestone-fractions",
         type=str,
-        default="0.2,0.4,0.6,0.8,1.0",
+        default=DEFAULT_MILESTONE_FRACTIONS,
         help="Comma-separated fractions of total steps for milestone checkpoints",
     )
     parser.add_argument(
@@ -145,75 +229,115 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--env-backend",
         type=str,
-        default="auto",
+        default=DEFAULT_ENV_BACKEND,
         choices=["auto", "mock", "game"],
         help="Environment backend: auto (prefer game bridge), mock, or game",
     )
     parser.add_argument(
         "--opponent-difficulty",
         type=str,
-        default="SMART",
+        default=DEFAULT_OPPONENT_DIFFICULTY,
         help="Opponent difficulty for game bridge backend",
     )
     parser.add_argument(
         "--self-difficulty",
         type=str,
-        default="SMART_ML",
+        default=DEFAULT_SELF_DIFFICULTY,
         help="Controlled side difficulty profile for game bridge backend",
     )
     parser.add_argument(
         "--episode-seconds",
         type=int,
-        default=1200,
+        default=DEFAULT_EPISODE_SECONDS,
         help="Episode timeout in seconds for game bridge backend",
     )
     parser.add_argument(
         "--decision-frames",
         type=int,
-        default=30,
+        default=DEFAULT_DECISION_FRAMES,
         help="Frames (60Hz) per policy decision step in game bridge backend",
     )
     parser.add_argument(
         "--reward-dense-start",
         type=float,
-        default=1.0,
+        default=DEFAULT_REWARD_DENSE_SCALE_START,
         help="Initial scale for dense intermediate rewards",
     )
     parser.add_argument(
         "--reward-dense-end",
         type=float,
-        default=1.0,
+        default=DEFAULT_REWARD_DENSE_SCALE_END,
         help="Final scale for dense intermediate rewards",
     )
     parser.add_argument(
         "--reward-dense-decay-interval",
         type=float,
-        default=0.2,
+        default=DEFAULT_REWARD_DENSE_DECAY_INTERVAL,
         help="Progress fraction interval for stepwise dense decay (0.2 means 20%% checkpoints)",
     )
     parser.add_argument(
         "--reward-dense-decay-factor",
         type=float,
-        default=0.9,
+        default=DEFAULT_REWARD_DENSE_DECAY_FACTOR,
         help="Dense reward multiplier applied every decay interval",
     )
     parser.add_argument(
         "--reward-terminal-start",
         type=float,
-        default=1.0,
+        default=DEFAULT_REWARD_TERMINAL_SCALE_START,
         help="Initial scale for terminal win/loss reward",
     )
     parser.add_argument(
         "--reward-terminal-end",
         type=float,
-        default=5.0,
+        default=DEFAULT_REWARD_TERMINAL_SCALE_END,
         help="Final scale for terminal win/loss reward",
     )
     parser.add_argument(
         "--reward-curriculum-steps",
         type=int,
-        default=0,
+        default=DEFAULT_REWARD_CURRICULUM_STEPS,
         help="Steps to finish reward schedule annealing (0 = use total-steps)",
+    )
+    parser.add_argument(
+        "--reward-unit-curriculum-end-progress",
+        type=float,
+        default=DEFAULT_REWARD_UNIT_CURRICULUM_END_PROGRESS,
+        help="Progress fraction where unit kill/loss curriculum scaling reaches its end value",
+    )
+    parser.add_argument(
+        "--reward-unit-curriculum-start-scale",
+        type=float,
+        default=DEFAULT_REWARD_UNIT_CURRICULUM_START_SCALE,
+        help="Initial multiplier for unit kill/loss components",
+    )
+    parser.add_argument(
+        "--reward-unit-curriculum-end-scale",
+        type=float,
+        default=DEFAULT_REWARD_UNIT_CURRICULUM_END_SCALE,
+        help="Final multiplier for unit kill/loss components after curriculum end progress",
+    )
+    parser.add_argument(
+        "--reward-dense-cutoff-progress",
+        type=float,
+        default=DEFAULT_REWARD_DENSE_CUTOFF_PROGRESS,
+        help="Progress fraction after which dense rewards are shut off",
+    )
+    parser.add_argument(
+        "--reward-keep-enemy-base-milestone-after-dense-cutoff",
+        dest="reward_keep_enemy_base_milestone_after_dense_cutoff",
+        action="store_true",
+        help="Keep one-time enemy base milestone rewards active after dense cutoff (default)",
+    )
+    parser.add_argument(
+        "--no-reward-keep-enemy-base-milestone-after-dense-cutoff",
+        dest="reward_keep_enemy_base_milestone_after_dense_cutoff",
+        action="store_false",
+        help="Disable enemy base milestone rewards after dense cutoff",
+    )
+    parser.set_defaults(
+        reward_keep_enemy_base_milestone_after_dense_cutoff=
+        DEFAULT_REWARD_KEEP_ENEMY_BASE_MILESTONE_AFTER_DENSE_CUTOFF
     )
     parser.add_argument(
         "--dead-unit-revival",
@@ -227,54 +351,97 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable dead-neuron revival checks",
     )
-    parser.set_defaults(dead_unit_revival=True)
+    parser.set_defaults(dead_unit_revival=DEFAULT_DEAD_UNIT_REVIVAL_ENABLED)
     parser.add_argument(
         "--dead-unit-check-every",
         type=int,
-        default=10,
+        default=DEFAULT_DEAD_UNIT_CHECK_EVERY,
         help="Run dead-neuron checks every N PPO updates",
     )
     parser.add_argument(
         "--dead-unit-zero-epsilon",
         type=float,
-        default=1e-10,
+        default=DEFAULT_DEAD_UNIT_ZERO_EPSILON,
         help="Absolute threshold for considering a neuron exactly zeroed",
     )
     parser.add_argument(
         "--dead-unit-streak",
         type=int,
-        default=50,
+        default=DEFAULT_DEAD_UNIT_STREAK,
         help="Consecutive checks required before reviving a zeroed neuron",
     )
     parser.add_argument(
         "--league-keep-top",
         type=int,
-        default=5,
+        default=DEFAULT_LEAGUE_KEEP_TOP,
         help="Number of strongest agents to always keep in league",
     )
     parser.add_argument(
         "--league-keep-diverse",
         type=int,
-        default=5,
+        default=DEFAULT_LEAGUE_KEEP_DIVERSE,
         help="Additional diversity slots reserved for strategy outliers",
     )
     parser.add_argument(
         "--league-max-agents",
         type=int,
-        default=10,
+        default=DEFAULT_LEAGUE_MAX_AGENTS,
         help="Max retained league agents (top + diverse)",
     )
     parser.add_argument(
         "--league-min-promote-winrate",
         type=float,
-        default=0.55,
+        default=DEFAULT_LEAGUE_MIN_PROMOTE_WINRATE,
         help="Default winrate gate for promotion into active league roster",
     )
     parser.add_argument(
         "--league-archetype-winrate-floor",
         type=float,
-        default=0.52,
+        default=DEFAULT_LEAGUE_ARCHETYPE_WINRATE_FLOOR,
         help="Lower winrate gate allowed for best-in-archetype specialists",
+    )
+    parser.add_argument(
+        "--league-arbiters",
+        type=str,
+        default=DEFAULT_LEAGUE_ARBITERS,
+        help="Comma-separated fixed baseline league opponents (subset of EASY,MEDIUM,HARD,SMART,CHEATER).",
+    )
+    parser.add_argument(
+        "--league-min-games-per-agent",
+        type=int,
+        default=DEFAULT_LEAGUE_MIN_GAMES_PER_AGENT,
+        help="Minimum sampled games per league agent before sampling cycle resets.",
+    )
+    parser.add_argument(
+        "--league-elo-random-factor",
+        type=float,
+        default=DEFAULT_LEAGUE_ELO_RANDOM_FACTOR,
+        help="Randomness factor for ELO-biased league opponent pairing (0..1).",
+    )
+    parser.add_argument(
+        "--league-use-checkpoint-opponents",
+        dest="league_use_checkpoint_opponents",
+        action="store_true",
+        help="When sampling league opponents, include checkpoint IDs (requires working SMART_ML checkpoint inference).",
+    )
+    parser.add_argument(
+        "--no-league-use-checkpoint-opponents",
+        dest="league_use_checkpoint_opponents",
+        action="store_false",
+        help="Sample league opponents via strategy profile without checkpoint IDs (default, robust for game bridge training).",
+    )
+    parser.set_defaults(league_use_checkpoint_opponents=DEFAULT_LEAGUE_USE_CHECKPOINT_OPPONENTS)
+    parser.add_argument(
+        "--league-spinoffs-per-anchor",
+        type=int,
+        default=DEFAULT_LEAGUE_SPINOFFS_PER_ANCHOR,
+        help="Evolutionary spin-offs per anchor agent (0 => auto: max/(top+diverse)-1).",
+    )
+    parser.add_argument(
+        "--league-spinoff-noise",
+        type=float,
+        default=DEFAULT_LEAGUE_SPINOFF_NOISE,
+        help="Mutation noise for evolutionary league spin-offs.",
     )
     parser.add_argument(
         "--clean-run",
@@ -288,7 +455,7 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Do not delete existing run directory for non-resume training",
     )
-    parser.set_defaults(clean_run=True)
+    parser.set_defaults(clean_run=DEFAULT_CLEAN_RUN)
     parser.add_argument(
         "--smart-env-autoscale",
         dest="smart_env_autoscale",
@@ -301,59 +468,59 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable dynamic env autoscaling",
     )
-    parser.set_defaults(smart_env_autoscale=False)
+    parser.set_defaults(smart_env_autoscale=DEFAULT_SMART_ENV_AUTOSCALE)
     parser.add_argument(
         "--smart-env-target-util",
         type=float,
-        default=80.0,
+        default=DEFAULT_SMART_ENV_TARGET_UTIL_PERCENT,
         help="Utilization target percentage for CPU/RAM autoscale cap",
     )
     parser.add_argument(
         "--smart-env-scale-down-trigger",
         type=float,
-        default=90.0,
+        default=DEFAULT_SMART_ENV_SCALE_DOWN_TRIGGER_PERCENT,
         help="High-watermark utilization percentage to trigger gradual env scale-down",
     )
     parser.add_argument(
         "--smart-env-scale-step",
         type=int,
-        default=2,
+        default=DEFAULT_SMART_ENV_SCALE_STEP,
         help="How many env workers to add per autoscale adjustment (autoscale mode)",
     )
     parser.add_argument(
         "--smart-env-adjust-cooldown-sec",
         type=float,
-        default=1.0,
+        default=DEFAULT_SMART_ENV_ADJUST_COOLDOWN_SEC,
         help="Cooldown between autoscale adjustments in seconds (autoscale mode)",
     )
     parser.add_argument(
         "--smart-env-min",
         type=int,
-        default=32,
+        default=DEFAULT_SMART_ENV_MIN_ENVS,
         help="Minimum env workers when autoscale is enabled",
     )
     parser.add_argument(
         "--smart-env-max",
         type=int,
-        default=0,
+        default=DEFAULT_SMART_ENV_MAX_ENVS,
         help="Maximum env workers when autoscale is enabled (0 = unbounded)",
     )
     parser.add_argument(
         "--smart-env-sample-hz",
         type=float,
-        default=10.0,
+        default=DEFAULT_SMART_ENV_SAMPLE_HZ,
         help="Resource sampling rate in Hz",
     )
     parser.add_argument(
         "--smart-env-gpu-probe-hz",
         type=float,
-        default=2.0,
+        default=DEFAULT_SMART_ENV_GPU_PROBE_HZ,
         help="GPU probe rate in Hz (nvidia-smi polling)",
     )
     parser.add_argument(
         "--smart-env-gpu-sustain-sec",
         type=float,
-        default=60.0,
+        default=DEFAULT_SMART_ENV_GPU_SUSTAIN_SEC,
         help="Seconds of sustained GPU overload required before autoscale scale-down reacts",
     )
     parser.add_argument(
@@ -368,11 +535,11 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable keep-awake signaling during training",
     )
-    parser.set_defaults(keep_awake=True)
+    parser.set_defaults(keep_awake=DEFAULT_KEEP_AWAKE)
     parser.add_argument(
         "--keep-awake-interval-sec",
         type=float,
-        default=600.0,
+        default=DEFAULT_KEEP_AWAKE_INTERVAL_SEC,
         help="Heartbeat interval in seconds for keep-awake signaling",
     )
     parser.add_argument(
@@ -393,7 +560,7 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Skip UI checkpoint registry export after training",
     )
-    parser.set_defaults(export_registry=True)
+    parser.set_defaults(export_registry=DEFAULT_EXPORT_REGISTRY)
     parser.add_argument(
         "--reward-profile",
         type=str,
@@ -435,20 +602,14 @@ def main() -> None:
         ) from exc
 
     cfg = OvernightConfig()
-    if args.model_preset == "tiny":
-        cfg.model.d_model = 128
-        cfg.model.n_layers = 4
-        cfg.model.n_heads = 4
-        cfg.model.ffn_dim = 384
-        cfg.model.sequence_len = 160
-        cfg.model.dropout = 0.05
-    elif args.model_preset == "large":
-        cfg.model.d_model = 320
-        cfg.model.n_layers = 10
-        cfg.model.n_heads = 10
-        cfg.model.ffn_dim = 1280
-        cfg.model.sequence_len = 240
-        cfg.model.dropout = 0.1
+    preset_override = MODEL_PRESET_OVERRIDES.get(args.model_preset)
+    if preset_override:
+        cfg.model.d_model = int(preset_override["d_model"])
+        cfg.model.n_layers = int(preset_override["n_layers"])
+        cfg.model.n_heads = int(preset_override["n_heads"])
+        cfg.model.ffn_dim = int(preset_override["ffn_dim"])
+        cfg.model.sequence_len = int(preset_override["sequence_len"])
+        cfg.model.dropout = float(preset_override["dropout"])
 
     if args.model_d_model > 0:
         cfg.model.d_model = int(args.model_d_model)
@@ -480,6 +641,13 @@ def main() -> None:
     cfg.runtime.reward_terminal_scale_start = float(args.reward_terminal_start)
     cfg.runtime.reward_terminal_scale_end = float(args.reward_terminal_end)
     cfg.runtime.reward_curriculum_steps = max(0, int(args.reward_curriculum_steps))
+    cfg.runtime.reward_unit_curriculum_end_progress = float(args.reward_unit_curriculum_end_progress)
+    cfg.runtime.reward_unit_curriculum_start_scale = float(args.reward_unit_curriculum_start_scale)
+    cfg.runtime.reward_unit_curriculum_end_scale = float(args.reward_unit_curriculum_end_scale)
+    cfg.runtime.reward_dense_cutoff_progress = float(args.reward_dense_cutoff_progress)
+    cfg.runtime.reward_keep_enemy_base_milestone_after_dense_cutoff = bool(
+        args.reward_keep_enemy_base_milestone_after_dense_cutoff
+    )
     cfg.runtime.league_keep_top_n = max(1, int(args.league_keep_top))
     cfg.runtime.league_keep_diverse_n = max(0, int(args.league_keep_diverse))
     cfg.runtime.league_max_agents = max(
@@ -488,6 +656,12 @@ def main() -> None:
     )
     cfg.runtime.league_min_promote_winrate = float(args.league_min_promote_winrate)
     cfg.runtime.league_archetype_winrate_floor = float(args.league_archetype_winrate_floor)
+    cfg.runtime.league_arbiters = str(args.league_arbiters or "").strip()
+    cfg.runtime.league_min_games_per_agent = max(1, int(args.league_min_games_per_agent))
+    cfg.runtime.league_elo_random_factor = max(0.0, float(args.league_elo_random_factor))
+    cfg.runtime.league_use_checkpoint_opponents = bool(args.league_use_checkpoint_opponents)
+    cfg.runtime.league_spinoffs_per_anchor = max(0, int(args.league_spinoffs_per_anchor))
+    cfg.runtime.league_spinoff_noise = max(0.0, float(args.league_spinoff_noise))
     cfg.runtime.dead_unit_revival_enabled = bool(args.dead_unit_revival)
     cfg.runtime.dead_unit_check_every = max(1, int(args.dead_unit_check_every))
     cfg.runtime.dead_unit_zero_epsilon = max(0.0, float(args.dead_unit_zero_epsilon))
@@ -512,12 +686,22 @@ def main() -> None:
         raise SystemExit("reward-dense-decay-interval must be >= 0")
     if cfg.runtime.reward_dense_decay_factor <= 0:
         raise SystemExit("reward-dense-decay-factor must be > 0")
+    if cfg.runtime.reward_unit_curriculum_end_progress < 0 or cfg.runtime.reward_unit_curriculum_end_progress > 1:
+        raise SystemExit("reward-unit-curriculum-end-progress must be in [0, 1]")
+    if cfg.runtime.reward_dense_cutoff_progress < 0 or cfg.runtime.reward_dense_cutoff_progress > 1:
+        raise SystemExit("reward-dense-cutoff-progress must be in [0, 1]")
+    if cfg.runtime.reward_unit_curriculum_start_scale < 0 or cfg.runtime.reward_unit_curriculum_end_scale < 0:
+        raise SystemExit("reward-unit-curriculum-start-scale and reward-unit-curriculum-end-scale must be >= 0")
     if cfg.runtime.league_min_promote_winrate < 0 or cfg.runtime.league_min_promote_winrate > 1:
         raise SystemExit("league-min-promote-winrate must be in [0, 1]")
     if cfg.runtime.league_archetype_winrate_floor < 0 or cfg.runtime.league_archetype_winrate_floor > 1:
         raise SystemExit("league-archetype-winrate-floor must be in [0, 1]")
     if cfg.runtime.league_archetype_winrate_floor > cfg.runtime.league_min_promote_winrate:
         raise SystemExit("league-archetype-winrate-floor must be <= league-min-promote-winrate")
+    if cfg.runtime.league_spinoff_noise < 0 or cfg.runtime.league_spinoff_noise > 1.0:
+        raise SystemExit("league-spinoff-noise must be in [0, 1.0]")
+    if cfg.runtime.league_elo_random_factor < 0 or cfg.runtime.league_elo_random_factor > 1.0:
+        raise SystemExit("league-elo-random-factor must be in [0, 1.0]")
     if cfg.runtime.smart_env_target_util_percent <= 0 or cfg.runtime.smart_env_target_util_percent > 99:
         raise SystemExit("smart-env-target-util must be in (0, 99]")
     if (

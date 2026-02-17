@@ -59,6 +59,12 @@ class SelfPlayTrainer:
             max_agents=runtime.league_max_agents,
             min_promote_winrate=runtime.league_min_promote_winrate,
             archetype_winrate_floor=runtime.league_archetype_winrate_floor,
+            arbiters_csv=runtime.league_arbiters,
+            min_games_per_agent=runtime.league_min_games_per_agent,
+            elo_random_factor=runtime.league_elo_random_factor,
+            use_checkpoint_opponents=runtime.league_use_checkpoint_opponents,
+            spinoffs_per_anchor=runtime.league_spinoffs_per_anchor,
+            spinoff_noise=runtime.league_spinoff_noise,
         )
 
         self.autoscale_enabled = bool(runtime.smart_env_autoscale)
@@ -209,14 +215,20 @@ class SelfPlayTrainer:
                         )
                         self._write_alias(best_path, "best.pt")
                     roster = self.league.roster()
-                    roster_summary = ", ".join(
+                    roster_summary_all = ", ".join(
                         f"{item.profile.codename}:{item.winrate_vs_smart:.2f}"
                         for item in roster[: min(4, len(roster))]
+                    )
+                    learned = self.league.top(4)
+                    roster_summary_ml = ", ".join(
+                        f"{item.profile.codename}:{item.winrate_vs_smart:.2f}" for item in learned
                     )
                     print(
                         f"[eval] step={self.global_step} winrate_vs_mock={winrate:.3f} "
                         f"strategy={self.last_rollout_profile.archetype}/{self.last_rollout_profile.codename} "
-                        f"league_size={len(roster)} top={roster_summary or 'n/a'}"
+                        f"league_size={len(roster)} "
+                        f"top_all={roster_summary_all or 'n/a'} "
+                        f"top_ml={roster_summary_ml or 'n/a'}"
                     )
             print("[done] training complete")
         finally:
@@ -509,6 +521,7 @@ class SelfPlayTrainer:
         optimizer_state = state.get("optimizer")
         if optimizer_state:
             self.optimizer.load_state_dict(optimizer_state)
+        self.league.import_state(state.get("league_state"))
         self.global_step = int(state.get("step", 0))
         quantum = max(1, self.cfg.runtime.rollout_horizon * max(1, len(self.envs)))
         self.update_count = max(0, self.global_step // quantum)
@@ -629,18 +642,24 @@ class SelfPlayTrainer:
         for env in self.envs:
             opponent = self.league.sample_opponent(current_checkpoint)
             if opponent:
-                env.set_opponent_profile(
-                    {
-                        "elo": float(opponent.elo),
-                        "winrate_vs_smart": float(opponent.winrate_vs_smart),
-                        "steps": float(opponent.steps),
-                        "checkpoint_id": str(opponent.checkpoint_path),
-                        "archetype": str(opponent.profile.archetype),
-                        "aggression": float(opponent.profile.aggression),
-                        "teching": float(opponent.profile.teching),
-                        "defense": float(opponent.profile.defense),
-                    }
-                )
+                opponent_payload: Dict[str, float | str] = {
+                    "elo": float(opponent.elo),
+                    "winrate_vs_smart": float(opponent.winrate_vs_smart),
+                    "steps": float(opponent.steps),
+                    "archetype": str(opponent.profile.archetype),
+                    "aggression": float(opponent.profile.aggression),
+                    "teching": float(opponent.profile.teching),
+                    "defense": float(opponent.profile.defense),
+                }
+                if isinstance(opponent.difficulty, str) and opponent.difficulty:
+                    opponent_payload["difficulty"] = opponent.difficulty
+                if (
+                    opponent.use_checkpoint
+                    and isinstance(opponent.checkpoint_path, str)
+                    and opponent.checkpoint_path.strip()
+                ):
+                    opponent_payload["checkpoint_id"] = str(opponent.checkpoint_path)
+                env.set_opponent_profile(opponent_payload)
             else:
                 env.set_opponent_profile(None)
 
@@ -653,7 +672,7 @@ class SelfPlayTrainer:
             "illegal_action_penalty": 0.0,
             "terminal_outcome": 0.0,
         }
-        env_latest_game_stats: List[Dict[str, object] | None] = [None for _ in range(num_envs)]
+        env_latest_info: List[Dict[str, float] | None] = [None for _ in range(num_envs)]
         completed_game_stats: List[Dict[str, object]] = []
 
         for t in range(horizon):
@@ -698,9 +717,7 @@ class SelfPlayTrainer:
                 shaped_reward = self._compose_reward(reward_components, progress_step)
                 rewards_np[t, env_idx] = shaped_reward if np.isfinite(shaped_reward) else reward
                 dones_np[t, env_idx] = float(done)
-                parsed_stats = self._parse_rollout_game_stats(info)
-                if parsed_stats is not None:
-                    env_latest_game_stats[env_idx] = parsed_stats
+                env_latest_info[env_idx] = info
                 reward_sums["enemy_base_damage"] += float(reward_components.enemy_base_damage)
                 reward_sums["own_base_damage"] += float(reward_components.own_base_damage)
                 reward_sums["safe_age_up_bonus"] += float(reward_components.safe_age_up_bonus)
@@ -708,14 +725,19 @@ class SelfPlayTrainer:
                 reward_sums["illegal_action_penalty"] += float(reward_components.illegal_action_penalty)
                 reward_sums["terminal_outcome"] += float(reward_components.terminal_outcome)
                 if done:
-                    if parsed_stats is not None:
-                        completed_game_stats.append(parsed_stats)
-                    env_latest_game_stats[env_idx] = None
+                    parsed_done_stats = self._parse_rollout_game_stats(info)
+                    if parsed_done_stats is not None:
+                        completed_game_stats.append(parsed_done_stats)
+                    env_latest_info[env_idx] = None
                     next_obs = self.envs[env_idx].reset(
                         self.cfg.runtime.seed + self.global_step + t * num_envs + env_idx + 1
                     )
                 self.obs[env_idx] = next_obs
 
+        env_latest_game_stats: List[Dict[str, object] | None] = [
+            self._parse_rollout_game_stats(sample) if sample is not None else None
+            for sample in env_latest_info
+        ]
         self.last_rollout_profile = self._build_strategy_profile(action_counts, reward_sums)
         self.last_rollout_telemetry_line = self._format_rollout_telemetry_line(
             completed_game_stats,
@@ -881,6 +903,8 @@ class SelfPlayTrainer:
         if not game_samples:
             return "[batch-telemetry] n/a"
 
+        completed_count = len(completed_games)
+        latest_count = sum(1 for sample in env_latest if sample is not None)
         sample_count = len(game_samples)
         avg_highest_age = float(np.mean([float(sample.get("highest_age", 0.0)) for sample in game_samples]))
         avg_game_duration_sec = float(
@@ -923,17 +947,47 @@ class SelfPlayTrainer:
         strongest_engines_text = ", ".join(
             f"{turret_id}:{count:.1f}" for turret_id, count in strongest_engines
         ) or "n/a"
+        league_top_text = self._format_league_top_telemetry(top_n=4)
+        league_top_ml_text = self._format_league_top_telemetry(top_n=4, learned_only=True)
+        league_top_ckpt_text = self._format_league_top_telemetry(top_n=4, checkpoints_only=True)
 
         return (
-            f"[batch-telemetry games={sample_count}] "
+            f"[batch-telemetry games={sample_count} completed={completed_count} latest={latest_count}] "
             f"highest_age_avg={avg_highest_age:.2f} "
             f"avg_game_duration={avg_game_duration_sec:.1f}s({avg_game_duration_sec / 60.0:.2f}m) "
             f"gold_spent_avg={avg_gold_spent:.1f} "
             f"mana_spent_avg={avg_mana_spent:.1f} "
             f"top_units={top_units_text} "
             f"highest_turret_count_avg={avg_highest_turrets:.2f} "
-            f"strongest_tower_engines={strongest_engines_text}"
+            f"strongest_tower_engines={strongest_engines_text} "
+            f"league_top={league_top_text} "
+            f"league_top_ml={league_top_ml_text} "
+            f"league_top_ckpt={league_top_ckpt_text}"
         )
+
+    def _format_league_top_telemetry(
+        self,
+        top_n: int = 4,
+        *,
+        learned_only: bool = False,
+        checkpoints_only: bool = False,
+    ) -> str:
+        if checkpoints_only:
+            learned_ranked = self.league.top(max(1, len(self.league.entries)))
+            roster = [item for item in learned_ranked if item.source == "checkpoint"]
+        elif learned_only:
+            roster = self.league.top(max(1, top_n))
+        else:
+            roster = self.league.roster()
+        if not roster:
+            return "n/a"
+        entries = []
+        for item in roster[: max(1, top_n)]:
+            codename = str(item.profile.codename or "unknown")
+            entries.append(
+                f"{codename}(wr={float(item.winrate_vs_smart):.2f},elo={float(item.elo):.0f})"
+            )
+        return "; ".join(entries) if entries else "n/a"
 
     def _build_strategy_profile(
         self,
@@ -1056,6 +1110,13 @@ class SelfPlayTrainer:
                 "terminal_start": self.cfg.runtime.reward_terminal_scale_start,
                 "terminal_end": self.cfg.runtime.reward_terminal_scale_end,
                 "curriculum_steps": self.cfg.runtime.reward_curriculum_steps,
+                "unit_curriculum_end_progress": self.cfg.runtime.reward_unit_curriculum_end_progress,
+                "unit_curriculum_start_scale": self.cfg.runtime.reward_unit_curriculum_start_scale,
+                "unit_curriculum_end_scale": self.cfg.runtime.reward_unit_curriculum_end_scale,
+                "dense_cutoff_progress": self.cfg.runtime.reward_dense_cutoff_progress,
+                "keep_enemy_base_milestone_after_dense_cutoff": (
+                    self.cfg.runtime.reward_keep_enemy_base_milestone_after_dense_cutoff
+                ),
                 "reward_normalize": self.cfg.runtime.reward_normalize,
                 "reward_clip_abs": self.cfg.runtime.reward_clip_abs,
                 "bridge_reward_profile": self.cfg.runtime.bridge_reward_profile,
@@ -1066,6 +1127,12 @@ class SelfPlayTrainer:
                 "max_agents": self.cfg.runtime.league_max_agents,
                 "min_promote_winrate": self.cfg.runtime.league_min_promote_winrate,
                 "archetype_winrate_floor": self.cfg.runtime.league_archetype_winrate_floor,
+                "arbiters": self.cfg.runtime.league_arbiters,
+                "min_games_per_agent": self.cfg.runtime.league_min_games_per_agent,
+                "elo_random_factor": self.cfg.runtime.league_elo_random_factor,
+                "use_checkpoint_opponents": self.cfg.runtime.league_use_checkpoint_opponents,
+                "spinoffs_per_anchor": self.cfg.runtime.league_spinoffs_per_anchor,
+                "spinoff_noise": self.cfg.runtime.league_spinoff_noise,
             },
             "dead_unit_revival": {
                 "enabled": self.cfg.runtime.dead_unit_revival_enabled,
@@ -1102,6 +1169,7 @@ class SelfPlayTrainer:
             "training_signature": self._training_signature(),
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "league_state": self.league.export_state(),
             "config": {
                 "runtime": asdict(self.cfg.runtime),
                 "ppo": asdict(self.cfg.ppo),
@@ -1276,21 +1344,51 @@ class SelfPlayTrainer:
         terminal_scale = runtime.reward_terminal_scale_start + (
             runtime.reward_terminal_scale_end - runtime.reward_terminal_scale_start
         ) * progress
+        dense_cutoff_progress = float(np.clip(runtime.reward_dense_cutoff_progress, 0.0, 1.0))
+        if progress >= dense_cutoff_progress:
+            dense_scale = 0.0
         return float(dense_scale), float(terminal_scale)
 
+    def _unit_curriculum_scale(self, progress: float) -> float:
+        runtime = self.cfg.runtime
+        end_progress = float(np.clip(runtime.reward_unit_curriculum_end_progress, 0.0, 1.0))
+        start_scale = float(max(0.0, runtime.reward_unit_curriculum_start_scale))
+        end_scale = float(max(0.0, runtime.reward_unit_curriculum_end_scale))
+        if end_progress <= 0.0:
+            return end_scale
+        ratio = float(np.clip(progress / end_progress, 0.0, 1.0))
+        return float(start_scale + (end_scale - start_scale) * ratio)
+
     def _compose_reward(self, components: RewardComponents, step: int) -> float:
+        runtime = self.cfg.runtime
+        progress = self._reward_progress(step)
         dense_scale, terminal_scale = self._reward_scales(step)
-        dense_reward = (
-            components.enemy_unit_kill_value
-            + components.own_unit_loss_value
-            + components.enemy_base_damage
-            + components.own_base_damage
+        unit_scale = self._unit_curriculum_scale(progress)
+        unit_curriculum_reward = (
+            components.enemy_unit_kill_value + components.own_unit_loss_value
+        ) * unit_scale
+        dense_non_milestone = (
+            components.own_base_damage
             + components.safe_age_up_bonus
             + components.age_up_delay_penalty
             + components.lane_control_delta
             + components.illegal_action_penalty
         )
-        return dense_reward * dense_scale + components.terminal_outcome * terminal_scale
+        enemy_base_milestone = components.enemy_base_damage
+
+        dense_cutoff_progress = float(np.clip(runtime.reward_dense_cutoff_progress, 0.0, 1.0))
+        in_terminal_phase = progress >= dense_cutoff_progress
+        if in_terminal_phase:
+            dense_reward = (
+                enemy_base_milestone
+                if runtime.reward_keep_enemy_base_milestone_after_dense_cutoff
+                else 0.0
+            )
+        else:
+            dense_reward = unit_curriculum_reward + dense_non_milestone + enemy_base_milestone
+            dense_reward *= dense_scale
+
+        return dense_reward + components.terminal_outcome * terminal_scale
 
     def _save_crossed_milestones(self, previous_step: int, current_step: int) -> None:
         if not self.milestone_steps:

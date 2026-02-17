@@ -33,6 +33,7 @@ interface RewardProfileResolved {
   enemyUnitKillPerUnit: number;
   ownUnitLossPerUnit: number;
   laneControlDeltaPerUnit: number;
+  baseMilestoneThresholds: [number, number, number];
   baseMilestoneRewards: [number, number, number];
   safeAgeUpBonus: number;
   illegalActionPenalty: number;
@@ -84,6 +85,7 @@ type BridgeCommand =
         winrate_vs_smart?: number;
         steps?: number;
         checkpoint_id?: string;
+        difficulty?: GameDifficulty;
         archetype?: string;
         aggression?: number;
         teching?: number;
@@ -161,6 +163,7 @@ const DEFAULT_REWARD_PROFILE: RewardProfileResolved = {
   enemyUnitKillPerUnit: 0.0,
   ownUnitLossPerUnit: 0.0,
   laneControlDeltaPerUnit: 0.0,
+  baseMilestoneThresholds: [0.75, 0.5, 0.25],
   baseMilestoneRewards: [2, 4, 8],
   safeAgeUpBonus: 1.2,
   illegalActionPenalty: -0.5,
@@ -184,6 +187,7 @@ function mergeRewardProfile(raw: unknown): RewardProfileResolved {
     enemyUnitKillPerUnit: DEFAULT_REWARD_PROFILE.enemyUnitKillPerUnit,
     ownUnitLossPerUnit: DEFAULT_REWARD_PROFILE.ownUnitLossPerUnit,
     laneControlDeltaPerUnit: DEFAULT_REWARD_PROFILE.laneControlDeltaPerUnit,
+    baseMilestoneThresholds: [...DEFAULT_REWARD_PROFILE.baseMilestoneThresholds],
     baseMilestoneRewards: [...DEFAULT_REWARD_PROFILE.baseMilestoneRewards],
     safeAgeUpBonus: DEFAULT_REWARD_PROFILE.safeAgeUpBonus,
     illegalActionPenalty: DEFAULT_REWARD_PROFILE.illegalActionPenalty,
@@ -204,6 +208,15 @@ function mergeRewardProfile(raw: unknown): RewardProfileResolved {
     (Object.keys(merged.componentWeights) as RewardComponentKey[]).forEach((key) => {
       merged.componentWeights[key] = finiteOr(weightsObj[key], merged.componentWeights[key]);
     });
+  }
+  const milestoneThresholds = src.base_milestone_thresholds;
+  if (Array.isArray(milestoneThresholds) && milestoneThresholds.length >= 3) {
+    const raw = [
+      finiteOr(milestoneThresholds[0], merged.baseMilestoneThresholds[0]),
+      finiteOr(milestoneThresholds[1], merged.baseMilestoneThresholds[1]),
+      finiteOr(milestoneThresholds[2], merged.baseMilestoneThresholds[2]),
+    ].map((value) => clamp(value, 0.0, 1.0)) as [number, number, number];
+    merged.baseMilestoneThresholds = raw;
   }
   const milestones = src.base_milestone_rewards;
   if (Array.isArray(milestones) && milestones.length >= 3) {
@@ -235,14 +248,14 @@ function mergeRewardProfile(raw: unknown): RewardProfileResolved {
 class BridgeRuntime {
   private engine: GameEngine | null = null;
   private history = new MLHistoryBuffer({ horizonSeconds: 120 });
-  private staticDim = 112;
+  private staticDim = 128;
   private sequenceLen = 240;
   private tokenDim = 8;
   private actionDim = 8;
   private unitDim = 128;
   private turretDim = 32;
   private slotDim = 4;
-  private episodeSeconds = 1200;
+  private episodeSeconds = FORCED_TIMEOUT_LOSS_SEC;
   private decisionFrames = 30;
   private selfDifficulty: GameDifficulty = 'SMART_ML';
   private opponentDifficulty: GameDifficulty = 'SMART';
@@ -308,9 +321,12 @@ class BridgeRuntime {
     this.opponentTeching = clamp(Number(command.profile?.teching ?? 0.5), 0, 2);
     this.opponentDefense = clamp(Number(command.profile?.defense ?? 0.5), 0, 2);
     const elo = command.profile?.elo ?? 1000;
+    const forcedDifficulty = normalizeDifficulty(command.profile?.difficulty, this.opponentDifficulty);
     // If we have a checkpoint identity, force SMART_ML proxy to preserve strategy diversity.
     if (this.opponentCheckpointId) {
       this.opponentDifficulty = 'SMART_ML';
+    } else if (command.profile?.difficulty) {
+      this.opponentDifficulty = forcedDifficulty;
     } else if (elo >= 1200) this.opponentDifficulty = 'CHEATER';
     else if (elo >= 1100) this.opponentDifficulty = 'SMART_ML';
     else if (elo >= 1025) this.opponentDifficulty = 'SMART';
@@ -437,8 +453,9 @@ class BridgeRuntime {
       this.engine.stopHeadless();
     }
     const obs = this.encodeSnapshot(next);
-    const telemetry = this.engine.getTelemetrySnapshot();
-    const ownTelemetry = telemetry.bySide.ENEMY;
+    const includeDetailedTelemetry = done;
+    const telemetry = includeDetailedTelemetry ? this.engine.getTelemetrySnapshot() : null;
+    const ownTelemetry = telemetry ? telemetry.bySide.ENEMY : null;
     const info: Record<string, number | string> = {
       own_base_hp: next.enemyBaseHealth,
       opp_base_hp: next.playerBaseHealth,
@@ -452,26 +469,28 @@ class BridgeRuntime {
       highest_turret_count: this.peakEnemyTurretCount,
       total_gold_spent: this.episodeGoldSpent,
       total_mana_spent: this.episodeManaSpent,
-      mana_upgrade_count: ownTelemetry.manaUpgradeCount,
-      turret_slot_upgrade_count: ownTelemetry.turretSlotUpgradeCount,
       enemy_time_since_last_age_up: Math.max(0, next.gameTime - this.enemyLastAgeUpTimeSec),
       terminal_cause: terminalCause,
     };
 
-    Object.entries(ownTelemetry.unitBuildCounts).forEach(([unitId, count]) => {
-      info[`unit_build__${unitId}`] = Number(count) || 0;
-    });
-    Object.entries(ownTelemetry.turretEngineBuys).forEach(([turretId, count]) => {
-      info[`turret_buy__${turretId}`] = Number(count) || 0;
-      const def = getTurretEngineDef(turretId);
-      if (def) {
-        const strength = def.age * 1000 + def.cost + def.protectionMultiplier * 100;
-        info[`turret_strength__${turretId}`] = strength;
-      }
-    });
-    Object.entries(ownTelemetry.turretEngineSells).forEach(([turretId, count]) => {
-      info[`turret_sell__${turretId}`] = Number(count) || 0;
-    });
+    if (includeDetailedTelemetry && ownTelemetry) {
+      info.mana_upgrade_count = ownTelemetry.manaUpgradeCount;
+      info.turret_slot_upgrade_count = ownTelemetry.turretSlotUpgradeCount;
+      Object.entries(ownTelemetry.unitBuildCounts).forEach(([unitId, count]) => {
+        info[`unit_build__${unitId}`] = Number(count) || 0;
+      });
+      Object.entries(ownTelemetry.turretEngineBuys).forEach(([turretId, count]) => {
+        info[`turret_buy__${turretId}`] = Number(count) || 0;
+        const def = getTurretEngineDef(turretId);
+        if (def) {
+          const strength = def.age * 1000 + def.cost + def.protectionMultiplier * 100;
+          info[`turret_strength__${turretId}`] = strength;
+        }
+      });
+      Object.entries(ownTelemetry.turretEngineSells).forEach(([turretId, count]) => {
+        info[`turret_sell__${turretId}`] = Number(count) || 0;
+      });
+    }
 
     return {
       ok: true,
@@ -636,12 +655,14 @@ class BridgeRuntime {
       prev.playerBaseHealth / Math.max(1, prev.playerBaseMaxHealth),
       next.playerBaseHealth / Math.max(1, next.playerBaseMaxHealth),
       this.opponentBaseMilestonesAwarded,
+      rp.baseMilestoneThresholds,
       rp.baseMilestoneRewards
     );
     const ownBaseDamage = -this.computeOneTimeBaseMilestones(
       prev.enemyBaseHealth / Math.max(1, prev.enemyBaseMaxHealth),
       next.enemyBaseHealth / Math.max(1, next.enemyBaseMaxHealth),
       this.ownBaseMilestonesAwarded,
+      rp.baseMilestoneThresholds,
       rp.baseMilestoneRewards
     );
     const safeAgeUpBonus = next.enemyAge > prev.enemyAge ? rp.safeAgeUpBonus : 0;
@@ -716,9 +737,9 @@ class BridgeRuntime {
     prevHealthRatio: number,
     nextHealthRatio: number,
     awarded: Set<number>,
+    thresholds: [number, number, number],
     rewards: [number, number, number]
   ): number {
-    const thresholds: [number, number, number] = [0.75, 0.5, 0.25];
     let reward = 0;
     thresholds.forEach((threshold, idx) => {
       if (prevHealthRatio > threshold && nextHealthRatio <= threshold && !awarded.has(threshold)) {

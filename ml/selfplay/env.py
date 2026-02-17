@@ -14,6 +14,12 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 from .config import ModelConfig
+from .defaults import (
+    DEFAULT_DECISION_FRAMES,
+    DEFAULT_EPISODE_SECONDS,
+    DEFAULT_OPPONENT_DIFFICULTY,
+    DEFAULT_SELF_DIFFICULTY,
+)
 from .schemas import Action, Observation, RewardComponents
 
 ACTIONS: List[str] = [
@@ -102,6 +108,18 @@ class MockSelfPlayEnv(SelfPlayEnv):
     def set_opponent_profile(self, profile: Dict[str, float | str] | None) -> None:
         if not profile:
             self.opponent_strength = 1.0
+            return
+        difficulty_raw = str(profile.get("difficulty", "")).upper().strip()
+        difficulty_scale = {
+            "EASY": 0.75,
+            "MEDIUM": 1.0,
+            "HARD": 1.15,
+            "SMART": 1.30,
+            "SMART_ML": 1.40,
+            "CHEATER": 1.55,
+        }
+        if difficulty_raw in difficulty_scale:
+            self.opponent_strength = float(difficulty_scale[difficulty_raw])
             return
         winrate = float(profile.get("winrate_vs_smart", 0.5) or 0.5)
         elo = float(profile.get("elo", 1000.0) or 1000.0)
@@ -515,10 +533,10 @@ class GameBridgeEnv(SelfPlayEnv):
     def __init__(
         self,
         model_cfg: ModelConfig,
-        opponent_difficulty: str = "SMART",
-        self_difficulty: str = "SMART_ML",
-        episode_seconds: int = 1200,
-        decision_frames: int = 30,
+        opponent_difficulty: str = DEFAULT_OPPONENT_DIFFICULTY,
+        self_difficulty: str = DEFAULT_SELF_DIFFICULTY,
+        episode_seconds: int = DEFAULT_EPISODE_SECONDS,
+        decision_frames: int = DEFAULT_DECISION_FRAMES,
         reward_profile: Dict[str, object] | None = None,
     ) -> None:
         self.model_cfg = model_cfg
