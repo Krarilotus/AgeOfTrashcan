@@ -857,6 +857,7 @@ def main() -> None:
         eval_env_factory=env_factory,
         run_name=run_name,
         on_checkpoint_saved=_live_checkpoint_export,
+        allow_manifest_signature_mismatch=bool(resume_path),
     )
     keep_awake_guard = None
     try:

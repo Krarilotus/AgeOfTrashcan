@@ -36,6 +36,7 @@ class SelfPlayTrainer:
         run_name: str | None = None,
         milestone_steps: List[int] | None = None,
         on_checkpoint_saved: Callable[[], None] | None = None,
+        allow_manifest_signature_mismatch: bool = False,
     ) -> None:
         self.cfg = cfg
         runtime = cfg.runtime
@@ -110,6 +111,7 @@ class SelfPlayTrainer:
         self.dead_row_streaks: Dict[str, np.ndarray] = {}
         self.dead_revival_layers = self._resolve_dead_revival_layers()
         self.on_checkpoint_saved = on_checkpoint_saved
+        self.allow_manifest_signature_mismatch = bool(allow_manifest_signature_mismatch)
 
         Path(runtime.save_dir).mkdir(parents=True, exist_ok=True)
         self._load_or_init_manifest()
@@ -526,11 +528,18 @@ class SelfPlayTrainer:
                 "Use matching config or start a fresh run."
             )
         checkpoint_signature = state.get("training_signature")
-        if isinstance(checkpoint_signature, dict) and checkpoint_signature != self._training_signature():
-            raise ValueError(
-                "Checkpoint training signature mismatch (PPO/reward schedule differs). "
-                "Resume with matching settings or start a fresh run directory."
-            )
+        current_signature = self._training_signature()
+        if isinstance(checkpoint_signature, dict):
+            if not self._core_signature_compatible(checkpoint_signature, current_signature):
+                raise ValueError(
+                    "Checkpoint training signature mismatch in core settings (model/PPO). "
+                    "Resume with matching settings or start a fresh run directory."
+                )
+            if checkpoint_signature != current_signature:
+                print(
+                    "[resume] warning: non-core training signature differs "
+                    "(reward/league/runtime knobs changed). Continuing resume."
+                )
         self.model.load_state_dict(state["model"])
         optimizer_state = state.get("optimizer")
         if optimizer_state:
@@ -1613,6 +1622,26 @@ class SelfPlayTrainer:
             },
         }
 
+    def _core_signature_compatible(
+        self,
+        saved_signature: Dict[str, object],
+        current_signature: Dict[str, object],
+    ) -> bool:
+        saved_model = saved_signature.get("model")
+        current_model = current_signature.get("model")
+        if isinstance(saved_model, dict) and isinstance(current_model, dict):
+            if saved_model != current_model:
+                return False
+
+        saved_ppo = saved_signature.get("ppo_core")
+        current_ppo = current_signature.get("ppo_core")
+        if isinstance(saved_ppo, dict) and isinstance(current_ppo, dict):
+            for key in ("gamma", "gae_lambda", "clip_epsilon"):
+                if key in saved_ppo and key in current_ppo:
+                    if float(saved_ppo[key]) != float(current_ppo[key]):
+                        return False
+        return True
+
     def _save_checkpoint(
         self,
         kind: str,
@@ -2006,10 +2035,16 @@ class SelfPlayTrainer:
                     self.best_eval_winrate = float(best_winrate)
                 manifest_sig = self.manifest.get("training_signature")
                 if isinstance(manifest_sig, dict) and manifest_sig != self._training_signature():
-                    raise RuntimeError(
-                        "Run manifest signature mismatch in save dir. "
-                        "Start with a clean run directory or resume from a compatible checkpoint."
-                    )
+                    if self.allow_manifest_signature_mismatch:
+                        print(
+                            "[resume] warning: run manifest signature differs from current settings. "
+                            "Proceeding because resume mode is enabled."
+                        )
+                    else:
+                        raise RuntimeError(
+                            "Run manifest signature mismatch in save dir. "
+                            "Start with a clean run directory or resume from a compatible checkpoint."
+                        )
                 return
             except RuntimeError:
                 raise
