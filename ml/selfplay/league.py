@@ -70,11 +70,26 @@ class LeaguePool:
         profile: StrategyProfile | None = None,
     ) -> LeagueEntry:
         profile = profile or StrategyProfile()
+        normalized_winrate = self._clamp(float(winrate_vs_smart), 0.0, 1.0)
+        seeded_elo = 1000.0 + max(-200.0, min(250.0, (normalized_winrate - 0.5) * 500.0))
+        existing = self._find_checkpoint_entry(checkpoint_path)
+        if existing is not None:
+            existing.steps = max(int(existing.steps), int(steps))
+            existing.winrate_vs_smart = normalized_winrate
+            existing.elo = self._clamp(seeded_elo, 700.0, 1900.0)
+            existing.profile = profile
+            existing.source = "checkpoint"
+            existing.use_checkpoint = True
+            existing.fixed = False
+            existing.novelty = self._compute_novelty(existing)
+            self._prune_diverse()
+            return existing
+
         entry = LeagueEntry(
             checkpoint_path=checkpoint_path,
             steps=steps,
-            elo=1000.0 + max(-200.0, min(250.0, (winrate_vs_smart - 0.5) * 500.0)),
-            winrate_vs_smart=float(winrate_vs_smart),
+            elo=seeded_elo,
+            winrate_vs_smart=normalized_winrate,
             profile=profile,
             source="checkpoint",
             use_checkpoint=True,
@@ -83,6 +98,29 @@ class LeaguePool:
         self.entries.append(entry)
         self._prune_diverse()
         return entry
+
+    def record_training_match(self, opponent: LeagueEntry | None, learner_score: float) -> None:
+        if opponent is None:
+            return
+        entry = self._resolve_entry_for_update(opponent)
+        if entry is None:
+            return
+        learner_score = self._clamp(float(learner_score), 0.0, 1.0)
+        opponent_score = 1.0 - learner_score
+
+        expected_opp = 1.0 / (1.0 + pow(10.0, (1000.0 - float(entry.elo)) / 400.0))
+        k_factor = 24.0 if entry.fixed else 18.0
+        entry.elo = self._clamp(float(entry.elo) + k_factor * (opponent_score - expected_opp), 700.0, 1900.0)
+
+        ema_alpha = 0.08
+        entry.winrate_vs_smart = self._clamp(
+            (1.0 - ema_alpha) * float(entry.winrate_vs_smart) + ema_alpha * opponent_score,
+            0.0,
+            1.0,
+        )
+        if not entry.fixed and entry in self.entries:
+            entry.novelty = self._compute_novelty(entry)
+            self._prune_diverse()
 
     def promote_if_qualified(self, candidate: LeagueEntry, top3_baseline: List[float]) -> bool:
         if candidate.winrate_vs_smart < self.min_promote_winrate:
@@ -178,6 +216,7 @@ class LeaguePool:
     def export_state(self) -> Dict[str, object]:
         return {
             "entries": [self._entry_to_dict(entry) for entry in self.entries],
+            "baseline_entries": [self._entry_to_dict(entry) for entry in self.baseline_entries],
             "sample_counts": {str(key): int(value) for key, value in self.sample_counts.items()},
         }
 
@@ -198,6 +237,30 @@ class LeaguePool:
                 parsed_entries.append(entry)
             self.entries = sorted(parsed_entries, key=self._rank_tuple, reverse=True)[: self.max_agents]
             self._prune_diverse()
+        raw_baselines = state.get("baseline_entries")
+        if isinstance(raw_baselines, list):
+            baseline_map = {
+                entry.difficulty: entry
+                for entry in self.baseline_entries
+                if entry.fixed and isinstance(entry.difficulty, str)
+            }
+            for raw in raw_baselines:
+                parsed = self._entry_from_dict(raw)
+                if parsed is None:
+                    continue
+                if not parsed.fixed:
+                    continue
+                difficulty = parsed.difficulty if isinstance(parsed.difficulty, str) else None
+                if not difficulty:
+                    continue
+                target = baseline_map.get(difficulty)
+                if target is None:
+                    continue
+                target.elo = float(parsed.elo)
+                target.winrate_vs_smart = float(parsed.winrate_vs_smart)
+                target.novelty = float(parsed.novelty)
+                target.promoted = bool(parsed.promoted)
+                target.profile = parsed.profile
         raw_counts = state.get("sample_counts")
         if isinstance(raw_counts, dict):
             for key, value in raw_counts.items():
@@ -272,6 +335,36 @@ class LeaguePool:
             difficulty=str(raw.get("difficulty")) if isinstance(raw.get("difficulty"), str) else None,
             fixed=bool(raw.get("fixed", False)),
         )
+
+    def _find_checkpoint_entry(self, checkpoint_path: str) -> LeagueEntry | None:
+        if not checkpoint_path:
+            return None
+        for entry in self.entries:
+            if entry.checkpoint_path == checkpoint_path:
+                return entry
+        return None
+
+    def _resolve_entry_for_update(self, opponent: LeagueEntry) -> LeagueEntry | None:
+        if opponent.fixed and opponent.difficulty:
+            for entry in self.baseline_entries:
+                if entry.difficulty == opponent.difficulty:
+                    return entry
+            return None
+
+        if opponent in self.entries:
+            return opponent
+
+        if opponent.checkpoint_path:
+            found = self._find_checkpoint_entry(opponent.checkpoint_path)
+            if found is not None:
+                return found
+
+        if opponent.source == "spinoff":
+            anchor_name = opponent.profile.codename.split(" Evo", 1)[0]
+            for entry in self.entries:
+                if entry.profile.codename == anchor_name:
+                    return entry
+        return None
 
     def _is_archetype_champion(self, candidate: LeagueEntry) -> bool:
         same_archetype = [item for item in self.entries if item.profile.archetype == candidate.profile.archetype]

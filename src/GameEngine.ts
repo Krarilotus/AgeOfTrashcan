@@ -127,7 +127,7 @@ export interface MatchTelemetry {
 // AIState removed - using AIController from ai/AIController.ts
 
 export interface GameCallbacks {
-  onStateUpdate: (state: GameState) => void;
+  onStateUpdate?: (state: GameState) => void;
   onGameOver: (winner: string) => void;
   onAgeUpgrade?: () => void;
 }
@@ -680,11 +680,6 @@ export class GameEngine {
     this.state.playerBase.x = 0;
     this.state.enemyBase.x = this.state.battlefield.width;
     
-    console.log('Base positions synced:', {
-      player: this.state.playerBase.x,
-      enemy: this.state.enemyBase.x,
-      battlefieldWidth: this.state.battlefield.width
-    });
   }
 
   private createInitialState(): GameState {
@@ -807,6 +802,10 @@ export class GameEngine {
 
   // Load a specific list of sprites
   private async loadSpecificSprites(unitIds: string[]): Promise<void> {
+      if (typeof Image === 'undefined') {
+        // Headless runtime (Node bridge): no DOM image loading available.
+        return;
+      }
       const basePath = '/units/';
       const entries = unitIds.map((unitId) => {
       // Skip if already loaded (unless error)
@@ -976,8 +975,10 @@ export class GameEngine {
     // Telemetry snapshots for long-horizon evaluation
     this.recordBaseHealthTimelineIfNeeded();
 
-    // Call state update callback
-    this.callbacks.onStateUpdate(this.getState());
+    // Skip expensive full-state snapshots when no state callback is configured (headless training bridge).
+    if (this.callbacks.onStateUpdate) {
+      this.callbacks.onStateUpdate(this.getState());
+    }
 
     this.state.tick++;
   }
@@ -2141,6 +2142,124 @@ export class GameEngine {
     if (typeof localStorage === 'undefined') return null;
     return localStorage;
   }
+
+  public exportSerializableState(): Record<string, unknown> {
+    const entitiesArray = Array.from(this.state.entities.values());
+    return {
+      version: 3,
+      state: {
+        ...this.state,
+        entities: entitiesArray,
+      },
+      telemetry: this.telemetry,
+      runtime: {
+        aiAccumulatorsMs: this.aiAccumulatorsMs,
+        aiAccumulatorMs: this.aiAccumulatorsMs.ENEMY,
+        lastUpdateTime: this.lastUpdateTime,
+        enemyCyberAssassin6kBonusUsed: this.enemyCyberAssassin6kBonusUsed,
+        enemyCyberAssassin12kBonusUsed: this.enemyCyberAssassin12kBonusUsed,
+      },
+      aiState: this.aiControllers.ENEMY?.getState() ?? null,
+      aiStateByOwner: {
+        PLAYER: this.aiControllers.PLAYER?.getState() ?? null,
+        ENEMY: this.aiControllers.ENEMY?.getState() ?? null,
+      },
+      seed: this.seed,
+      config: this.config,
+      timestamp: Date.now(),
+    };
+  }
+
+  public importSerializableState(saveData: unknown): boolean {
+    try {
+      if (!saveData || typeof saveData !== 'object') return false;
+      const parsed = saveData as Record<string, any>;
+      if (!parsed.state || typeof parsed.state !== 'object') return false;
+
+      if (parsed.config) this.config = parsed.config;
+      if (typeof parsed.seed === 'number' && Number.isFinite(parsed.seed)) {
+        this.seed = parsed.seed;
+      }
+
+      const loadedState = parsed.state as Record<string, any>;
+
+      const entityMap = new Map<number, Entity>();
+      if (Array.isArray(loadedState.entities)) {
+        for (const entity of loadedState.entities) {
+          if (entity?.entityId !== undefined) {
+            entityMap.set(entity.entityId, entity as Entity);
+          } else if (entity?.id !== undefined) {
+            entityMap.set(entity.id, entity as Entity);
+          }
+        }
+      }
+      loadedState.entities = entityMap;
+
+      if (!loadedState.playerBase || !loadedState.enemyBase) {
+        return false;
+      }
+
+      this.state = loadedState as unknown as GameState;
+      this.state.playerBase = this.ensureBaseTurretState(this.state.playerBase as BaseState);
+      this.state.enemyBase = this.ensureBaseTurretState(this.state.enemyBase as BaseState);
+      this.state.playerQueue = (this.state.playerQueue ?? []).map((item: any) => {
+        if (item && item.kind) return item as BuildQueueItem;
+        return {
+          kind: 'unit',
+          unitId: item?.unitId,
+          remainingMs: item?.remainingMs ?? 0,
+          refundGold: UNIT_DEFS[item?.unitId || 'stone_clubman']?.cost ?? 0,
+          label: item?.unitId,
+        } as BuildQueueItem;
+      });
+      this.state.enemyQueue = (this.state.enemyQueue ?? []).map((item: any) => {
+        if (item && item.kind) return item as BuildQueueItem;
+        return {
+          kind: 'unit',
+          unitId: item?.unitId,
+          remainingMs: item?.remainingMs ?? 0,
+          refundGold: UNIT_DEFS[item?.unitId || 'stone_clubman']?.cost ?? 0,
+          label: item?.unitId,
+        } as BuildQueueItem;
+      });
+      this.aiAccumulatorsMs = parsed.runtime?.aiAccumulatorsMs ?? {
+        PLAYER: 0,
+        ENEMY: parsed.runtime?.aiAccumulatorMs ?? 0,
+      };
+      this.lastUpdateTime = parsed.runtime?.lastUpdateTime ?? 0;
+      this.enemyCyberAssassin6kBonusUsed = parsed.runtime?.enemyCyberAssassin6kBonusUsed ?? false;
+      this.enemyCyberAssassin12kBonusUsed = parsed.runtime?.enemyCyberAssassin12kBonusUsed ?? false;
+
+      this.prng = new PRNG(this.seed);
+      this.sideControl = this.buildSideControl(this.config);
+      this.telemetry = this.hydrateTelemetry(parsed.telemetry);
+      this.lastTelemetrySampleTimeSec =
+        this.telemetry.baseHealthTimeline.length > 0
+          ? this.telemetry.baseHealthTimeline[this.telemetry.baseHealthTimeline.length - 1].gameTime ?? 0
+          : 0;
+      this.refreshAgeUpgradeProgress('PLAYER');
+      this.refreshAgeUpgradeProgress('ENEMY');
+      this.initializeAIControllers();
+
+      const aiStateByOwner = parsed.aiStateByOwner ?? {};
+      if (this.aiControllers.PLAYER && aiStateByOwner.PLAYER) {
+        this.aiControllers.PLAYER.restoreState(aiStateByOwner.PLAYER);
+      }
+      if (this.aiControllers.ENEMY) {
+        const enemyState = aiStateByOwner.ENEMY ?? parsed.aiState;
+        if (enemyState) {
+          this.aiControllers.ENEMY.restoreState(enemyState);
+        }
+      }
+
+      this.syncBasePositions();
+      this.ensureUnitSpritesLoaded();
+      return true;
+    } catch (error) {
+      console.error('[ERROR] Failed to import game state:', error);
+      return false;
+    }
+  }
   
   /**
    * Save complete game state to localStorage
@@ -2150,36 +2269,10 @@ export class GameEngine {
     try {
       const storage = GameEngine.getStorage();
       if (!storage) return;
-      // Convert Map to array for JSON serialization
-      const entitiesArray = Array.from(this.state.entities.values());
-      
-      const saveData = {
-        version: 3, // Side AI control + telemetry
-        state: {
-          ...this.state,
-          entities: entitiesArray, // Serialize as array
-        },
-        telemetry: this.telemetry,
-        runtime: {
-          aiAccumulatorsMs: this.aiAccumulatorsMs,
-          aiAccumulatorMs: this.aiAccumulatorsMs.ENEMY, // legacy compatibility
-          lastUpdateTime: this.lastUpdateTime,
-          enemyCyberAssassin6kBonusUsed: this.enemyCyberAssassin6kBonusUsed,
-          enemyCyberAssassin12kBonusUsed: this.enemyCyberAssassin12kBonusUsed,
-        },
-        aiState: this.aiControllers.ENEMY?.getState() ?? null, // legacy enemy AI state
-        aiStateByOwner: {
-          PLAYER: this.aiControllers.PLAYER?.getState() ?? null,
-          ENEMY: this.aiControllers.ENEMY?.getState() ?? null,
-        },
-        seed: this.seed,
-        config: this.config,
-        timestamp: Date.now(),
-      };
-      
+      const saveData = this.exportSerializableState();
       storage.setItem(GameEngine.SAVE_KEY, JSON.stringify(saveData));
       console.log('[SAVE] Game saved successfully:', {
-        entities: entitiesArray.length,
+        entities: Array.isArray((saveData.state as any)?.entities) ? (saveData.state as any).entities.length : 0,
         playerGold: this.state.economy.player.gold,
         playerAge: this.state.progression.player.age,
         battlefieldWidth: this.state.battlefield.width,
@@ -2205,109 +2298,11 @@ export class GameEngine {
       }
 
       const saveData = JSON.parse(saved);
-      
-      // Validate save data version (future-proofing)
-      if (!saveData.version) {
-        console.warn('[WARN] Legacy save format detected');
-      }
-      
-      // Restore config first - critical for proper initialization
-      this.config = saveData.config;
-      this.seed = saveData.seed;
-      
-      // Restore state
-      const loadedState = saveData.state;
-      
-      // Rebuild entity Map from array
-      const entityMap = new Map<number, Entity>();
-      if (Array.isArray(loadedState.entities)) {
-        for (const entity of loadedState.entities) {
-          // Fix: Use correct property name (entityId, not id)
-          if (entity.entityId !== undefined) {
-            entityMap.set(entity.entityId, entity);
-          } else {
-             // Fallback for legacy saves or confused typings
-             // @ts-ignore
-             if (entity.id) entityMap.set(entity.id, entity);
-          }
-        }
-      }
-      loadedState.entities = entityMap;
-      
-      // Ensure bases exist with valid positions
-      if (!loadedState.playerBase) {
-        console.error('[ERROR] Invalid save: missing playerBase');
+      const ok = this.importSerializableState(saveData);
+      if (!ok) {
+        console.error('[ERROR] Failed to load game: invalid save payload');
         return false;
       }
-      if (!loadedState.enemyBase) {
-        console.error('[ERROR] Invalid save: missing enemyBase');
-        return false;
-      }
-      
-      // Restore complete state
-      this.state = loadedState;
-      this.state.playerBase = this.ensureBaseTurretState(this.state.playerBase as BaseState);
-      this.state.enemyBase = this.ensureBaseTurretState(this.state.enemyBase as BaseState);
-      this.state.playerQueue = (this.state.playerQueue ?? []).map((item: any) => {
-        if (item && item.kind) return item as BuildQueueItem;
-        return {
-          kind: 'unit',
-          unitId: item?.unitId,
-          remainingMs: item?.remainingMs ?? 0,
-          refundGold: UNIT_DEFS[item?.unitId || 'stone_clubman']?.cost ?? 0,
-          label: item?.unitId,
-        } as BuildQueueItem;
-      });
-      this.state.enemyQueue = (this.state.enemyQueue ?? []).map((item: any) => {
-        if (item && item.kind) return item as BuildQueueItem;
-        return {
-          kind: 'unit',
-          unitId: item?.unitId,
-          remainingMs: item?.remainingMs ?? 0,
-          refundGold: UNIT_DEFS[item?.unitId || 'stone_clubman']?.cost ?? 0,
-          label: item?.unitId,
-        } as BuildQueueItem;
-      });
-      this.aiAccumulatorsMs = saveData.runtime?.aiAccumulatorsMs ?? {
-        PLAYER: 0,
-        ENEMY: saveData.runtime?.aiAccumulatorMs ?? 0,
-      };
-      this.lastUpdateTime = saveData.runtime?.lastUpdateTime ?? 0;
-      this.enemyCyberAssassin6kBonusUsed = saveData.runtime?.enemyCyberAssassin6kBonusUsed ?? false;
-      this.enemyCyberAssassin12kBonusUsed = saveData.runtime?.enemyCyberAssassin12kBonusUsed ?? false;
-      
-      // Reinitialize PRNG with restored seed
-      this.prng = new PRNG(this.seed);
-      
-      // Reinitialize AI controllers for selected side-control profiles
-      this.sideControl = this.buildSideControl(this.config);
-      this.telemetry = this.hydrateTelemetry(saveData.telemetry);
-      this.lastTelemetrySampleTimeSec =
-        this.telemetry.baseHealthTimeline.length > 0
-          ? this.telemetry.baseHealthTimeline[this.telemetry.baseHealthTimeline.length - 1].gameTime ?? 0
-          : 0;
-      this.refreshAgeUpgradeProgress('PLAYER');
-      this.refreshAgeUpgradeProgress('ENEMY');
-      this.initializeAIControllers();
-      
-      // Restore AI state if available (per-side or legacy enemy-only)
-      const aiStateByOwner = saveData.aiStateByOwner ?? {};
-      if (this.aiControllers.PLAYER && aiStateByOwner.PLAYER) {
-        this.aiControllers.PLAYER.restoreState(aiStateByOwner.PLAYER);
-      }
-      if (this.aiControllers.ENEMY) {
-        const enemyState = aiStateByOwner.ENEMY ?? saveData.aiState;
-        if (enemyState) {
-          this.aiControllers.ENEMY.restoreState(enemyState);
-        }
-      }
-      
-      // Ensure base positions are synced to battlefield dimensions
-      this.syncBasePositions();
-
-      // Robustness: Ensure sprites are loaded for all restored units
-      // This fixes the "invisible units" bug if save contains units not in initial sprite list
-      this.ensureUnitSpritesLoaded();
 
       console.log('[LOAD] Game loaded successfully:', {
         entities: this.state.entities.size,

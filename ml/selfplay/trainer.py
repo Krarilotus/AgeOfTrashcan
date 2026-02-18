@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import time
@@ -17,7 +18,7 @@ from torch.optim import AdamW
 
 from .config import OvernightConfig
 from .env import ACTIONS, MockSelfPlayEnv, SelfPlayEnv
-from .league import LeaguePool, StrategyProfile
+from .league import LeagueEntry, LeaguePool, StrategyProfile
 from .model import TransformerActorCritic
 from .ppo import PPOUpdater, RolloutBatch, compute_gae
 from .resource_monitor import ResourceMonitor, ResourceSample
@@ -99,6 +100,13 @@ class SelfPlayTrainer:
         self.last_rollout_resource_sample: Optional[ResourceSample] = None
         self.last_log_perf = self.train_start_perf
         self.update_count = 0
+        self.live_match_count = 0
+        self.live_match_win_sum = 0.0
+        self.checkpoint_include_env_state = self._env_flag("CHECKPOINT_INCLUDE_ENV_STATE", False)
+        self.resume_restore_env_state = self._env_flag(
+            "RESUME_RESTORE_ENV_STATE",
+            self.checkpoint_include_env_state,
+        )
         self.dead_row_streaks: Dict[str, np.ndarray] = {}
         self.dead_revival_layers = self._resolve_dead_revival_layers()
         self.on_checkpoint_saved = on_checkpoint_saved
@@ -184,6 +192,13 @@ class SelfPlayTrainer:
                         metrics=self._strategy_metrics(self.last_rollout_profile),
                     )
                     self.last_good_checkpoint = checkpoint
+                    live_winrate = self._current_live_winrate()
+                    self.league.add_checkpoint(
+                        checkpoint,
+                        self.global_step,
+                        live_winrate,
+                        profile=self.last_rollout_profile,
+                    )
 
                 self._save_crossed_milestones(previous_step, self.global_step)
 
@@ -207,7 +222,11 @@ class SelfPlayTrainer:
                         )
                     if winrate > self.best_eval_winrate:
                         self.best_eval_winrate = winrate
-                        best_metrics: Dict[str, float | str] = {"winrate_vs_mock": float(winrate)}
+                        best_metrics: Dict[str, float | str] = {
+                            "winrate_vs_eval_opponent": float(winrate),
+                            # Backward-compatible alias for older consumers.
+                            "winrate_vs_mock": float(winrate),
+                        }
                         best_metrics.update(self._strategy_metrics(self.last_rollout_profile))
                         best_path = self._save_checkpoint(
                             kind="best",
@@ -215,16 +234,11 @@ class SelfPlayTrainer:
                         )
                         self._write_alias(best_path, "best.pt")
                     roster = self.league.roster()
-                    roster_summary_all = ", ".join(
-                        f"{item.profile.codename}:{item.winrate_vs_smart:.2f}"
-                        for item in roster[: min(4, len(roster))]
-                    )
+                    roster_summary_all = self._format_league_roster_summary(roster, top_n=4)
                     learned = self.league.top(4)
-                    roster_summary_ml = ", ".join(
-                        f"{item.profile.codename}:{item.winrate_vs_smart:.2f}" for item in learned
-                    )
+                    roster_summary_ml = self._format_league_roster_summary(learned, top_n=4)
                     print(
-                        f"[eval] step={self.global_step} winrate_vs_mock={winrate:.3f} "
+                        f"[eval] step={self.global_step} winrate_vs_eval_opponent={winrate:.3f} "
                         f"strategy={self.last_rollout_profile.archetype}/{self.last_rollout_profile.codename} "
                         f"league_size={len(roster)} "
                         f"top_all={roster_summary_all or 'n/a'} "
@@ -521,8 +535,33 @@ class SelfPlayTrainer:
         optimizer_state = state.get("optimizer")
         if optimizer_state:
             self.optimizer.load_state_dict(optimizer_state)
+        ppo_state = state.get("ppo_state")
+        if isinstance(ppo_state, dict) and bool(self.ppo.use_amp):
+            scaler_state = ppo_state.get("scaler")
+            if isinstance(scaler_state, dict):
+                try:
+                    self.ppo.scaler.load_state_dict(scaler_state)
+                except Exception as exc:
+                    print(f"[resume] warning: failed to restore AMP scaler state: {exc}")
         self.league.import_state(state.get("league_state"))
         self.global_step = int(state.get("step", 0))
+        trainer_state = state.get("trainer_state")
+        if isinstance(trainer_state, dict):
+            try:
+                self.live_match_count = max(0, int(trainer_state.get("live_match_count", 0)))
+            except (TypeError, ValueError):
+                self.live_match_count = 0
+            try:
+                self.live_match_win_sum = max(0.0, float(trainer_state.get("live_match_win_sum", 0.0)))
+            except (TypeError, ValueError):
+                self.live_match_win_sum = 0.0
+        else:
+            self.live_match_count = 0
+            self.live_match_win_sum = 0.0
+        if self.resume_restore_env_state:
+            restored_envs = self._restore_env_runtime_state(state.get("env_runtime_state"))
+            if restored_envs > 0:
+                print(f"[resume] restored running env episodes={restored_envs}")
         quantum = max(1, self.cfg.runtime.rollout_horizon * max(1, len(self.envs)))
         self.update_count = max(0, self.global_step // quantum)
         self.last_good_checkpoint = str(path)
@@ -535,27 +574,119 @@ class SelfPlayTrainer:
         if matches <= 0:
             return 0.0
 
-        runtime = self.cfg.runtime
+        total_matches = int(matches)
+        benchmarks = self._resolve_eval_benchmarks()
+        if not benchmarks:
+            benchmarks = [("MOCK_RANDOM", {"difficulty": "MOCK_RANDOM"})]
+
+        base_matches = total_matches // len(benchmarks)
+        remainder = total_matches % len(benchmarks)
+        seed_base = int(self.cfg.runtime.seed) + 500_000
+        aggregate_wins = 0
+        aggregate_losses = 0
+        aggregate_draws = 0
+        primary_winrate = 0.0
+
+        print(
+            f"[eval-plan] total_matches={total_matches} benchmarks={len(benchmarks)} "
+            f"labels={','.join(label for label, _ in benchmarks)}"
+        )
+        for bench_idx, (label, profile) in enumerate(benchmarks):
+            bench_matches = base_matches + (1 if bench_idx < remainder else 0)
+            if bench_matches <= 0:
+                continue
+            bench_seed = seed_base + bench_idx * 1_000_000
+            result = self._run_eval_benchmark(
+                benchmark_label=label,
+                benchmark_profile=profile,
+                matches=bench_matches,
+                seed_base=bench_seed,
+            )
+            if bench_idx == 0:
+                primary_winrate = float(result["winrate"])
+            aggregate_wins += int(result["wins"])
+            aggregate_losses += int(result["losses"])
+            aggregate_draws += int(result["draws"])
+            print(
+                f"[eval-benchmark] matchup=learner_vs_{label} "
+                f"matches={bench_matches} wins={int(result['wins'])} losses={int(result['losses'])} "
+                f"draws={int(result['draws'])} winrate={float(result['winrate']):.3f}"
+            )
+            print(
+                f"[eval-benchmark-stats] matchup=learner_vs_{label} "
+                f"highest_age_avg={float(result['avg_highest_age']):.2f} "
+                f"avg_game_duration={float(result['avg_game_duration_sec']):.1f}s"
+                f"({float(result['avg_game_duration_sec']) / 60.0:.2f}m) "
+                f"gold_spent_avg={float(result['avg_gold_spent']):.1f} "
+                f"mana_spent_avg={float(result['avg_mana_spent']):.1f} "
+                f"highest_turret_count_avg={float(result['avg_highest_turrets']):.2f}"
+            )
+            print(
+                f"[eval-benchmark-units] matchup=learner_vs_{label} "
+                f"top_units={str(result['top_units_text'])} "
+                f"strongest_tower_engines={str(result['strongest_engines_text'])}"
+            )
+
+        aggregate_total = max(1, aggregate_wins + aggregate_losses + aggregate_draws)
+        print(
+            f"[eval-summary] wins={aggregate_wins} losses={aggregate_losses} draws={aggregate_draws} "
+            f"winrate={aggregate_wins / aggregate_total:.3f} primary_winrate={primary_winrate:.3f}"
+        )
+        return primary_winrate
+
+    def _resolve_eval_benchmarks(self) -> List[Tuple[str, Dict[str, float | str]]]:
+        raw = os.getenv(
+            "EVAL_BENCHMARKS",
+            "MOCK_RANDOM,MEDIUM,HARD,SMART,CHEATER",
+        )
+        allowed = {"EASY", "MEDIUM", "HARD", "SMART", "SMART_ML", "CHEATER", "MOCK_RANDOM"}
+        seen: set[str] = set()
+        benchmarks: List[Tuple[str, Dict[str, float | str]]] = []
+        for token in str(raw).split(","):
+            label = token.strip().upper()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            if label in allowed:
+                benchmarks.append((label, {"difficulty": label}))
+        return benchmarks
+
+    def _run_eval_benchmark(
+        self,
+        benchmark_label: str,
+        benchmark_profile: Dict[str, float | str],
+        matches: int,
+        seed_base: int,
+    ) -> Dict[str, object]:
         eval_workers = self._resolve_eval_workers(matches)
         total_matches = int(matches)
         completed = 0
         wins = 0
-        seed_base = runtime.seed + 500_000
+        losses = 0
+        draws = 0
         next_match_idx = 0
         eval_start_perf = time.perf_counter()
         last_progress_print_perf = eval_start_perf
+        completed_game_stats: List[Dict[str, object]] = []
 
         envs: List[SelfPlayEnv] = []
         observations: List[Observation] = []
         for _ in range(min(eval_workers, total_matches)):
             env = self.eval_env_factory()
+            try:
+                env.set_opponent_profile(dict(benchmark_profile))
+            except Exception:
+                pass
             match_idx = next_match_idx
             next_match_idx += 1
             obs = env.reset(seed_base + match_idx)
             envs.append(env)
             observations.append(obs)
 
-        print(f"[eval-start] matches={total_matches} workers={len(envs)}")
+        print(
+            f"[eval-start] matchup=learner_vs_{benchmark_label} "
+            f"matches={total_matches} workers={len(envs)}"
+        )
         try:
             with ThreadPoolExecutor(max_workers=max(1, len(envs))) as eval_pool:
                 while completed < total_matches and envs:
@@ -568,13 +699,21 @@ class SelfPlayTrainer:
                     results = [future.result() for future in futures]
 
                     for idx in range(len(envs) - 1, -1, -1):
-                        next_obs, _, done, info, _ = results[idx]
+                        next_obs, _, done, info, reward_components = results[idx]
                         if not done:
                             observations[idx] = next_obs
                             continue
 
-                        if info.get("opp_base_hp", 1.0) <= info.get("own_base_hp", 0.0):
+                        parsed_done_stats = self._parse_rollout_game_stats(info)
+                        if parsed_done_stats is not None:
+                            completed_game_stats.append(parsed_done_stats)
+                        outcome = self._infer_eval_outcome(info, reward_components)
+                        if outcome == "win":
                             wins += 1
+                        elif outcome == "loss":
+                            losses += 1
+                        else:
+                            draws += 1
                         completed += 1
 
                         now = time.perf_counter()
@@ -584,8 +723,10 @@ class SelfPlayTrainer:
                             remaining = max(0, total_matches - completed)
                             eta = remaining / max(1e-6, mps)
                             print(
-                                f"[eval-progress] done={completed}/{total_matches} "
-                                f"({(completed / total_matches) * 100:.1f}%) mps={mps:.2f} eta={self._format_eta(eta)}"
+                                f"[eval-progress] matchup=learner_vs_{benchmark_label} "
+                                f"done={completed}/{total_matches} "
+                                f"({(completed / total_matches) * 100:.1f}%) mps={mps:.2f} "
+                                f"eta={self._format_eta(eta)}"
                             )
                             last_progress_print_perf = now
 
@@ -605,7 +746,109 @@ class SelfPlayTrainer:
                 except Exception:
                     pass
 
-        return wins / max(1, total_matches)
+        avg_highest_age = 0.0
+        avg_game_duration_sec = 0.0
+        avg_gold_spent = 0.0
+        avg_mana_spent = 0.0
+        avg_highest_turrets = 0.0
+        top_units_text = "n/a"
+        strongest_engines_text = "n/a"
+        if completed_game_stats:
+            sample_count = float(len(completed_game_stats))
+            avg_highest_age = float(
+                np.mean([float(sample.get("highest_age", 0.0)) for sample in completed_game_stats])
+            )
+            avg_game_duration_sec = float(
+                np.mean([float(sample.get("game_duration_sec", 0.0)) for sample in completed_game_stats])
+            )
+            avg_gold_spent = float(
+                np.mean([float(sample.get("total_gold_spent", 0.0)) for sample in completed_game_stats])
+            )
+            avg_mana_spent = float(
+                np.mean([float(sample.get("total_mana_spent", 0.0)) for sample in completed_game_stats])
+            )
+            avg_highest_turrets = float(
+                np.mean([float(sample.get("highest_turret_count", 0.0)) for sample in completed_game_stats])
+            )
+
+            unit_totals: Dict[str, float] = {}
+            turret_buy_totals: Dict[str, float] = {}
+            turret_strength: Dict[str, float] = {}
+            for sample in completed_game_stats:
+                unit_counts = sample.get("unit_build_counts", {})
+                if isinstance(unit_counts, dict):
+                    for unit_id, count in unit_counts.items():
+                        if isinstance(unit_id, str):
+                            unit_totals[unit_id] = unit_totals.get(unit_id, 0.0) + float(count)
+                turret_counts = sample.get("turret_buy_counts", {})
+                if isinstance(turret_counts, dict):
+                    for turret_id, count in turret_counts.items():
+                        if isinstance(turret_id, str):
+                            turret_buy_totals[turret_id] = turret_buy_totals.get(turret_id, 0.0) + float(count)
+                turret_scores = sample.get("turret_strength_scores", {})
+                if isinstance(turret_scores, dict):
+                    for turret_id, score in turret_scores.items():
+                        if isinstance(turret_id, str):
+                            turret_strength[turret_id] = max(turret_strength.get(turret_id, 0.0), float(score))
+
+            unit_avg = {unit_id: total / sample_count for unit_id, total in unit_totals.items()}
+            top_units = sorted(unit_avg.items(), key=lambda item: (item[1], item[0]), reverse=True)[:5]
+            top_units_text = ", ".join(f"{unit_id}:{count:.1f}" for unit_id, count in top_units) or "n/a"
+
+            turret_avg = {turret_id: total / sample_count for turret_id, total in turret_buy_totals.items()}
+            strongest_engines = sorted(
+                turret_avg.items(),
+                key=lambda item: (turret_strength.get(item[0], 0.0), item[1], item[0]),
+                reverse=True,
+            )[:3]
+            strongest_engines_text = ", ".join(
+                f"{turret_id}:{count:.1f}" for turret_id, count in strongest_engines
+            ) or "n/a"
+
+        return {
+            "wins": wins,
+            "losses": losses,
+            "draws": draws,
+            "winrate": wins / max(1, total_matches),
+            "avg_highest_age": avg_highest_age,
+            "avg_game_duration_sec": avg_game_duration_sec,
+            "avg_gold_spent": avg_gold_spent,
+            "avg_mana_spent": avg_mana_spent,
+            "avg_highest_turrets": avg_highest_turrets,
+            "top_units_text": top_units_text,
+            "strongest_engines_text": strongest_engines_text,
+        }
+
+    def _infer_eval_outcome(
+        self,
+        info: Dict[str, float | str],
+        reward_components: RewardComponents,
+    ) -> str:
+        terminal_cause_raw = info.get("terminal_cause")
+        if isinstance(terminal_cause_raw, str):
+            terminal_cause = terminal_cause_raw.strip().lower()
+            if terminal_cause == "player_win":
+                return "win"
+            if terminal_cause == "enemy_win":
+                return "loss"
+            if terminal_cause == "timeout":
+                return "draw"
+
+        own_base = float(info.get("own_base_hp", float("nan")))
+        opp_base = float(info.get("opp_base_hp", float("nan")))
+        if np.isfinite(own_base) and np.isfinite(opp_base):
+            if own_base > opp_base:
+                return "win"
+            if own_base < opp_base:
+                return "loss"
+            return "draw"
+
+        terminal = float(reward_components.terminal_outcome)
+        if terminal > 0.0:
+            return "win"
+        if terminal < 0.0:
+            return "loss"
+        return "draw"
 
     def _collect_rollout(self) -> RolloutBatch:
         runtime = self.cfg.runtime
@@ -639,29 +882,9 @@ class SelfPlayTrainer:
         }
 
         current_checkpoint = self.last_good_checkpoint
-        for env in self.envs:
-            opponent = self.league.sample_opponent(current_checkpoint)
-            if opponent:
-                opponent_payload: Dict[str, float | str] = {
-                    "elo": float(opponent.elo),
-                    "winrate_vs_smart": float(opponent.winrate_vs_smart),
-                    "steps": float(opponent.steps),
-                    "archetype": str(opponent.profile.archetype),
-                    "aggression": float(opponent.profile.aggression),
-                    "teching": float(opponent.profile.teching),
-                    "defense": float(opponent.profile.defense),
-                }
-                if isinstance(opponent.difficulty, str) and opponent.difficulty:
-                    opponent_payload["difficulty"] = opponent.difficulty
-                if (
-                    opponent.use_checkpoint
-                    and isinstance(opponent.checkpoint_path, str)
-                    and opponent.checkpoint_path.strip()
-                ):
-                    opponent_payload["checkpoint_id"] = str(opponent.checkpoint_path)
-                env.set_opponent_profile(opponent_payload)
-            else:
-                env.set_opponent_profile(None)
+        env_opponents: List[LeagueEntry | None] = [None for _ in range(num_envs)]
+        for env_idx in range(num_envs):
+            self._assign_env_opponent(env_idx, env_opponents, current_checkpoint)
 
         action_counts = np.zeros((len(ACTIONS),), dtype=np.float64)
         reward_sums = {
@@ -669,6 +892,7 @@ class SelfPlayTrainer:
             "own_base_damage": 0.0,
             "safe_age_up_bonus": 0.0,
             "age_up_delay_penalty": 0.0,
+            "action_discovery_bonus": 0.0,
             "illegal_action_penalty": 0.0,
             "terminal_outcome": 0.0,
         }
@@ -722,12 +946,19 @@ class SelfPlayTrainer:
                 reward_sums["own_base_damage"] += float(reward_components.own_base_damage)
                 reward_sums["safe_age_up_bonus"] += float(reward_components.safe_age_up_bonus)
                 reward_sums["age_up_delay_penalty"] += float(reward_components.age_up_delay_penalty)
+                reward_sums["action_discovery_bonus"] += float(reward_components.action_discovery_bonus)
                 reward_sums["illegal_action_penalty"] += float(reward_components.illegal_action_penalty)
                 reward_sums["terminal_outcome"] += float(reward_components.terminal_outcome)
                 if done:
                     parsed_done_stats = self._parse_rollout_game_stats(info)
                     if parsed_done_stats is not None:
                         completed_game_stats.append(parsed_done_stats)
+                    learner_score = self._infer_learner_score(info, reward_components)
+                    if learner_score is not None:
+                        self.live_match_count += 1
+                        self.live_match_win_sum += float(learner_score)
+                        self.league.record_training_match(env_opponents[env_idx], learner_score)
+                    self._assign_env_opponent(env_idx, env_opponents, current_checkpoint)
                     env_latest_info[env_idx] = None
                     next_obs = self.envs[env_idx].reset(
                         self.cfg.runtime.seed + self.global_step + t * num_envs + env_idx + 1
@@ -738,10 +969,11 @@ class SelfPlayTrainer:
             self._parse_rollout_game_stats(sample) if sample is not None else None
             for sample in env_latest_info
         ]
+        latest_count = sum(1 for sample in env_latest_game_stats if sample is not None)
         self.last_rollout_profile = self._build_strategy_profile(action_counts, reward_sums)
         self.last_rollout_telemetry_line = self._format_rollout_telemetry_line(
             completed_game_stats,
-            env_latest_game_stats,
+            latest_count,
         )
 
         if self.cfg.runtime.reward_normalize:
@@ -840,7 +1072,7 @@ class SelfPlayTrainer:
             return Action(action_type=action_type, slot_index=sell_slot_idx, confidence=confidence)
         return Action(action_type=action_type, confidence=confidence)
 
-    def _parse_rollout_game_stats(self, info: Dict[str, float]) -> Dict[str, object] | None:
+    def _parse_rollout_game_stats(self, info: Dict[str, float | str]) -> Dict[str, object] | None:
         if not info:
             return None
         highest_age = float(info.get("highest_age", info.get("own_age", 0.0)))
@@ -890,22 +1122,75 @@ class SelfPlayTrainer:
             "turret_strength_scores": turret_strength_scores,
         }
 
+    def _assign_env_opponent(
+        self,
+        env_idx: int,
+        env_opponents: List[LeagueEntry | None],
+        current_checkpoint: str | None,
+    ) -> None:
+        opponent = self.league.sample_opponent(current_checkpoint)
+        env_opponents[env_idx] = opponent
+        env = self.envs[env_idx]
+        if opponent is None:
+            env.set_opponent_profile(None)
+            return
+        opponent_payload: Dict[str, float | str] = {
+            "elo": float(opponent.elo),
+            "winrate_vs_smart": float(opponent.winrate_vs_smart),
+            "steps": float(opponent.steps),
+            "archetype": str(opponent.profile.archetype),
+            "aggression": float(opponent.profile.aggression),
+            "teching": float(opponent.profile.teching),
+            "defense": float(opponent.profile.defense),
+        }
+        if isinstance(opponent.difficulty, str) and opponent.difficulty:
+            opponent_payload["difficulty"] = opponent.difficulty
+        if (
+            opponent.use_checkpoint
+            and isinstance(opponent.checkpoint_path, str)
+            and opponent.checkpoint_path.strip()
+        ):
+            opponent_payload["checkpoint_id"] = str(opponent.checkpoint_path)
+        env.set_opponent_profile(opponent_payload)
+
+    def _infer_learner_score(
+        self,
+        info: Dict[str, float | str],
+        reward_components: RewardComponents,
+    ) -> float | None:
+        own_base = float(info.get("own_base_hp", float("nan")))
+        opp_base = float(info.get("opp_base_hp", float("nan")))
+        if np.isfinite(own_base) and np.isfinite(opp_base):
+            if own_base > opp_base:
+                return 1.0
+            if own_base < opp_base:
+                return 0.0
+        terminal = float(reward_components.terminal_outcome)
+        if terminal > 0.0:
+            return 1.0
+        if terminal < 0.0:
+            return 0.0
+        return 0.5
+
+    def _current_live_winrate(self) -> float:
+        if self.live_match_count <= 0:
+            return 0.5
+        return float(self.live_match_win_sum / max(1, self.live_match_count))
+
     def _format_rollout_telemetry_line(
         self,
         completed_games: List[Dict[str, object]],
-        env_latest: List[Dict[str, object] | None],
+        latest_count: int,
     ) -> str:
-        game_samples: List[Dict[str, object]]
-        if completed_games:
-            game_samples = completed_games
-        else:
-            game_samples = [sample for sample in env_latest if sample is not None]
-        if not game_samples:
-            return "[batch-telemetry] n/a"
+        if not completed_games:
+            return (
+                f"[batch-telemetry games=0 completed=0 latest={int(latest_count)}] "
+                "waiting_for_completed_games"
+            )
 
-        completed_count = len(completed_games)
-        latest_count = sum(1 for sample in env_latest if sample is not None)
+        game_samples: List[Dict[str, object]] = completed_games
         sample_count = len(game_samples)
+        completed_count = sample_count
         avg_highest_age = float(np.mean([float(sample.get("highest_age", 0.0)) for sample in game_samples]))
         avg_game_duration_sec = float(
             np.mean([float(sample.get("game_duration_sec", 0.0)) for sample in game_samples])
@@ -981,13 +1266,45 @@ class SelfPlayTrainer:
             roster = self.league.roster()
         if not roster:
             return "n/a"
-        entries = []
-        for item in roster[: max(1, top_n)]:
+        selected = roster[: max(1, top_n)]
+        codename_counts: Dict[str, int] = {}
+        for item in selected:
             codename = str(item.profile.codename or "unknown")
+            codename_counts[codename] = codename_counts.get(codename, 0) + 1
+        entries = []
+        for item in selected:
+            codename = str(item.profile.codename or "unknown")
+            display_name = codename
+            if codename_counts.get(codename, 0) > 1:
+                if int(getattr(item, "steps", 0)) > 0:
+                    display_name = f"{codename}@{int(item.steps)}"
+                elif isinstance(getattr(item, "checkpoint_path", None), str) and item.checkpoint_path:
+                    display_name = f"{codename}@{Path(item.checkpoint_path).stem}"
             entries.append(
-                f"{codename}(wr={float(item.winrate_vs_smart):.2f},elo={float(item.elo):.0f})"
+                f"{display_name}(wr={float(item.winrate_vs_smart):.2f},elo={float(item.elo):.0f})"
             )
         return "; ".join(entries) if entries else "n/a"
+
+    def _format_league_roster_summary(self, roster: List[object], top_n: int = 4) -> str:
+        if not roster:
+            return "n/a"
+        selected = roster[: max(1, top_n)]
+        codename_counts: Dict[str, int] = {}
+        for item in selected:
+            codename = str(getattr(getattr(item, "profile", object()), "codename", "unknown") or "unknown")
+            codename_counts[codename] = codename_counts.get(codename, 0) + 1
+
+        entries: List[str] = []
+        for item in selected:
+            codename = str(getattr(getattr(item, "profile", object()), "codename", "unknown") or "unknown")
+            display_name = codename
+            if codename_counts.get(codename, 0) > 1:
+                steps = int(getattr(item, "steps", 0) or 0)
+                if steps > 0:
+                    display_name = f"{codename}@{steps}"
+            winrate = float(getattr(item, "winrate_vs_smart", 0.0) or 0.0)
+            entries.append(f"{display_name}:{winrate:.2f}")
+        return ", ".join(entries) if entries else "n/a"
 
     def _build_strategy_profile(
         self,
@@ -1169,13 +1486,27 @@ class SelfPlayTrainer:
             "training_signature": self._training_signature(),
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "ppo_state": {
+                "use_amp": bool(self.ppo.use_amp),
+                "scaler": self.ppo.scaler.state_dict() if bool(self.ppo.use_amp) else None,
+            },
             "league_state": self.league.export_state(),
+            "trainer_state": {
+                "live_match_count": int(self.live_match_count),
+                "live_match_win_sum": float(self.live_match_win_sum),
+            },
             "config": {
                 "runtime": asdict(self.cfg.runtime),
                 "ppo": asdict(self.cfg.ppo),
                 "model": asdict(self.cfg.model),
             },
         }
+        if self.checkpoint_include_env_state:
+            env_runtime_state = self._snapshot_env_runtime_state()
+            if env_runtime_state is not None:
+                payload["env_runtime_state"] = env_runtime_state
+            else:
+                print("[checkpoint] env runtime state capture skipped (unsupported by backend)")
         torch.save(payload, path)
         self._write_alias(str(path), "latest.pt")
         self._record_checkpoint(
@@ -1199,12 +1530,70 @@ class SelfPlayTrainer:
         state = torch.load(self.last_good_checkpoint, map_location=self.device)
         self.model.load_state_dict(state["model"])
         self.optimizer.load_state_dict(state["optimizer"])
+        ppo_state = state.get("ppo_state")
+        if isinstance(ppo_state, dict) and bool(self.ppo.use_amp):
+            scaler_state = ppo_state.get("scaler")
+            if isinstance(scaler_state, dict):
+                try:
+                    self.ppo.scaler.load_state_dict(scaler_state)
+                except Exception as exc:
+                    print(f"[guard] warning: failed to restore AMP scaler state: {exc}")
+        self.league.import_state(state.get("league_state"))
+        trainer_state = state.get("trainer_state")
+        if isinstance(trainer_state, dict):
+            self.live_match_count = max(0, int(trainer_state.get("live_match_count", 0) or 0))
+            self.live_match_win_sum = max(0.0, float(trainer_state.get("live_match_win_sum", 0.0) or 0.0))
         print(f"[guard] NaN/Inf detected. Rolled back to {self.last_good_checkpoint}")
 
     def _anneal_entropy(self) -> None:
         ppo = self.cfg.ppo
         progress = min(1.0, self.global_step / max(1, ppo.entropy_anneal_steps))
         ppo.entropy_coef = ppo.entropy_coef * (1.0 - progress) + ppo.entropy_coef_min * progress
+
+    def _env_flag(self, name: str, default: bool = False) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return bool(default)
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _snapshot_env_runtime_state(self) -> Dict[str, object] | None:
+        env_states: List[Dict[str, object]] = []
+        for env in self.envs:
+            try:
+                state = env.export_runtime_state()
+            except Exception:
+                return None
+            if not isinstance(state, dict):
+                return None
+            env_states.append(state)
+        return {
+            "version": 1,
+            "env_count": len(env_states),
+            "states": env_states,
+        }
+
+    def _restore_env_runtime_state(self, payload: object) -> int:
+        if not isinstance(payload, dict):
+            return 0
+        raw_states = payload.get("states")
+        if not isinstance(raw_states, list):
+            return 0
+        if len(raw_states) != len(self.envs):
+            return 0
+
+        restored_obs: List[Observation] = []
+        for env, raw_state in zip(self.envs, raw_states):
+            if not isinstance(raw_state, dict):
+                return 0
+            try:
+                obs = env.import_runtime_state(raw_state)
+            except Exception:
+                return 0
+            if obs is None:
+                return 0
+            restored_obs.append(obs)
+        self.obs = restored_obs
+        return len(restored_obs)
 
     def _resolve_dead_revival_layers(self) -> Dict[str, nn.Linear]:
         candidates: Dict[str, object] = {
@@ -1371,6 +1760,7 @@ class SelfPlayTrainer:
             components.own_base_damage
             + components.safe_age_up_bonus
             + components.age_up_delay_penalty
+            + components.action_discovery_bonus
             + components.lane_control_delta
             + components.illegal_action_penalty
         )

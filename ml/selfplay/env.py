@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
 import queue
@@ -40,11 +40,18 @@ class SelfPlayEnv(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def step(self, action: Action) -> Tuple[Observation, float, bool, Dict[str, float], RewardComponents]:
+    def step(self, action: Action) -> Tuple[Observation, float, bool, Dict[str, float | str], RewardComponents]:
         raise NotImplementedError
 
     def set_opponent_profile(self, profile: Dict[str, float | str] | None) -> None:
         del profile
+
+    def export_runtime_state(self) -> Dict[str, object] | None:
+        return None
+
+    def import_runtime_state(self, state: Dict[str, object]) -> Observation | None:
+        del state
+        return None
 
     def close(self) -> None:
         return None
@@ -101,6 +108,9 @@ class MockSelfPlayEnv(SelfPlayEnv):
         self.last_damage_to_opp = 0.0
         self.last_damage_to_self = 0.0
         self.opponent_strength = 1.0
+        self.opponent_mock_random = False
+        self.opponent_mock_wait_steps_remaining = 0
+        self.opponent_mock_action_gap = 4
         self.own_base_milestones_awarded: set[float] = set()
         self.opp_base_milestones_awarded: set[float] = set()
         self.last_buy_time_by_slot: List[float] = [-1e9 for _ in range(self.model_cfg.slot_dim)]
@@ -108,8 +118,17 @@ class MockSelfPlayEnv(SelfPlayEnv):
     def set_opponent_profile(self, profile: Dict[str, float | str] | None) -> None:
         if not profile:
             self.opponent_strength = 1.0
+            self.opponent_mock_random = False
+            self.opponent_mock_wait_steps_remaining = 0
             return
         difficulty_raw = str(profile.get("difficulty", "")).upper().strip()
+        if difficulty_raw == "MOCK_RANDOM":
+            self.opponent_strength = 1.0
+            self.opponent_mock_random = True
+            self.opponent_mock_wait_steps_remaining = 0
+            return
+        self.opponent_mock_random = False
+        self.opponent_mock_wait_steps_remaining = 0
         difficulty_scale = {
             "EASY": 0.75,
             "MEDIUM": 1.0,
@@ -134,10 +153,11 @@ class MockSelfPlayEnv(SelfPlayEnv):
         self.last_damage_to_self = 0.0
         self.own_base_milestones_awarded = set()
         self.opp_base_milestones_awarded = set()
+        self.opponent_mock_wait_steps_remaining = 0
         self.last_buy_time_by_slot = [-1e9 for _ in range(self.model_cfg.slot_dim)]
         return self._build_observation()
 
-    def step(self, action: Action) -> Tuple[Observation, float, bool, Dict[str, float], RewardComponents]:
+    def step(self, action: Action) -> Tuple[Observation, float, bool, Dict[str, float | str], RewardComponents]:
         prev = replace(self.state)
         mask = self._build_mask()
         action_index = ACTIONS.index(action.action_type) if action.action_type in ACTIONS else 0
@@ -239,6 +259,7 @@ class MockSelfPlayEnv(SelfPlayEnv):
             own_base_damage=-own_base_penalty,
             safe_age_up_bonus=1.2 if self.state.own_age > prev.own_age else 0.0,
             age_up_delay_penalty=age_up_delay_penalty,
+            action_discovery_bonus=0.0,
             lane_control_delta=0.0,
             illegal_action_penalty=illegal_penalty,
             terminal_outcome=0.0,
@@ -250,6 +271,7 @@ class MockSelfPlayEnv(SelfPlayEnv):
             + reward_components.own_base_damage
             + reward_components.safe_age_up_bonus
             + reward_components.age_up_delay_penalty
+            + reward_components.action_discovery_bonus
             + reward_components.lane_control_delta
             + reward_components.illegal_action_penalty
             + reward_components.terminal_outcome
@@ -266,13 +288,23 @@ class MockSelfPlayEnv(SelfPlayEnv):
                 reward_components.terminal_outcome = -40.0
             reward += reward_components.terminal_outcome
 
-        info = {
+        terminal_cause = "none"
+        if done:
+            if self.state.opp_base_hp <= 0 and self.state.own_base_hp > 0:
+                terminal_cause = "player_win"
+            elif self.state.own_base_hp <= 0 and self.state.opp_base_hp > 0:
+                terminal_cause = "enemy_win"
+            else:
+                terminal_cause = "timeout"
+
+        info: Dict[str, float | str] = {
             "own_base_hp": self.state.own_base_hp,
             "opp_base_hp": self.state.opp_base_hp,
             "own_units": self.state.own_units,
             "opp_units": self.state.opp_units,
             "own_gold": self.state.own_gold,
             "own_mana": self.state.own_mana,
+            "terminal_cause": terminal_cause,
         }
         return self._build_observation(), reward, done, info, reward_components
 
@@ -308,6 +340,26 @@ class MockSelfPlayEnv(SelfPlayEnv):
         return -(ratio * ramp * delta_seconds)
 
     def _simulate_opponent_policy(self) -> None:
+        if self.opponent_mock_random:
+            if self.opponent_mock_wait_steps_remaining > 0:
+                self.opponent_mock_wait_steps_remaining -= 1
+                return
+            valid_actions: List[str] = ["WAIT", "SPAWN_LIGHT"]
+            if self.state.tick >= 120:
+                valid_actions.append("SPAWN_MEDIUM")
+            if self.state.tick >= 360:
+                valid_actions.append("SPIKE")
+            chosen = str(self.rng.choice(valid_actions))
+            if chosen == "SPAWN_LIGHT":
+                self.state.opp_units += float(self.rng.uniform(0.8, 1.8))
+                self.opponent_mock_wait_steps_remaining = self.opponent_mock_action_gap
+            elif chosen == "SPAWN_MEDIUM":
+                self.state.opp_units += float(self.rng.uniform(1.6, 2.8))
+                self.opponent_mock_wait_steps_remaining = self.opponent_mock_action_gap
+            elif chosen == "SPIKE":
+                self.state.opp_units += float(self.rng.uniform(2.5, 4.0))
+                self.opponent_mock_wait_steps_remaining = self.opponent_mock_action_gap
+            return
         pressure = (0.8 + self.rng.uniform(0.0, 0.7)) * self.opponent_strength
         self.state.opp_units += pressure
         if self.state.tick % 240 == 0:
@@ -524,6 +576,81 @@ class MockSelfPlayEnv(SelfPlayEnv):
             sell_slot_mask=masks["sell_slot"],
         )
 
+    def export_runtime_state(self) -> Dict[str, object] | None:
+        return {
+            "state": asdict(self.state),
+            "turret_slots": list(self.turret_slots),
+            "last_damage_to_opp": float(self.last_damage_to_opp),
+            "last_damage_to_self": float(self.last_damage_to_self),
+            "opponent_strength": float(self.opponent_strength),
+            "opponent_mock_random": bool(self.opponent_mock_random),
+            "opponent_mock_wait_steps_remaining": int(self.opponent_mock_wait_steps_remaining),
+            "opponent_mock_action_gap": int(self.opponent_mock_action_gap),
+            "own_base_milestones_awarded": sorted(float(v) for v in self.own_base_milestones_awarded),
+            "opp_base_milestones_awarded": sorted(float(v) for v in self.opp_base_milestones_awarded),
+            "last_buy_time_by_slot": list(float(v) for v in self.last_buy_time_by_slot),
+            "rng_state": self.rng.bit_generator.state,
+        }
+
+    def import_runtime_state(self, state: Dict[str, object]) -> Observation | None:
+        try:
+            raw_state = state.get("state")
+            if not isinstance(raw_state, dict):
+                return None
+            self.state = MockEnvState(
+                tick=int(raw_state.get("tick", 0)),
+                game_time=float(raw_state.get("game_time", 0.0)),
+                own_base_hp=float(raw_state.get("own_base_hp", 1000.0)),
+                opp_base_hp=float(raw_state.get("opp_base_hp", 1000.0)),
+                own_units=float(raw_state.get("own_units", 0.0)),
+                opp_units=float(raw_state.get("opp_units", 0.0)),
+                own_gold=float(raw_state.get("own_gold", 150.0)),
+                own_mana=float(raw_state.get("own_mana", 0.0)),
+                own_age=int(raw_state.get("own_age", 1)),
+                own_last_age_up_time=float(raw_state.get("own_last_age_up_time", 0.0)),
+                own_mana_level=int(raw_state.get("own_mana_level", 0)),
+                own_slots_unlocked=int(raw_state.get("own_slots_unlocked", 1)),
+                own_turrets_installed=int(raw_state.get("own_turrets_installed", 0)),
+            )
+            turret_slots = state.get("turret_slots")
+            if isinstance(turret_slots, list):
+                parsed_slots = [int(v) for v in turret_slots[: self.model_cfg.slot_dim]]
+                if len(parsed_slots) < self.model_cfg.slot_dim:
+                    parsed_slots.extend([-1] * (self.model_cfg.slot_dim - len(parsed_slots)))
+                self.turret_slots = parsed_slots
+            self.last_damage_to_opp = float(state.get("last_damage_to_opp", 0.0))
+            self.last_damage_to_self = float(state.get("last_damage_to_self", 0.0))
+            self.opponent_strength = float(state.get("opponent_strength", 1.0))
+            self.opponent_mock_random = bool(state.get("opponent_mock_random", False))
+            self.opponent_mock_wait_steps_remaining = max(
+                0,
+                int(state.get("opponent_mock_wait_steps_remaining", 0) or 0),
+            )
+            self.opponent_mock_action_gap = max(
+                0,
+                int(state.get("opponent_mock_action_gap", self.opponent_mock_action_gap) or self.opponent_mock_action_gap),
+            )
+            self.own_base_milestones_awarded = {
+                float(v) for v in (state.get("own_base_milestones_awarded") or []) if isinstance(v, (int, float))
+            }
+            self.opp_base_milestones_awarded = {
+                float(v) for v in (state.get("opp_base_milestones_awarded") or []) if isinstance(v, (int, float))
+            }
+            last_buy = state.get("last_buy_time_by_slot")
+            if isinstance(last_buy, list):
+                parsed = [float(v) for v in last_buy[: self.model_cfg.slot_dim]]
+                if len(parsed) < self.model_cfg.slot_dim:
+                    parsed.extend([-1e9] * (self.model_cfg.slot_dim - len(parsed)))
+                self.last_buy_time_by_slot = parsed
+            rng_state = state.get("rng_state")
+            if isinstance(rng_state, dict):
+                self.rng = np.random.default_rng()
+                self.rng.bit_generator.state = rng_state  # type: ignore[assignment]
+            self._refresh_turret_count()
+            return self._build_observation()
+        except Exception:
+            return None
+
 
 class GameBridgeEnv(SelfPlayEnv):
     _bundle_lock = threading.Lock()
@@ -712,7 +839,7 @@ class GameBridgeEnv(SelfPlayEnv):
             raise RuntimeError("Bridge reset response missing observation payload")
         return self._parse_observation(observation_payload)
 
-    def step(self, action: Action) -> Tuple[Observation, float, bool, Dict[str, float], RewardComponents]:
+    def step(self, action: Action) -> Tuple[Observation, float, bool, Dict[str, float | str], RewardComponents]:
         response = self._request(
             {
                 "cmd": "step",
@@ -733,11 +860,13 @@ class GameBridgeEnv(SelfPlayEnv):
         reward = float(response.get("reward", 0.0))
         done = bool(response.get("done", False))
         raw_info = response.get("info")
-        info: Dict[str, float] = {}
+        info: Dict[str, float | str] = {}
         if isinstance(raw_info, dict):
             for key, value in raw_info.items():
                 if isinstance(value, (int, float)):
                     info[key] = float(value)
+                elif key == "terminal_cause" and isinstance(value, str):
+                    info[key] = value
         raw_components = response.get("reward_components")
         if not isinstance(raw_components, dict):
             raise RuntimeError("Bridge step response missing reward components")
@@ -748,6 +877,7 @@ class GameBridgeEnv(SelfPlayEnv):
             own_base_damage=float(raw_components.get("own_base_damage", 0.0)),
             safe_age_up_bonus=float(raw_components.get("safe_age_up_bonus", 0.0)),
             age_up_delay_penalty=float(raw_components.get("age_up_delay_penalty", 0.0)),
+            action_discovery_bonus=float(raw_components.get("action_discovery_bonus", 0.0)),
             lane_control_delta=float(raw_components.get("lane_control_delta", 0.0)),
             illegal_action_penalty=float(raw_components.get("illegal_action_penalty", 0.0)),
             terminal_outcome=float(raw_components.get("terminal_outcome", 0.0)),
@@ -759,6 +889,20 @@ class GameBridgeEnv(SelfPlayEnv):
         if profile is not None:
             payload["profile"] = profile
         self._request(payload, timeout_s=10.0)
+
+    def export_runtime_state(self) -> Dict[str, object] | None:
+        response = self._request({"cmd": "get_env_state"}, timeout_s=20.0)
+        payload = response.get("state")
+        if isinstance(payload, dict):
+            return payload
+        return None
+
+    def import_runtime_state(self, state: Dict[str, object]) -> Observation | None:
+        response = self._request({"cmd": "set_env_state", "state": state}, timeout_s=30.0)
+        observation_payload = response.get("observation")
+        if not isinstance(observation_payload, dict):
+            return None
+        return self._parse_observation(observation_payload)
 
     def close(self) -> None:
         if getattr(self, "process", None) is None:

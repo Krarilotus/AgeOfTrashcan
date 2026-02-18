@@ -114,6 +114,63 @@ export class MLHistoryBuffer {
     return [...this.tokens];
   }
 
+  exportState(): Record<string, unknown> {
+    return {
+      tokens: this.tokens.map((token) => ({ ...token })),
+      lastObservedState: this.lastObservedState ? { ...this.lastObservedState } : null,
+    };
+  }
+
+  importState(raw: unknown): void {
+    if (!raw || typeof raw !== 'object') {
+      this.reset();
+      return;
+    }
+    const src = raw as Record<string, unknown>;
+    const rawTokens = Array.isArray(src.tokens) ? src.tokens : [];
+    const parsedTokens: MLHistoryToken[] = [];
+    for (const item of rawTokens) {
+      if (!item || typeof item !== 'object') continue;
+      const token = item as Record<string, unknown>;
+      const actor = token.actor;
+      if (actor !== 'PLAYER' && actor !== 'ENEMY' && actor !== 'SYSTEM') continue;
+      const actionLabel = typeof token.actionLabel === 'string' ? token.actionLabel : '';
+      const timestampSec = Number(token.timestampSec);
+      const deltaSec = Number(token.deltaSec);
+      const rewardDelta = Number(token.rewardDelta);
+      const damageDelta = Number(token.damageDelta);
+      if (
+        !actionLabel ||
+        !Number.isFinite(timestampSec) ||
+        !Number.isFinite(deltaSec) ||
+        !Number.isFinite(rewardDelta) ||
+        !Number.isFinite(damageDelta)
+      ) {
+        continue;
+      }
+      parsedTokens.push({
+        actor,
+        actionLabel,
+        unitId: typeof token.unitId === 'string' ? token.unitId : undefined,
+        turretId: typeof token.turretId === 'string' ? token.turretId : undefined,
+        slotIndex: typeof token.slotIndex === 'number' && Number.isFinite(token.slotIndex) ? token.slotIndex : undefined,
+        timestampSec,
+        deltaSec,
+        rewardDelta,
+        damageDelta,
+      });
+    }
+    this.tokens = parsedTokens;
+    const lastObserved = src.lastObservedState;
+    if (lastObserved && typeof lastObserved === 'object') {
+      this.lastObservedState = { ...(lastObserved as GameStateSnapshot) };
+    } else {
+      this.lastObservedState = null;
+    }
+    const currentTime = this.tokens.length > 0 ? this.tokens[this.tokens.length - 1].timestampSec : 0;
+    this.prune(currentTime);
+  }
+
   private pushToken(token: MLHistoryToken): void {
     this.tokens.push(token);
   }

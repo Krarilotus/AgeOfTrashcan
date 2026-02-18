@@ -24,6 +24,7 @@ type RewardComponentKey =
   | 'own_base_damage'
   | 'safe_age_up_bonus'
   | 'age_up_delay_penalty'
+  | 'action_discovery_bonus'
   | 'lane_control_delta'
   | 'illegal_action_penalty'
   | 'terminal_outcome';
@@ -42,6 +43,10 @@ interface RewardProfileResolved {
   ageDelayGracePerAgeSec: number;
   ageDelayRampSec: number;
   ageDelayPenaltyWeight: number;
+  actionDiscoveryActionBonus: number;
+  actionDiscoveryUnitBonus: number;
+  actionDiscoveryTurretBonus: number;
+  actionDiscoveryEpisodeCap: number;
   terminalWin: number;
   terminalLoss: number;
   timeoutLoss: number;
@@ -85,13 +90,15 @@ type BridgeCommand =
         winrate_vs_smart?: number;
         steps?: number;
         checkpoint_id?: string;
-        difficulty?: GameDifficulty;
+        difficulty?: GameDifficulty | 'MOCK_RANDOM';
         archetype?: string;
         aggression?: number;
         teching?: number;
         defense?: number;
       };
     }
+  | { cmd: 'get_env_state' }
+  | { cmd: 'set_env_state'; state?: Record<string, unknown> }
   | { cmd: 'close' }
   | { cmd: 'ping' };
 
@@ -111,7 +118,8 @@ function toStderr(prefix: string): (...args: unknown[]) => void {
   };
 }
 
-console.log = toStderr('[bridge]');
+const BRIDGE_VERBOSE = process.env.BRIDGE_VERBOSE === '1';
+console.log = BRIDGE_VERBOSE ? toStderr('[bridge]') : () => undefined;
 console.warn = toStderr('[bridge:warn]');
 console.error = toStderr('[bridge:error]');
 
@@ -147,6 +155,17 @@ function normalizeDifficulty(raw: unknown, fallback: GameDifficulty): GameDiffic
   return fallback;
 }
 
+const ACTION_TYPES_IN_ORDER: AIDecision['action'][] = [
+  'WAIT',
+  'RECRUIT_UNIT',
+  'AGE_UP',
+  'UPGRADE_MANA',
+  'UPGRADE_TURRET_SLOTS',
+  'BUY_TURRET_ENGINE',
+  'SELL_TURRET_ENGINE',
+  'REPAIR_BASE',
+];
+
 const FORCED_TIMEOUT_LOSS_SEC = 60 * 60;
 const DEFAULT_REWARD_PROFILE: RewardProfileResolved = {
   componentWeights: {
@@ -156,6 +175,7 @@ const DEFAULT_REWARD_PROFILE: RewardProfileResolved = {
     own_base_damage: 1.0,
     safe_age_up_bonus: 1.0,
     age_up_delay_penalty: 1.0,
+    action_discovery_bonus: 1.0,
     lane_control_delta: 1.0,
     illegal_action_penalty: 1.0,
     terminal_outcome: 1.0,
@@ -172,6 +192,10 @@ const DEFAULT_REWARD_PROFILE: RewardProfileResolved = {
   ageDelayGracePerAgeSec: 180,
   ageDelayRampSec: 180,
   ageDelayPenaltyWeight: 1.0,
+  actionDiscoveryActionBonus: 0.03,
+  actionDiscoveryUnitBonus: 0.01,
+  actionDiscoveryTurretBonus: 0.01,
+  actionDiscoveryEpisodeCap: 0.12,
   terminalWin: 40.0,
   terminalLoss: -40.0,
   timeoutLoss: -40.0,
@@ -196,6 +220,10 @@ function mergeRewardProfile(raw: unknown): RewardProfileResolved {
     ageDelayGracePerAgeSec: DEFAULT_REWARD_PROFILE.ageDelayGracePerAgeSec,
     ageDelayRampSec: DEFAULT_REWARD_PROFILE.ageDelayRampSec,
     ageDelayPenaltyWeight: DEFAULT_REWARD_PROFILE.ageDelayPenaltyWeight,
+    actionDiscoveryActionBonus: DEFAULT_REWARD_PROFILE.actionDiscoveryActionBonus,
+    actionDiscoveryUnitBonus: DEFAULT_REWARD_PROFILE.actionDiscoveryUnitBonus,
+    actionDiscoveryTurretBonus: DEFAULT_REWARD_PROFILE.actionDiscoveryTurretBonus,
+    actionDiscoveryEpisodeCap: DEFAULT_REWARD_PROFILE.actionDiscoveryEpisodeCap,
     terminalWin: DEFAULT_REWARD_PROFILE.terminalWin,
     terminalLoss: DEFAULT_REWARD_PROFILE.terminalLoss,
     timeoutLoss: DEFAULT_REWARD_PROFILE.timeoutLoss,
@@ -239,6 +267,22 @@ function mergeRewardProfile(raw: unknown): RewardProfileResolved {
   );
   merged.ageDelayRampSec = Math.max(1, finiteOr(src.age_delay_ramp_sec, merged.ageDelayRampSec));
   merged.ageDelayPenaltyWeight = finiteOr(src.age_delay_penalty_weight, merged.ageDelayPenaltyWeight);
+  merged.actionDiscoveryActionBonus = Math.max(
+    0,
+    finiteOr(src.action_discovery_action_bonus, merged.actionDiscoveryActionBonus)
+  );
+  merged.actionDiscoveryUnitBonus = Math.max(
+    0,
+    finiteOr(src.action_discovery_unit_bonus, merged.actionDiscoveryUnitBonus)
+  );
+  merged.actionDiscoveryTurretBonus = Math.max(
+    0,
+    finiteOr(src.action_discovery_turret_bonus, merged.actionDiscoveryTurretBonus)
+  );
+  merged.actionDiscoveryEpisodeCap = Math.max(
+    0,
+    finiteOr(src.action_discovery_episode_cap, merged.actionDiscoveryEpisodeCap)
+  );
   merged.terminalWin = finiteOr(src.terminal_win, merged.terminalWin);
   merged.terminalLoss = finiteOr(src.terminal_loss, merged.terminalLoss);
   merged.timeoutLoss = finiteOr(src.timeout_loss, merged.timeoutLoss);
@@ -260,6 +304,9 @@ class BridgeRuntime {
   private selfDifficulty: GameDifficulty = 'SMART_ML';
   private opponentDifficulty: GameDifficulty = 'SMART';
   private opponentCheckpointId: string | null = null;
+  private opponentUseMockRandom = false;
+  private mockRandomActionGap = 4;
+  private mockRandomWaitStepsRemaining = 0;
   private opponentArchetype = 'balanced';
   private opponentAggression = 0.5;
   private opponentTeching = 0.5;
@@ -273,6 +320,10 @@ class BridgeRuntime {
   private peakEnemyAge = 1;
   private peakEnemyTurretCount = 0;
   private rewardProfile: RewardProfileResolved = mergeRewardProfile(null);
+  private discoveredActionTypes = new Set<string>();
+  private discoveredUnitTypes = new Set<string>();
+  private discoveredTurretTypes = new Set<string>();
+  private discoveryBudgetRemaining = 0;
 
   init(command: Extract<BridgeCommand, { cmd: 'init' }>): Record<string, unknown> {
     this.staticDim = Math.max(1, command.model.static_dim ?? this.staticDim);
@@ -309,6 +360,11 @@ class BridgeRuntime {
   }
 
   setOpponentProfile(command: Extract<BridgeCommand, { cmd: 'set_opponent_profile' }>): Record<string, unknown> {
+    const requestedDifficulty =
+      typeof command.profile?.difficulty === 'string'
+        ? command.profile.difficulty.trim().toUpperCase()
+        : '';
+    this.opponentUseMockRandom = requestedDifficulty === 'MOCK_RANDOM';
     this.opponentCheckpointId =
       typeof command.profile?.checkpoint_id === 'string' && command.profile.checkpoint_id.trim().length > 0
         ? command.profile.checkpoint_id.trim()
@@ -320,6 +376,19 @@ class BridgeRuntime {
     this.opponentAggression = clamp(Number(command.profile?.aggression ?? 0.5), 0, 2);
     this.opponentTeching = clamp(Number(command.profile?.teching ?? 0.5), 0, 2);
     this.opponentDefense = clamp(Number(command.profile?.defense ?? 0.5), 0, 2);
+    if (this.opponentUseMockRandom) {
+      this.opponentCheckpointId = null;
+      this.opponentDifficulty = 'MEDIUM';
+      this.mockRandomWaitStepsRemaining = 0;
+      return {
+        ok: true,
+        opponent_difficulty: this.opponentDifficulty,
+        checkpoint_id: null,
+        archetype: this.opponentArchetype,
+        opponent_mode: 'mock_random',
+      };
+    }
+
     const elo = command.profile?.elo ?? 1000;
     const forcedDifficulty = normalizeDifficulty(command.profile?.difficulty, this.opponentDifficulty);
     // If we have a checkpoint identity, force SMART_ML proxy to preserve strategy diversity.
@@ -337,6 +406,7 @@ class BridgeRuntime {
       opponent_difficulty: this.opponentDifficulty,
       checkpoint_id: this.opponentCheckpointId,
       archetype: this.opponentArchetype,
+      opponent_mode: 'ai',
     };
   }
 
@@ -349,6 +419,10 @@ class BridgeRuntime {
     this.episodeManaSpent = 0;
     this.peakEnemyAge = 1;
     this.peakEnemyTurretCount = 0;
+    this.discoveredActionTypes.clear();
+    this.discoveredUnitTypes.clear();
+    this.discoveredTurretTypes.clear();
+    this.discoveryBudgetRemaining = this.rewardProfile.actionDiscoveryEpisodeCap;
     const opponentDifficulty = this.pickOpponentDifficulty(command.seed);
     const config: GameConfig = {
       difficulty: this.selfDifficulty,
@@ -369,11 +443,12 @@ class BridgeRuntime {
       },
     };
     this.engine = new GameEngine(config, command.seed, {
-      onStateUpdate: () => undefined,
       onGameOver: () => undefined,
     });
     this.engine.setAIDecisionEnabled('ENEMY', false);
+    this.engine.setAIDecisionEnabled('PLAYER', !this.opponentUseMockRandom);
     this.engine.startHeadless();
+    this.mockRandomWaitStepsRemaining = 0;
     this.history.reset();
     const snapshot = this.engine.getAISnapshot('ENEMY');
     this.peakEnemyAge = Math.max(this.peakEnemyAge, snapshot.enemyAge);
@@ -391,6 +466,15 @@ class BridgeRuntime {
     this.history.ingestState(prev);
     const prevMask = buildLegalActionMask(prev);
     const decision = this.decodeDecision(command.action);
+    const decisionParams = (decision.parameters ?? {}) as Record<string, unknown>;
+    const executedUnitType =
+      typeof decisionParams.unitType === 'string' && decisionParams.unitType.trim().length > 0
+        ? decisionParams.unitType.trim()
+        : null;
+    const executedTurretId =
+      typeof decisionParams.turretId === 'string' && decisionParams.turretId.trim().length > 0
+        ? decisionParams.turretId.trim()
+        : null;
     const legal = this.isDecisionLegal(decision, prevMask);
     const applied = legal ? this.engine.applyAIDecision(decision, 'ENEMY') : false;
     if (legal && applied) {
@@ -406,6 +490,9 @@ class BridgeRuntime {
       this.lastBuyTimeBySlot.set(decisionSlot, prev.gameTime);
     }
     this.history.recordDecision(prev, decision, legal && applied ? 0 : -0.35);
+    if (this.opponentUseMockRandom) {
+      this.applyMockRandomOpponentDecision();
+    }
     this.engine.stepHeadless(this.decisionFrames);
 
     const next = this.engine.getAISnapshot('ENEMY');
@@ -434,6 +521,8 @@ class BridgeRuntime {
       terminalCause,
       done,
       decision.action,
+      executedUnitType,
+      executedTurretId,
       decisionSlot,
       prev.gameTime
     );
@@ -446,6 +535,7 @@ class BridgeRuntime {
       rewardComponents.enemy_base_damage +
       rewardComponents.own_base_damage +
       rewardComponents.safe_age_up_bonus +
+      rewardComponents.action_discovery_bonus +
       rewardComponents.lane_control_delta +
       rewardComponents.illegal_action_penalty +
       rewardComponents.terminal_outcome;
@@ -500,6 +590,168 @@ class BridgeRuntime {
       info,
       reward_components: rewardComponents,
     };
+  }
+
+  getEnvState(): Record<string, unknown> {
+    if (!this.engine) {
+      throw new Error('Bridge not initialized: call reset first');
+    }
+    return {
+      ok: true,
+      state: {
+        game: this.engine.exportSerializableState(),
+        history: this.history.exportState(),
+        runtime: {
+          staticDim: this.staticDim,
+          sequenceLen: this.sequenceLen,
+          tokenDim: this.tokenDim,
+          actionDim: this.actionDim,
+          unitDim: this.unitDim,
+          turretDim: this.turretDim,
+          slotDim: this.slotDim,
+          episodeSeconds: this.episodeSeconds,
+          decisionFrames: this.decisionFrames,
+          selfDifficulty: this.selfDifficulty,
+          opponentDifficulty: this.opponentDifficulty,
+          opponentCheckpointId: this.opponentCheckpointId,
+          opponentUseMockRandom: this.opponentUseMockRandom,
+          mockRandomActionGap: this.mockRandomActionGap,
+          mockRandomWaitStepsRemaining: this.mockRandomWaitStepsRemaining,
+          opponentArchetype: this.opponentArchetype,
+          opponentAggression: this.opponentAggression,
+          opponentTeching: this.opponentTeching,
+          opponentDefense: this.opponentDefense,
+          ownBaseMilestonesAwarded: Array.from(this.ownBaseMilestonesAwarded),
+          opponentBaseMilestonesAwarded: Array.from(this.opponentBaseMilestonesAwarded),
+          lastBuyTimeBySlot: Array.from(this.lastBuyTimeBySlot.entries()),
+          enemyLastAgeUpTimeSec: this.enemyLastAgeUpTimeSec,
+          episodeGoldSpent: this.episodeGoldSpent,
+          episodeManaSpent: this.episodeManaSpent,
+          peakEnemyAge: this.peakEnemyAge,
+          peakEnemyTurretCount: this.peakEnemyTurretCount,
+          rewardProfile: this.rewardProfile,
+          discoveredActionTypes: Array.from(this.discoveredActionTypes),
+          discoveredUnitTypes: Array.from(this.discoveredUnitTypes),
+          discoveredTurretTypes: Array.from(this.discoveredTurretTypes),
+          discoveryBudgetRemaining: this.discoveryBudgetRemaining,
+        },
+      },
+    };
+  }
+
+  setEnvState(command: Extract<BridgeCommand, { cmd: 'set_env_state' }>): Record<string, unknown> {
+    if (!this.engine) {
+      throw new Error('Bridge not initialized: call reset first');
+    }
+    const payload = command.state;
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('set_env_state requires a state object payload');
+    }
+    const stateObj = payload as Record<string, unknown>;
+    const gameRaw = stateObj.game;
+    if (!gameRaw || typeof gameRaw !== 'object') {
+      throw new Error('set_env_state missing game snapshot');
+    }
+    const imported = this.engine.importSerializableState(gameRaw);
+    if (!imported) {
+      throw new Error('Failed to import serialized game state');
+    }
+    this.engine.setAIDecisionEnabled('ENEMY', false);
+
+    const runtimeRaw = stateObj.runtime;
+    if (runtimeRaw && typeof runtimeRaw === 'object') {
+      const runtime = runtimeRaw as Record<string, unknown>;
+      this.staticDim = Math.max(1, Number(runtime.staticDim ?? this.staticDim));
+      this.sequenceLen = Math.max(1, Number(runtime.sequenceLen ?? this.sequenceLen));
+      this.tokenDim = Math.max(1, Number(runtime.tokenDim ?? this.tokenDim));
+      this.actionDim = Math.max(1, Number(runtime.actionDim ?? this.actionDim));
+      this.unitDim = Math.max(1, Number(runtime.unitDim ?? this.unitDim));
+      this.turretDim = Math.max(1, Number(runtime.turretDim ?? this.turretDim));
+      this.slotDim = Math.max(1, Number(runtime.slotDim ?? this.slotDim));
+      this.episodeSeconds = Math.max(60, Number(runtime.episodeSeconds ?? this.episodeSeconds));
+      this.decisionFrames = Math.max(1, Number(runtime.decisionFrames ?? this.decisionFrames));
+      this.selfDifficulty = normalizeDifficulty(runtime.selfDifficulty, this.selfDifficulty);
+      this.opponentDifficulty = normalizeDifficulty(runtime.opponentDifficulty, this.opponentDifficulty);
+      this.opponentUseMockRandom = Boolean(runtime.opponentUseMockRandom);
+      this.mockRandomActionGap = Math.max(0, Math.floor(Number(runtime.mockRandomActionGap ?? this.mockRandomActionGap)));
+      this.mockRandomWaitStepsRemaining = Math.max(
+        0,
+        Math.floor(Number(runtime.mockRandomWaitStepsRemaining ?? this.mockRandomWaitStepsRemaining))
+      );
+      this.opponentCheckpointId =
+        typeof runtime.opponentCheckpointId === 'string' && runtime.opponentCheckpointId.trim().length > 0
+          ? runtime.opponentCheckpointId.trim()
+          : null;
+      this.opponentArchetype =
+        typeof runtime.opponentArchetype === 'string' && runtime.opponentArchetype.trim().length > 0
+          ? runtime.opponentArchetype.trim()
+          : 'balanced';
+      this.opponentAggression = clamp(Number(runtime.opponentAggression ?? this.opponentAggression), 0, 2);
+      this.opponentTeching = clamp(Number(runtime.opponentTeching ?? this.opponentTeching), 0, 2);
+      this.opponentDefense = clamp(Number(runtime.opponentDefense ?? this.opponentDefense), 0, 2);
+      this.enemyLastAgeUpTimeSec = Math.max(0, Number(runtime.enemyLastAgeUpTimeSec ?? this.enemyLastAgeUpTimeSec));
+      this.episodeGoldSpent = Math.max(0, Number(runtime.episodeGoldSpent ?? this.episodeGoldSpent));
+      this.episodeManaSpent = Math.max(0, Number(runtime.episodeManaSpent ?? this.episodeManaSpent));
+      this.peakEnemyAge = Math.max(1, Number(runtime.peakEnemyAge ?? this.peakEnemyAge));
+      this.peakEnemyTurretCount = Math.max(
+        0,
+        Number(runtime.peakEnemyTurretCount ?? this.peakEnemyTurretCount)
+      );
+      this.discoveryBudgetRemaining = Math.max(
+        0,
+        Number(runtime.discoveryBudgetRemaining ?? this.discoveryBudgetRemaining)
+      );
+      this.rewardProfile = mergeRewardProfile(runtime.rewardProfile ?? this.rewardProfile);
+
+      this.ownBaseMilestonesAwarded.clear();
+      const ownMilestones = Array.isArray(runtime.ownBaseMilestonesAwarded)
+        ? runtime.ownBaseMilestonesAwarded
+        : [];
+      ownMilestones.forEach((value) => {
+        if (typeof value === 'number' && Number.isFinite(value)) this.ownBaseMilestonesAwarded.add(value);
+      });
+      this.opponentBaseMilestonesAwarded.clear();
+      const oppMilestones = Array.isArray(runtime.opponentBaseMilestonesAwarded)
+        ? runtime.opponentBaseMilestonesAwarded
+        : [];
+      oppMilestones.forEach((value) => {
+        if (typeof value === 'number' && Number.isFinite(value)) this.opponentBaseMilestonesAwarded.add(value);
+      });
+      this.lastBuyTimeBySlot.clear();
+      const buyEntries = Array.isArray(runtime.lastBuyTimeBySlot) ? runtime.lastBuyTimeBySlot : [];
+      for (const pair of buyEntries) {
+        if (!Array.isArray(pair) || pair.length < 2) continue;
+        const slot = Number(pair[0]);
+        const ts = Number(pair[1]);
+        if (Number.isFinite(slot) && Number.isFinite(ts)) {
+          this.lastBuyTimeBySlot.set(Math.floor(slot), ts);
+        }
+      }
+
+      this.discoveredActionTypes = new Set<string>();
+      (Array.isArray(runtime.discoveredActionTypes) ? runtime.discoveredActionTypes : []).forEach((value) => {
+        if (typeof value === 'string') this.discoveredActionTypes.add(value);
+      });
+      this.discoveredUnitTypes = new Set<string>();
+      (Array.isArray(runtime.discoveredUnitTypes) ? runtime.discoveredUnitTypes : []).forEach((value) => {
+        if (typeof value === 'string') this.discoveredUnitTypes.add(value);
+      });
+      this.discoveredTurretTypes = new Set<string>();
+      (Array.isArray(runtime.discoveredTurretTypes) ? runtime.discoveredTurretTypes : []).forEach((value) => {
+        if (typeof value === 'string') this.discoveredTurretTypes.add(value);
+      });
+    }
+
+    this.history.reset();
+    if (stateObj.history && typeof stateObj.history === 'object') {
+      this.history.importState(stateObj.history);
+    }
+    const snapshot = this.engine.getAISnapshot('ENEMY');
+    this.peakEnemyAge = Math.max(this.peakEnemyAge, snapshot.enemyAge);
+    this.peakEnemyTurretCount = Math.max(this.peakEnemyTurretCount, snapshot.enemyTurretInstalledCount);
+    this.engine.setAIDecisionEnabled('PLAYER', !this.opponentUseMockRandom);
+    const obs = this.encodeSnapshot(snapshot);
+    return { ok: true, observation: obs };
   }
 
   close(): Record<string, unknown> {
@@ -643,6 +895,8 @@ class BridgeRuntime {
     terminalCause: 'none' | 'player_win' | 'enemy_win' | 'timeout',
     done: boolean,
     executedAction: AIDecision['action'],
+    executedUnitType: string | null,
+    executedTurretId: string | null,
     executedSlotIndex: number | null,
     decisionTimeSec: number
   ): Record<RewardComponentKey, number> {
@@ -670,6 +924,12 @@ class BridgeRuntime {
     const nextLaneControl = next.enemyUnitsNearPlayerBase - next.playerUnitsNearEnemyBase;
     const laneControlDelta = (nextLaneControl - prevLaneControl) * rp.laneControlDeltaPerUnit;
     const ageUpDelayPenalty = this.computeAgeUpDelayPenalty(prev, next);
+    const actionDiscoveryBonus = this.computeActionDiscoveryBonus(
+      legalAndApplied,
+      executedAction,
+      executedUnitType,
+      executedTurretId
+    );
     let illegalActionPenalty = legalAndApplied ? 0 : rp.illegalActionPenalty;
     if (legalAndApplied && executedAction === 'SELL_TURRET_ENGINE') {
       // Penalize quick buy->sell flips (within 3 seconds on same slot).
@@ -699,6 +959,7 @@ class BridgeRuntime {
       own_base_damage: ownBaseDamage,
       safe_age_up_bonus: safeAgeUpBonus,
       age_up_delay_penalty: ageUpDelayPenalty,
+      action_discovery_bonus: actionDiscoveryBonus,
       lane_control_delta: laneControlDelta,
       illegal_action_penalty: illegalActionPenalty,
       terminal_outcome: terminalOutcome,
@@ -720,6 +981,44 @@ class BridgeRuntime {
     const ratio = requiredGold / currentGold;
     const deltaSeconds = Math.max(0, next.gameTime - prev.gameTime);
     return -(ratio * ramp * deltaSeconds * rp.ageDelayPenaltyWeight);
+  }
+
+  private computeActionDiscoveryBonus(
+    legalAndApplied: boolean,
+    executedAction: AIDecision['action'],
+    executedUnitType: string | null,
+    executedTurretId: string | null
+  ): number {
+    if (!legalAndApplied) return 0;
+    if (this.discoveryBudgetRemaining <= 0) return 0;
+    if (executedAction === 'WAIT') return 0;
+
+    const rp = this.rewardProfile;
+    let bonus = 0;
+
+    if (!this.discoveredActionTypes.has(executedAction)) {
+      this.discoveredActionTypes.add(executedAction);
+      bonus += rp.actionDiscoveryActionBonus;
+    }
+
+    if (executedAction === 'RECRUIT_UNIT' && executedUnitType) {
+      if (!this.discoveredUnitTypes.has(executedUnitType)) {
+        this.discoveredUnitTypes.add(executedUnitType);
+        bonus += rp.actionDiscoveryUnitBonus;
+      }
+    }
+
+    if (executedAction === 'BUY_TURRET_ENGINE' && executedTurretId) {
+      if (!this.discoveredTurretTypes.has(executedTurretId)) {
+        this.discoveredTurretTypes.add(executedTurretId);
+        bonus += rp.actionDiscoveryTurretBonus;
+      }
+    }
+
+    if (bonus <= 0) return 0;
+    const granted = Math.min(bonus, this.discoveryBudgetRemaining);
+    this.discoveryBudgetRemaining = Math.max(0, this.discoveryBudgetRemaining - granted);
+    return granted;
   }
 
   private applyRewardComponentWeights(
@@ -751,6 +1050,9 @@ class BridgeRuntime {
   }
 
   private pickOpponentDifficulty(seed: number): GameDifficulty {
+    if (this.opponentUseMockRandom) {
+      return this.opponentDifficulty;
+    }
     const ladder: GameDifficulty[] = ['MEDIUM', 'HARD', 'SMART', 'SMART_ML', 'CHEATER'];
     const baseIdx = Math.max(0, ladder.indexOf(this.opponentDifficulty));
     const rng = this.seededRandom(seed ^ 0x9e3779b9);
@@ -773,6 +1075,60 @@ class BridgeRuntime {
     if (roll < 0.2 && baseIdx > 0) return ladder[baseIdx - 1];
     if (roll > 0.8 && baseIdx < ladder.length - 1) return ladder[baseIdx + 1];
     return ladder[baseIdx];
+  }
+
+  private applyMockRandomOpponentDecision(): void {
+    if (!this.engine) return;
+    if (this.mockRandomWaitStepsRemaining > 0) {
+      this.mockRandomWaitStepsRemaining -= 1;
+      return;
+    }
+    const snapshot = this.engine.getAISnapshot('PLAYER');
+    const mask = buildLegalActionMask(snapshot);
+    const decision = this.buildMockRandomDecision(mask);
+    if (decision.action === 'WAIT') {
+      return;
+    }
+    if (this.isDecisionLegal(decision, mask)) {
+      this.engine.applyAIDecision(decision, 'PLAYER');
+      this.mockRandomWaitStepsRemaining = this.mockRandomActionGap;
+    }
+  }
+
+  private buildMockRandomDecision(mask: ReturnType<typeof buildLegalActionMask>): AIDecision {
+    const legalActionTypes = ACTION_TYPES_IN_ORDER.filter((_, idx) => mask.actionTypeMask[idx] > 0);
+    const action = this.randomChoice(legalActionTypes) ?? 'WAIT';
+
+    if (action === 'RECRUIT_UNIT') {
+      const legalUnits = ML_UNIT_IDS.filter((_, idx) => mask.unitMask[idx] > 0);
+      const unitType = this.randomChoice(legalUnits);
+      if (!unitType) return { action: 'WAIT', confidence: 0 };
+      return { action, confidence: 0, parameters: { unitType, priority: 'normal' } };
+    }
+
+    if (action === 'BUY_TURRET_ENGINE') {
+      const legalTurrets = ML_TURRET_IDS.filter((_, idx) => mask.turretMask[idx] > 0);
+      const legalSlots = ML_SLOT_INDICES.filter((slot) => mask.buySlotMask[slot] > 0);
+      const turretId = this.randomChoice(legalTurrets);
+      const slotIndex = this.randomChoice(legalSlots);
+      if (!turretId || slotIndex === undefined) return { action: 'WAIT', confidence: 0 };
+      return { action, confidence: 0, parameters: { turretId, slotIndex } };
+    }
+
+    if (action === 'SELL_TURRET_ENGINE') {
+      const legalSlots = ML_SLOT_INDICES.filter((slot) => mask.sellSlotMask[slot] > 0);
+      const slotIndex = this.randomChoice(legalSlots);
+      if (slotIndex === undefined) return { action: 'WAIT', confidence: 0 };
+      return { action, confidence: 0, parameters: { slotIndex } };
+    }
+
+    return { action, confidence: 0 };
+  }
+
+  private randomChoice<T>(values: T[]): T | undefined {
+    if (!Array.isArray(values) || values.length <= 0) return undefined;
+    const idx = Math.floor(Math.random() * values.length);
+    return values[Math.max(0, Math.min(values.length - 1, idx))];
   }
 
   private seededRandom(seed: number): () => number {
@@ -798,6 +1154,8 @@ function handle(command: BridgeCommand): Record<string, unknown> {
   if (command.cmd === 'set_opponent_profile') return runtime.setOpponentProfile(command);
   if (command.cmd === 'reset') return runtime.reset(command);
   if (command.cmd === 'step') return runtime.step(command);
+  if (command.cmd === 'get_env_state') return runtime.getEnvState();
+  if (command.cmd === 'set_env_state') return runtime.setEnvState(command);
   if (command.cmd === 'close') return runtime.close();
   return { ok: false, error: `unknown command ${(command as { cmd?: string }).cmd}` };
 }

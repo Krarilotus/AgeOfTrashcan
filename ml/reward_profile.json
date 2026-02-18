@@ -10,7 +10,7 @@
     "unit_curriculum_end_progress": 0.2,
     "unit_curriculum_start_scale": 1.0,
     "unit_curriculum_end_scale": 0.0,
-    "dense_cutoff_progress": 0.6,
+    "dense_cutoff_progress": 0.7,
     "keep_enemy_base_milestone_after_dense_cutoff": true,
     "reward_normalize": true,
     "reward_clip_abs": 10.0
@@ -23,6 +23,7 @@
       "own_base_damage": 1.0,
       "safe_age_up_bonus": 1.0,
       "age_up_delay_penalty": 1.0,
+      "action_discovery_bonus": 1.0,
       "lane_control_delta": 1.0,
       "illegal_action_penalty": 1.0,
       "terminal_outcome": 1.0
@@ -39,6 +40,10 @@
     "age_delay_grace_per_age_sec": 180.0,
     "age_delay_ramp_sec": 180.0,
     "age_delay_penalty_weight": 1.0,
+    "action_discovery_action_bonus": 0.03,
+    "action_discovery_unit_bonus": 0.01,
+    "action_discovery_turret_bonus": 0.01,
+    "action_discovery_episode_cap": 0.12,
     "terminal_win": 40.0,
     "terminal_loss": -40.0,
     "timeout_loss": -40.0

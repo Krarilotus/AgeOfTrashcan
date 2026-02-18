@@ -175,14 +175,11 @@ export function getSlotMountYOffsetUnits(slotIndex: number): number {
 }
 
 export function getTurretSellRefundMultiplier(
-  isPlayer: boolean,
-  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER'
+  _isPlayer: boolean,
+  _difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'SMART' | 'SMART_ML' | 'CHEATER'
 ): number {
-  if (isPlayer) return 0.5;
-  if (difficulty === 'EASY') return 0.5;
-  if (difficulty === 'MEDIUM' || difficulty === 'SMART' || difficulty === 'SMART_ML') return 0.6;
-  if (difficulty === 'HARD') return 0.8;
-  return 1.0;
+  // Keep sell refunds constant to prevent arbitrage loops; only buy-side discounts vary by difficulty.
+  return 0.5;
 }
 
 export const TURRET_ENGINES: Record<string, TurretEngineDef> = {
@@ -800,4 +797,3 @@ export function getProtectionMultiplierAtDistance(base: TurretBaseLike, distance
   }
   return multiplier;
 }
-

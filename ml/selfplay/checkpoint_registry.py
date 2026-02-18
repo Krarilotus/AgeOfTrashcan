@@ -74,15 +74,17 @@ def _collect_from_manifest(run_dir: Path, manifest: Dict[str, Any]) -> List[Dict
         metrics = item.get("metrics", {})
         archetype = ""
         codename = ""
-        winrate_vs_mock: Optional[float] = None
+        winrate_vs_eval_opponent: Optional[float] = None
         strategy_aggression: Optional[float] = None
         strategy_teching: Optional[float] = None
         strategy_defense: Optional[float] = None
         if isinstance(metrics, dict):
             archetype = str(metrics.get("strategy_archetype", "") or "").strip()
             codename = str(metrics.get("strategy_codename", "") or "").strip()
-            if isinstance(metrics.get("winrate_vs_mock"), (int, float)):
-                winrate_vs_mock = float(metrics.get("winrate_vs_mock"))
+            if isinstance(metrics.get("winrate_vs_eval_opponent"), (int, float)):
+                winrate_vs_eval_opponent = float(metrics.get("winrate_vs_eval_opponent"))
+            elif isinstance(metrics.get("winrate_vs_mock"), (int, float)):
+                winrate_vs_eval_opponent = float(metrics.get("winrate_vs_mock"))
             if isinstance(metrics.get("strategy_aggression"), (int, float)):
                 strategy_aggression = float(metrics.get("strategy_aggression"))
             if isinstance(metrics.get("strategy_teching"), (int, float)):
@@ -107,7 +109,8 @@ def _collect_from_manifest(run_dir: Path, manifest: Dict[str, Any]) -> List[Dict
                 "timestampUtc": timestamp_utc,
                 "strategyArchetype": archetype or None,
                 "strategyCodename": codename or None,
-                "winrateVsMock": winrate_vs_mock,
+                "winrateVsEvalOpponent": winrate_vs_eval_opponent,
+                "winrateVsMock": winrate_vs_eval_opponent,
                 "strategyAggression": strategy_aggression,
                 "strategyTeching": strategy_teching,
                 "strategyDefense": strategy_defense,
@@ -145,6 +148,7 @@ def _collect_from_files(run_dir: Path) -> List[Dict[str, Any]]:
                 "timestampUtc": datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc).isoformat(),
                 "strategyArchetype": None,
                 "strategyCodename": None,
+                "winrateVsEvalOpponent": None,
                 "winrateVsMock": None,
                 "strategyAggression": None,
                 "strategyTeching": None,
@@ -181,7 +185,7 @@ def _entry_score(item: Dict[str, Any], latest_checkpoint_id: Optional[str]) -> f
         "periodic": 16.0,
         "checkpoint": 10.0,
     }.get(kind, 8.0)
-    winrate = float(item.get("winrateVsMock") or 0.0)
+    winrate = float(item.get("winrateVsEvalOpponent") or item.get("winrateVsMock") or 0.0)
     step_bonus = float(int(item.get("step", 0))) / 1_000_000.0
     latest_bonus = 4.0 if latest_checkpoint_id and item.get("id") == latest_checkpoint_id else 0.0
     return kind_bonus + winrate * 100.0 + step_bonus + latest_bonus
@@ -239,7 +243,9 @@ def _build_featured_agents(
             alias = f"{alias_base}_{suffix}"
             suffix += 1
         used_aliases.add(alias)
-        winrate = item.get("winrateVsMock")
+        winrate = item.get("winrateVsEvalOpponent")
+        if not isinstance(winrate, (int, float)):
+            winrate = item.get("winrateVsMock")
         winrate_text = f"{float(winrate):.2f}" if isinstance(winrate, (int, float)) else "n/a"
         style = _style_summary(
             archetype=archetype,
@@ -255,6 +261,7 @@ def _build_featured_agents(
                 "codename": codename,
                 "archetype": archetype,
                 "style": style,
+                "winrateVsEvalOpponent": float(winrate) if isinstance(winrate, (int, float)) else None,
                 "winrateVsMock": float(winrate) if isinstance(winrate, (int, float)) else None,
                 "step": int(item.get("step", 0)),
                 "runName": item.get("runName"),

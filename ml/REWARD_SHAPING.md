@@ -27,6 +27,7 @@ At each decision step, the bridge emits these component values:
 - `own_base_damage`
 - `safe_age_up_bonus`
 - `age_up_delay_penalty`
+- `action_discovery_bonus`
 - `lane_control_delta`
 - `illegal_action_penalty`
 - `terminal_outcome`
@@ -45,6 +46,10 @@ Current behavior in this repo:
   - grace = `current_age * age_delay_grace_per_age_sec`
   - ramp to full over `age_delay_ramp_sec`
   - penalty magnitude scales with `required_gold / current_gold`
+- `action_discovery_bonus`:
+  - awarded only for legal+applied actions
+  - one-time per episode for first-time action type and first-time recruited unit / bought turret type
+  - hard-capped by `action_discovery_episode_cap` to prevent farming
 - `illegal_action_penalty`:
   - applied when action illegal (`illegal_action_penalty`)
   - plus extra quick sell penalty if selling within `quick_sell_window_sec` after buy (`quick_sell_penalty`)
@@ -75,6 +80,10 @@ Bridge defaults:
 - `age_delay_grace_per_age_sec = 180.0`
 - `age_delay_ramp_sec = 180.0`
 - `age_delay_penalty_weight = 1.0`
+- `action_discovery_action_bonus = 0.03`
+- `action_discovery_unit_bonus = 0.01`
+- `action_discovery_turret_bonus = 0.01`
+- `action_discovery_episode_cap = 0.12`
 - `terminal_win = 40.0`
 - `terminal_loss = -40.0`
 - `timeout_loss = -40.0`
@@ -126,7 +135,7 @@ Core formula:
 Where:
 
 - `unit_curriculum_reward = (enemy_unit_kill_value + own_unit_loss_value) * unit_curriculum_scale`
-- `dense_non_milestone = own_base_damage + safe_age_up_bonus + age_up_delay_penalty + lane_control_delta + illegal_action_penalty`
+- `dense_non_milestone = own_base_damage + safe_age_up_bonus + age_up_delay_penalty + action_discovery_bonus + lane_control_delta + illegal_action_penalty`
 - `enemy_base_milestone = enemy_base_damage` (one-time thresholds only)
 - `dense_scale` and `terminal_scale` come from `schedule` and training progress.
 - optional reward normalization/clipping is controlled by:
