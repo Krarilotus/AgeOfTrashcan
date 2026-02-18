@@ -5,6 +5,7 @@ import type { MLHistoryToken } from './historyBuffer';
 import { countLegal, type MLLegalActionMask } from './legalActionMask';
 
 const ACTION_LABELS = [...ML_ACTION_TYPES, 'INFERRED_DAMAGE', 'INFERRED_UNIT_DELTA'];
+const TOKEN_FEATURE_SIZE = 12;
 const ACTION_LABEL_TO_INDEX = new Map<string, number>(
   ACTION_LABELS.map((label, index) => [label, index])
 );
@@ -23,6 +24,7 @@ export interface EncodedMLObservation {
 
 export interface ObservationEncoderConfig {
   sequenceLength?: number;
+  minHistoryTokens?: number;
 }
 
 function clamp(value: number, minValue: number, maxValue: number): number {
@@ -43,6 +45,10 @@ function encodeHistoryToken(token: MLHistoryToken): number[] {
   const actorNorm =
     token.actor === 'PLAYER' ? 1 / 3 : token.actor === 'ENEMY' ? 2 / 3 : 1;
   const actionIndex = ACTION_LABEL_TO_INDEX.get(token.actionLabel) ?? -1;
+  const unitAction = token.actionLabel === 'RECRUIT_UNIT' ? 1 : 0;
+  const turretAction =
+    token.actionLabel === 'BUY_TURRET_ENGINE' || token.actionLabel === 'SELL_TURRET_ENGINE' ? 1 : 0;
+  const systemActor = token.actor === 'SYSTEM' ? 1 : 0;
 
   return [
     actorNorm,
@@ -53,6 +59,10 @@ function encodeHistoryToken(token: MLHistoryToken): number[] {
     normalize(token.deltaSec, 2),
     normalize(token.rewardDelta, 10),
     normalize(token.damageDelta, 600),
+    normalize(token.timestampSec, 3600),
+    unitAction,
+    turretAction,
+    systemActor,
   ];
 }
 
@@ -61,14 +71,70 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
   const width = Math.max(1, state.battlefieldWidth);
   const opponentBaseX = Number.isFinite(state.playerBaseX) ? state.playerBaseX : 0;
   const ownBaseX = Number.isFinite(state.enemyBaseX) ? state.enemyBaseX : width;
-  const pushToken = (token: number[]) => {
-    if (tokens.length >= maxTokens) return;
+  const pushToken = (token: number[]): boolean => {
+    if (tokens.length >= maxTokens) return false;
     const clamped = new Array<number>(token.length);
     for (let i = 0; i < token.length; i += 1) {
       clamped[i] = clamp(token[i], -1, 1);
     }
     tokens.push(clamped);
+    return true;
   };
+  const pushTokenLimited = <T>(
+    items: T[],
+    limit: number,
+    encode: (item: T, index: number) => number[]
+  ): void => {
+    if (limit <= 0) return;
+    const capped = Math.min(items.length, limit);
+    for (let i = 0; i < capped; i += 1) {
+      if (!pushToken(encode(items[i], i))) break;
+    }
+  };
+
+  const ownTurretSlots = (state.enemyTurretSlots ?? []).slice(
+    0,
+    Math.max(0, Math.min(MAX_TURRET_SLOTS, state.enemyTurretSlotsUnlocked))
+  );
+  const opponentTurretSlots = (state.playerTurretSlots ?? []).slice(
+    0,
+    Math.max(0, Math.min(MAX_TURRET_SLOTS, state.playerTurretSlotsUnlocked))
+  );
+
+  // Always encode active turret slot state first so engine IDs/cooldowns are never dropped.
+  ownTurretSlots.forEach((slot, slotOrdinal) => {
+    pushToken([
+      0.84,
+      normalizeDiscreteIndex(getTurretIndex(slot.turretId ?? undefined), ML_TURRET_IDS.length),
+      normalizeDiscreteIndex(slot.slotIndex ?? slotOrdinal, MAX_TURRET_SLOTS),
+      slot.turretId ? 1 : 0,
+      normalize(slot.cooldownRemaining ?? 0, 20),
+      normalize(state.enemyTurretLevel, 6),
+      normalize(state.enemyTurretProtectionMultiplier, 1),
+      normalize(state.enemyTurretDps, 600),
+      normalize(state.enemyTurretMaxRange, 60),
+      normalize(state.enemyTurretAvgRange, 60),
+      normalize(state.enemyTurretInstalledCount, MAX_TURRET_SLOTS),
+      normalize(state.enemyTurretSlotsUnlocked, MAX_TURRET_SLOTS),
+    ]);
+  });
+
+  opponentTurretSlots.forEach((slot, slotOrdinal) => {
+    pushToken([
+      0.96,
+      normalizeDiscreteIndex(getTurretIndex(slot.turretId ?? undefined), ML_TURRET_IDS.length),
+      normalizeDiscreteIndex(slot.slotIndex ?? slotOrdinal, MAX_TURRET_SLOTS),
+      slot.turretId ? 1 : 0,
+      normalize(slot.cooldownRemaining ?? 0, 20),
+      normalize(state.playerTurretLevel, 6),
+      normalize(state.playerTurretProtectionMultiplier, 1),
+      normalize(state.playerTurretDps, 600),
+      normalize(state.playerTurretMaxRange, 60),
+      normalize(state.playerTurretAvgRange, 60),
+      normalize(state.playerTurretInstalledCount, MAX_TURRET_SLOTS),
+      normalize(state.playerTurretSlotsUnlocked, MAX_TURRET_SLOTS),
+    ]);
+  });
 
   const ownUnits = [...state.enemyUnits]
     .sort((a, b) => Math.abs(a.position - opponentBaseX) - Math.abs(b.position - opponentBaseX));
@@ -84,7 +150,11 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
       normalize(unit.range, 60),
       normalize(unit.position, width),
       normalize(unit.laneY ?? 0, 20),
-      normalize((unit.attackCooldownRemaining ?? 0) + (unit.skillCooldownRemaining ?? 0), 12),
+      normalize(unit.attackCooldownRemaining ?? 0, 6),
+      normalize(unit.skillCooldownRemaining ?? 0, 12),
+      normalize(unit.speed ?? 12, 30),
+      normalize(unit.maxHealth, 2500),
+      (unit.skillCooldownRemaining ?? 0) <= 0 ? 1 : 0,
     ]);
   });
 
@@ -97,7 +167,11 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
       normalize(unit.range, 60),
       normalize(unit.position, width),
       normalize(unit.laneY ?? 0, 20),
-      normalize((unit.attackCooldownRemaining ?? 0) + (unit.skillCooldownRemaining ?? 0), 12),
+      normalize(unit.attackCooldownRemaining ?? 0, 6),
+      normalize(unit.skillCooldownRemaining ?? 0, 12),
+      normalize(unit.speed ?? 12, 30),
+      normalize(unit.maxHealth, 2500),
+      (unit.skillCooldownRemaining ?? 0) <= 0 ? 1 : 0,
     ]);
   });
 
@@ -108,32 +182,6 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
     if (projectile.owner === 'SELF') ownProjectiles.push(projectile);
     else if (projectile.owner === 'OPPONENT') opponentProjectiles.push(projectile);
   }
-
-  ownProjectiles.forEach((projectile) => {
-    pushToken([
-      0.36,
-      projectile.hasDroneGuidance ? 0.75 : projectile.isFalling ? 0.5 : 0.25,
-      normalize(projectile.damage, 600),
-      normalize(projectile.splashRadius, 15),
-      normalize(projectile.x, width),
-      normalize(projectile.y, 20),
-      normalize(projectile.vx, 80),
-      normalize(projectile.lifeMs, 6000),
-    ]);
-  });
-
-  opponentProjectiles.forEach((projectile) => {
-    pushToken([
-      0.48,
-      projectile.hasDroneGuidance ? 0.75 : projectile.isFalling ? 0.5 : 0.25,
-      normalize(projectile.damage, 600),
-      normalize(projectile.splashRadius, 15),
-      normalize(projectile.x, width),
-      normalize(projectile.y, 20),
-      normalize(projectile.vx, 80),
-      normalize(projectile.lifeMs, 6000),
-    ]);
-  });
 
   const effects = state.activeAbilityEffects ?? [];
   const ownEffects: typeof effects = [];
@@ -148,31 +196,69 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
     return 1.0;
   };
 
-  ownEffects.forEach((effect) => {
-    pushToken([
-      0.60,
-      encodeEffectType(effect.type),
-      0,
-      0,
-      normalize(effect.x, width),
-      normalize(effect.y, 20),
-      normalize(effect.lifeMs, 2000),
-      0,
-    ]);
-  });
+  const remainingBudget = Math.max(0, maxTokens - tokens.length);
+  const perGroupBudget = Math.max(0, Math.floor(remainingBudget / 4));
+  const leftoverBudget = Math.max(0, remainingBudget - perGroupBudget * 4);
 
-  opponentEffects.forEach((effect) => {
-    pushToken([
-      0.72,
-      encodeEffectType(effect.type),
-      0,
-      0,
-      normalize(effect.x, width),
-      normalize(effect.y, 20),
-      normalize(effect.lifeMs, 2000),
-      0,
-    ]);
-  });
+  pushTokenLimited(ownProjectiles, perGroupBudget + leftoverBudget, (projectile) => [
+    0.36,
+    projectile.hasDroneGuidance ? 0.75 : projectile.isFalling ? 0.5 : 0.25,
+    normalize(projectile.damage, 600),
+    normalize(projectile.splashRadius, 15),
+    normalize(projectile.x, width),
+    normalize(projectile.y, 20),
+    normalize(projectile.vx, 80),
+    normalize(projectile.lifeMs, 6000),
+    normalize(projectile.vy, 80),
+    normalize(projectile.targetY ?? 0, 20),
+    normalize(projectile.remainingPierces ?? 0, 5),
+    0,
+  ]);
+
+  pushTokenLimited(opponentProjectiles, perGroupBudget, (projectile) => [
+    0.48,
+    projectile.hasDroneGuidance ? 0.75 : projectile.isFalling ? 0.5 : 0.25,
+    normalize(projectile.damage, 600),
+    normalize(projectile.splashRadius, 15),
+    normalize(projectile.x, width),
+    normalize(projectile.y, 20),
+    normalize(projectile.vx, 80),
+    normalize(projectile.lifeMs, 6000),
+    normalize(projectile.vy, 80),
+    normalize(projectile.targetY ?? 0, 20),
+    normalize(projectile.remainingPierces ?? 0, 5),
+    0,
+  ]);
+
+  pushTokenLimited(ownEffects, perGroupBudget, (effect) => [
+    0.60,
+    encodeEffectType(effect.type),
+    0,
+    0,
+    normalize(effect.x, width),
+    normalize(effect.y, 20),
+    normalize(effect.lifeMs, 2000),
+    0,
+    0,
+    0,
+    0,
+    0,
+  ]);
+
+  pushTokenLimited(opponentEffects, perGroupBudget, (effect) => [
+    0.72,
+    encodeEffectType(effect.type),
+    0,
+    0,
+    normalize(effect.x, width),
+    normalize(effect.y, 20),
+    normalize(effect.lifeMs, 2000),
+    0,
+    0,
+    0,
+    0,
+    0,
+  ]);
 
   return tokens;
 }
@@ -516,14 +602,19 @@ export function encodeObservation(
   config: ObservationEncoderConfig = {}
 ): EncodedMLObservation {
   const sequenceLength = config.sequenceLength ?? 240;
-  // Use full sequence capacity for live game-state tokens when needed.
-  // History tokens consume only the leftover capacity.
-  const stateTokenBudget = Math.max(0, sequenceLength);
+  // Preserve a guaranteed history window so the policy always sees temporal context.
+  const minHistoryTokens = Math.max(
+    0,
+    Math.min(
+      sequenceLength,
+      config.minHistoryTokens ?? Math.min(24, Math.floor(sequenceLength * 0.2))
+    )
+  );
+  const stateTokenBudget = Math.max(0, sequenceLength - minHistoryTokens);
   const stateTokens = encodeCurrentStateTokens(state, stateTokenBudget);
   const historyBudget = Math.max(0, sequenceLength - stateTokens.length);
   const encodedTokens = historyTokens.slice(-historyBudget).map(encodeHistoryToken);
-  const tokenFeatureSize = 8;
-  const zeroToken = new Array<number>(tokenFeatureSize).fill(0);
+  const zeroToken = new Array<number>(TOKEN_FEATURE_SIZE).fill(0);
   const paddedSequence = [
     ...Array.from({ length: Math.max(0, historyBudget - encodedTokens.length) }, () => [...zeroToken]),
     ...encodedTokens,

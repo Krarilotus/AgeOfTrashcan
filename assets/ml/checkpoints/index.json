@@ -1,6 +1,6 @@
 {
-  "generatedAtUtc": "2026-02-18T02:57:54.762509+00:00",
-  "latestCheckpointId": "fast_1_6m_medium_r3/periodic_step_001507328.pt",
+  "generatedAtUtc": "2026-02-18T03:10:16.221533+00:00",
+  "latestCheckpointId": "fast_1_6m_medium_r3/milestone_target_001600000_step_001605632.pt",
   "featuredAgents": [
     {
       "alias": "SMART_ML_RAIDER_SPIKE",
@@ -51,19 +51,53 @@
       "runName": "fast_1_6m_medium_r3"
     },
     {
-      "alias": "SMART_ML_RAIDER_POUNCER",
-      "id": "fast_1_6m_medium_r3/milestone_target_000960000_step_000966656.pt",
-      "label": "SMART_ML_RAIDER_POUNCER (raider, wr n/a)",
-      "codename": "Raider Pouncer",
+      "alias": "SMART_ML_RAIDER_HARRIER",
+      "id": "fast_1_6m_medium_r3/milestone_target_001600000_step_001605632.pt",
+      "label": "SMART_ML_RAIDER_HARRIER (raider, wr n/a)",
+      "codename": "Raider Harrier",
       "archetype": "raider",
       "style": "raider",
       "winrateVsEvalOpponent": null,
       "winrateVsMock": null,
-      "step": 966656,
+      "step": 1605632,
       "runName": "fast_1_6m_medium_r3"
     }
   ],
   "checkpoints": [
+    {
+      "id": "fast_1_6m_medium_r3/milestone_target_001600000_step_001605632.pt",
+      "label": "fast_1_6m_medium_r3 Raider Harrier [raider] milestone step 1605632",
+      "runName": "fast_1_6m_medium_r3",
+      "fileName": "milestone_target_001600000_step_001605632.pt",
+      "kind": "milestone",
+      "step": 1605632,
+      "timestampUtc": "2026-02-18T03:08:12.351771+00:00",
+      "strategyArchetype": "raider",
+      "strategyCodename": "Raider Harrier",
+      "winrateVsEvalOpponent": null,
+      "winrateVsMock": null,
+      "strategyAggression": 0.475759,
+      "strategyTeching": 0.21661,
+      "strategyDefense": 0.131927,
+      "relativePath": "checkpoints/fast_1_6m_medium_r3/milestone_target_001600000_step_001605632.pt"
+    },
+    {
+      "id": "fast_1_6m_medium_r3/periodic_step_001605632.pt",
+      "label": "fast_1_6m_medium_r3 Raider Harrier [raider] periodic step 1605632",
+      "runName": "fast_1_6m_medium_r3",
+      "fileName": "periodic_step_001605632.pt",
+      "kind": "periodic",
+      "step": 1605632,
+      "timestampUtc": "2026-02-18T03:08:10.547683+00:00",
+      "strategyArchetype": "raider",
+      "strategyCodename": "Raider Harrier",
+      "winrateVsEvalOpponent": null,
+      "winrateVsMock": null,
+      "strategyAggression": 0.475759,
+      "strategyTeching": 0.21661,
+      "strategyDefense": 0.131927,
+      "relativePath": "checkpoints/fast_1_6m_medium_r3/periodic_step_001605632.pt"
+    },
     {
       "id": "fast_1_6m_medium_r3/periodic_step_001507328.pt",
       "label": "fast_1_6m_medium_r3 Raider Lancer [raider] periodic step 1507328",

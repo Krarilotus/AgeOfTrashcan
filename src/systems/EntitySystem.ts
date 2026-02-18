@@ -55,6 +55,15 @@ export class EntitySystem {
 
         // Collision with allies
         if (entity.owner === other.owner) {
+          // If two allies are perfectly overlapped, force one to yield so the stack unwinds.
+          if (distance <= 0.2) {
+            const movingRight = entity.kinematics.vx >= 0;
+            const shouldYield = movingRight ? id > otherId : id < otherId;
+            if (shouldYield) {
+              blocked = true;
+              continue;
+            }
+          }
           // Centered body collisions: each unit contributes half of its footprint.
           // This prevents one-sided clipping from asymmetric width/scale combinations.
           if (isInFront && distance < centeredCollisionDistance && distance > 0.2) {

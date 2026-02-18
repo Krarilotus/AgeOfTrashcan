@@ -1023,6 +1023,10 @@ export class GameEngine {
     updateQueueForOwner('ENEMY');
   }
 
+  private getSpawnXForOwner(owner: 'PLAYER' | 'ENEMY'): number {
+    return owner === 'PLAYER' ? 0.1 : (this.state.battlefield.width - 0.1);
+  }
+
   private spawnTestUnit(owner: 'PLAYER' | 'ENEMY', unitId?: string): void {
     if (this.hasReachedActiveUnitCap(owner)) {
       return;
@@ -1031,7 +1035,7 @@ export class GameEngine {
     const isPlayer = owner === 'PLAYER';
 
     // Spawn Offset
-    const baseX = isPlayer ? 0.1 : (this.state.battlefield.width - 0.1);
+    const baseX = this.getSpawnXForOwner(owner);
     
     const actualUnitId = unitId || (isPlayer ? this.state.playerQueue[0]?.unitId : this.state.enemyQueue[0]?.unitId) || 'stone_clubman';
     const unitDef = UNIT_DEFS[actualUnitId] || UNIT_DEFS.stone_clubman;

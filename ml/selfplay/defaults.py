@@ -19,7 +19,7 @@ DEFAULT_KL_HARD_STOP = 0.08
 # Model defaults
 DEFAULT_STATIC_DIM = 128
 DEFAULT_SEQUENCE_LEN = 240
-DEFAULT_TOKEN_DIM = 8
+DEFAULT_TOKEN_DIM = 12
 DEFAULT_ACTION_DIM = 8
 DEFAULT_UNIT_DIM = 128
 DEFAULT_TURRET_DIM = 32
@@ -158,5 +158,15 @@ MODEL_PRESET_OVERRIDES = {
         "ffn_dim": 1792,
         "sequence_len": 240,
         "dropout": 0.15,
+    },
+    "wide-medium-large": {
+        "d_model": 384,
+        "n_layers": 10,
+        "n_heads": 12,
+        "ffn_dim": 1536,
+        "sequence_len": 288,
+        "token_dim": 24,
+        "static_dim": 192,
+        "dropout": 0.1,
     },
 }

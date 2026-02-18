@@ -201,6 +201,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-heads", type=int, default=0, help="Override number of attention heads (>0)")
     parser.add_argument("--model-ffn-dim", type=int, default=0, help="Override transformer FFN dim (>0)")
     parser.add_argument("--model-sequence-len", type=int, default=0, help="Override sequence length (>0)")
+    parser.add_argument("--model-token-dim", type=int, default=0, help="Override per-token feature width (>0)")
+    parser.add_argument("--model-static-dim", type=int, default=0, help="Override static feature width (>0)")
     parser.add_argument("--minibatch-size", type=int, default=0, help="PPO minibatch size override (>0)")
     parser.add_argument(
         "--mixed-precision",
@@ -609,6 +611,10 @@ def main() -> None:
         cfg.model.n_heads = int(preset_override["n_heads"])
         cfg.model.ffn_dim = int(preset_override["ffn_dim"])
         cfg.model.sequence_len = int(preset_override["sequence_len"])
+        if "token_dim" in preset_override:
+            cfg.model.token_dim = int(preset_override["token_dim"])
+        if "static_dim" in preset_override:
+            cfg.model.static_dim = int(preset_override["static_dim"])
         cfg.model.dropout = float(preset_override["dropout"])
 
     if args.model_d_model > 0:
@@ -621,6 +627,10 @@ def main() -> None:
         cfg.model.ffn_dim = int(args.model_ffn_dim)
     if args.model_sequence_len > 0:
         cfg.model.sequence_len = int(args.model_sequence_len)
+    if args.model_token_dim > 0:
+        cfg.model.token_dim = int(args.model_token_dim)
+    if args.model_static_dim > 0:
+        cfg.model.static_dim = int(args.model_static_dim)
     if cfg.model.d_model % max(1, cfg.model.n_heads) != 0:
         raise SystemExit("model-d-model must be divisible by model-heads")
 

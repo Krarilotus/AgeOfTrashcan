@@ -122,6 +122,14 @@ cd ml
 DEVICE=cuda just serve-inference
 ```
 
+If your training checkpoints are on a different root (for example `S:/AgeOfTrashcan/checkpoints`), point both registry sync and inference to that root:
+
+```bash
+cd ml
+CHECKPOINTS_DIR='S:/AgeOfTrashcan/checkpoints' just sync-checkpoints
+CHECKPOINTS_DIR='S:/AgeOfTrashcan/checkpoints' DEVICE=cuda just serve-inference
+```
+
 Run server (Debian/CPU):
 
 ```bash
