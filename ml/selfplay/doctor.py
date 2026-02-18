@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     failures: list[str] = []
+    warnings: list[str] = []
 
     print(f"[{_ok(sys.version_info >= (3, 10))}] Python {platform.python_version()} (requires >=3.10)")
     if sys.version_info < (3, 10):
@@ -63,9 +64,30 @@ def main() -> None:
             arch_list = set(torch.cuda.get_arch_list())
             arch_supported = arch in arch_list
             print(f"[{_ok(arch_supported)}] CUDA arch support: device={arch}, torch={sorted(arch_list)}")
-            if not arch_supported:
+
+            cuda_runtime_ok = False
+            cuda_runtime_error = ""
+            try:
+                # Real runtime check: catches kernels that would fail despite CUDA being "available".
+                x = torch.randn((2048, 2048), device="cuda", dtype=torch.float32)
+                y = torch.randn((2048, 2048), device="cuda", dtype=torch.float32)
+                z = (x @ y).sum()
+                _ = float(z.item())
+                torch.cuda.synchronize()
+                cuda_runtime_ok = True
+            except Exception as exc:  # noqa: BLE001
+                cuda_runtime_error = str(exc)
+            print(f"[{_ok(cuda_runtime_ok)}] CUDA runtime smoke-test (matmul)")
+
+            if not cuda_runtime_ok:
                 failures.append(
-                    f"Torch build does not support GPU arch {arch}. Install a compatible CUDA wheel."
+                    "CUDA runtime smoke-test failed. "
+                    f"Kernel launch/inference may be unstable. Error: {cuda_runtime_error}"
+                )
+            elif not arch_supported:
+                warnings.append(
+                    f"Torch arch list does not include {arch}, but runtime smoke-test passed. "
+                    "Proceeding with PTX/JIT fallback."
                 )
 
     if failures:
@@ -73,6 +95,10 @@ def main() -> None:
         for item in failures:
             print(f"  - {item}")
         raise SystemExit(1)
+
+    if warnings:
+        for item in warnings:
+            print(f"[warn] {item}")
 
     print("[doctor] Training environment is ready.")
 
