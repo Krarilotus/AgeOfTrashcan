@@ -294,11 +294,11 @@ export const GAME_LOOP_CONFIG = {
 
 /**
  * Helper function to calculate mana upgrade cost
- * ACTUAL GAME LOGIC: (level + 1) * 150
- * Level 0->1: 150g, Level 1->2: 300g, Level 2->3: 450g, etc.
+ * ACTUAL GAME LOGIC: (level + 1) * 120
+ * Level 0->1: 120g, Level 1->2: 240g, Level 2->3: 360g, etc.
  */
 export function getManaCost(currentLevel: number): number {
-  return (currentLevel + 1) * 150;
+  return (currentLevel + 1) * 120;
 }
 
 /**

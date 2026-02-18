@@ -27,6 +27,9 @@ from .defaults import (
     DEFAULT_KL_TARGET,
     DEFAULT_LEAGUE_ARCHETYPE_WINRATE_FLOOR,
     DEFAULT_LEAGUE_ARBITERS,
+    DEFAULT_LEAGUE_ARBITER_PHASEOUT_END_PROGRESS,
+    DEFAULT_LEAGUE_ARBITER_PHASEOUT_ORDER,
+    DEFAULT_LEAGUE_ARBITER_PHASEOUT_START_PROGRESS,
     DEFAULT_LEAGUE_ELO_RANDOM_FACTOR,
     DEFAULT_LEAGUE_KEEP_DIVERSE,
     DEFAULT_LEAGUE_KEEP_TOP,
@@ -50,6 +53,7 @@ from .defaults import (
     DEFAULT_REWARD_DENSE_DECAY_FACTOR,
     DEFAULT_REWARD_DENSE_DECAY_INTERVAL,
     DEFAULT_REWARD_DENSE_SCALE_END,
+    DEFAULT_REWARD_DENSE_MIN_SCALE,
     DEFAULT_REWARD_DENSE_SCALE_START,
     DEFAULT_REWARD_KEEP_ENEMY_BASE_MILESTONE_AFTER_DENSE_CUTOFF,
     DEFAULT_REWARD_NORMALIZE,
@@ -134,6 +138,7 @@ class RuntimeConfig:
     reward_clip_abs: float = DEFAULT_REWARD_CLIP_ABS
     reward_dense_scale_start: float = DEFAULT_REWARD_DENSE_SCALE_START
     reward_dense_scale_end: float = DEFAULT_REWARD_DENSE_SCALE_END
+    reward_dense_min_scale: float = DEFAULT_REWARD_DENSE_MIN_SCALE
     reward_dense_decay_interval: float = DEFAULT_REWARD_DENSE_DECAY_INTERVAL
     reward_dense_decay_factor: float = DEFAULT_REWARD_DENSE_DECAY_FACTOR
     reward_terminal_scale_start: float = DEFAULT_REWARD_TERMINAL_SCALE_START
@@ -156,6 +161,9 @@ class RuntimeConfig:
     league_spinoffs_per_anchor: int = DEFAULT_LEAGUE_SPINOFFS_PER_ANCHOR
     league_spinoff_noise: float = DEFAULT_LEAGUE_SPINOFF_NOISE
     league_arbiters: str = DEFAULT_LEAGUE_ARBITERS
+    league_arbiter_phaseout_start_progress: float = DEFAULT_LEAGUE_ARBITER_PHASEOUT_START_PROGRESS
+    league_arbiter_phaseout_end_progress: float = DEFAULT_LEAGUE_ARBITER_PHASEOUT_END_PROGRESS
+    league_arbiter_phaseout_order: str = DEFAULT_LEAGUE_ARBITER_PHASEOUT_ORDER
     league_min_games_per_agent: int = DEFAULT_LEAGUE_MIN_GAMES_PER_AGENT
     league_elo_random_factor: float = DEFAULT_LEAGUE_ELO_RANDOM_FACTOR
     dead_unit_revival_enabled: bool = DEFAULT_DEAD_UNIT_REVIVAL_ENABLED

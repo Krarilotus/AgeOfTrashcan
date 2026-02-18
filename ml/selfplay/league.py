@@ -62,6 +62,7 @@ class LeaguePool:
         self.spinoff_noise = max(0.0, float(spinoff_noise))
         self.entries: List[LeagueEntry] = []
         self.baseline_entries: List[LeagueEntry] = self._build_baseline_entries()
+        self.disabled_baselines: Set[str] = set()
         self.sample_counts: Dict[str, int] = {}
 
     def add_checkpoint(
@@ -223,19 +224,29 @@ class LeaguePool:
 
     def roster(self) -> List[LeagueEntry]:
         learned = sorted(self.entries, key=self._rank_tuple, reverse=True)[: self.max_agents]
-        combined = [*self.baseline_entries, *learned]
+        combined = [*self._active_baseline_entries(), *learned]
         return sorted(combined, key=self._rank_tuple, reverse=True)
+
+    def set_disabled_baselines(self, disabled: Set[str] | List[str] | Tuple[str, ...]) -> None:
+        normalized: Set[str] = set()
+        for value in disabled:
+            key = str(value).strip().upper()
+            if key:
+                normalized.add(key)
+        self.disabled_baselines = normalized
 
     def export_state(self) -> Dict[str, object]:
         return {
             "entries": [self._entry_to_dict(entry) for entry in self.entries],
             "baseline_entries": [self._entry_to_dict(entry) for entry in self.baseline_entries],
+            "disabled_baselines": sorted(self.disabled_baselines),
             "sample_counts": {str(key): int(value) for key, value in self.sample_counts.items()},
         }
 
     def import_state(self, state: Dict[str, object] | None) -> None:
         self.entries = []
         self.sample_counts = {}
+        self.disabled_baselines = set()
         if not isinstance(state, dict):
             return
         raw_entries = state.get("entries")
@@ -282,6 +293,9 @@ class LeaguePool:
                         self.sample_counts[key] = max(0, int(value))
                     except (TypeError, ValueError):
                         continue
+        raw_disabled = state.get("disabled_baselines")
+        if isinstance(raw_disabled, list):
+            self.set_disabled_baselines({str(item) for item in raw_disabled if isinstance(item, str)})
 
     def _entry_to_dict(self, entry: LeagueEntry) -> Dict[str, object]:
         return {
@@ -527,9 +541,21 @@ class LeaguePool:
         return max(min_value, min(max_value, float(value)))
 
     def _all_entries(self) -> List[LeagueEntry]:
-        if not self.baseline_entries:
+        active_baselines = self._active_baseline_entries()
+        if not active_baselines:
             return list(self.entries)
-        return [*self.baseline_entries, *self.entries]
+        return [*active_baselines, *self.entries]
+
+    def _active_baseline_entries(self) -> List[LeagueEntry]:
+        if not self.baseline_entries:
+            return []
+        if not self.disabled_baselines:
+            return list(self.baseline_entries)
+        return [
+            entry
+            for entry in self.baseline_entries
+            if not (isinstance(entry.difficulty, str) and entry.difficulty.upper() in self.disabled_baselines)
+        ]
 
     def _prune_sample_counts(self, valid_keys: Set[str]) -> None:
         stale = [key for key in self.sample_counts.keys() if key not in valid_keys]

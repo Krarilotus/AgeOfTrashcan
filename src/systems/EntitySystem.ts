@@ -3,6 +3,7 @@ import { UNIT_DEFS, type UnitDef } from '../config/units';
 import { getGoldToManaConversionRate } from '../config/gameBalance';
 import { SkillSystem } from './SkillSystem';
 import { CombatUtils } from './CombatUtils';
+import { recordManaSpent } from './resourceAccounting';
 
 const FIXED_TIMESTEP = 1000 / 60;
 
@@ -182,6 +183,7 @@ export class EntitySystem {
          entity.transform.facing = entity.owner === 'PLAYER' ? 'RIGHT' : 'LEFT';
          
          ownerEcon.mana -= unitDef.teleporter.manaPerAttack;
+         recordManaSpent(state, entity.owner, unitDef.teleporter.manaPerAttack, 'ability');
          
          const aoeRadius = unitDef.skill?.radius ?? unitDef.skill?.power ?? 1;
          
@@ -324,6 +326,7 @@ export class EntitySystem {
                  
                  if (manaUsed > 0) {
                     ownerEcon.mana -= manaUsed;
+                    recordManaSpent(state, target.owner, manaUsed, 'ability');
                     dmg = Math.max(1, dmg - damageAbsorbed); // Min 1 dmg always penetrates
                  }
              }

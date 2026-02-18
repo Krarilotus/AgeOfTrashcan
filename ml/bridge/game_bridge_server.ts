@@ -480,7 +480,6 @@ class BridgeRuntime {
     if (legal && applied) {
       const postAction = this.engine.getAISnapshot('ENEMY');
       this.episodeGoldSpent += Math.max(0, prev.enemyGold - postAction.enemyGold);
-      this.episodeManaSpent += Math.max(0, prev.enemyMana - postAction.enemyMana);
     }
     const decisionSlot =
       typeof (decision.parameters as Record<string, unknown> | undefined)?.slotIndex === 'number'
@@ -496,6 +495,10 @@ class BridgeRuntime {
     this.engine.stepHeadless(this.decisionFrames);
 
     const next = this.engine.getAISnapshot('ENEMY');
+    this.episodeManaSpent = Math.max(
+      0,
+      Number((next as { enemyTotalManaSpent?: number }).enemyTotalManaSpent ?? this.episodeManaSpent)
+    );
     this.peakEnemyAge = Math.max(this.peakEnemyAge, next.enemyAge);
     this.peakEnemyTurretCount = Math.max(this.peakEnemyTurretCount, next.enemyTurretInstalledCount);
     this.history.ingestState(next);

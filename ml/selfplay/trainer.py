@@ -68,6 +68,15 @@ class SelfPlayTrainer:
             spinoffs_per_anchor=runtime.league_spinoffs_per_anchor,
             spinoff_noise=runtime.league_spinoff_noise,
         )
+        self.league_configured_arbiters = self._parse_arbiter_csv(runtime.league_arbiters)
+        configured_phaseout_order = self._parse_arbiter_csv(runtime.league_arbiter_phaseout_order)
+        if configured_phaseout_order:
+            self.league_arbiter_phaseout_order = [
+                item for item in configured_phaseout_order if item in set(self.league_configured_arbiters)
+            ]
+        else:
+            self.league_arbiter_phaseout_order = list(self.league_configured_arbiters)
+        self._last_disabled_arbiters: set[str] = set()
 
         self.autoscale_enabled = bool(runtime.smart_env_autoscale)
         self.autoscale_min_envs = max(1, int(runtime.smart_env_min_envs))
@@ -115,6 +124,7 @@ class SelfPlayTrainer:
 
         Path(runtime.save_dir).mkdir(parents=True, exist_ok=True)
         self._load_or_init_manifest()
+        self._refresh_league_baseline_phaseout(force_log=True)
         self.obs: List[Observation] = [
             env.reset(runtime.seed + env_idx) for env_idx, env in enumerate(self.envs)
         ]
@@ -1258,6 +1268,7 @@ class SelfPlayTrainer:
         env_opponents: List[LeagueEntry | None],
         current_checkpoint: str | None,
     ) -> None:
+        self._refresh_league_baseline_phaseout()
         opponent = self.league.sample_opponent(current_checkpoint)
         env_opponents[env_idx] = opponent
         env = self.envs[env_idx]
@@ -1282,6 +1293,51 @@ class SelfPlayTrainer:
         ):
             opponent_payload["checkpoint_id"] = str(opponent.checkpoint_path)
         env.set_opponent_profile(opponent_payload)
+
+    def _parse_arbiter_csv(self, raw_csv: str) -> List[str]:
+        allowed = {"EASY", "MEDIUM", "HARD", "SMART", "CHEATER"}
+        parsed: List[str] = []
+        for token in str(raw_csv or "").split(","):
+            key = token.strip().upper()
+            if not key:
+                continue
+            if key in allowed and key not in parsed:
+                parsed.append(key)
+        return parsed
+
+    def _phaseout_disabled_arbiters(self) -> set[str]:
+        order = self.league_arbiter_phaseout_order
+        if not order:
+            return set()
+        runtime = self.cfg.runtime
+        start = float(np.clip(runtime.league_arbiter_phaseout_start_progress, 0.0, 1.0))
+        end = float(np.clip(runtime.league_arbiter_phaseout_end_progress, 0.0, 1.0))
+        progress = float(np.clip(self.global_step / max(1, runtime.total_steps), 0.0, 1.0))
+        if progress < start:
+            return set()
+        if end <= start:
+            return set(order)
+
+        disabled: set[str] = set()
+        total = len(order)
+        for idx, arbiter in enumerate(order):
+            threshold = start + (end - start) * (idx / max(1, total - 1))
+            if progress + 1e-9 >= threshold:
+                disabled.add(arbiter)
+        return disabled
+
+    def _refresh_league_baseline_phaseout(self, force_log: bool = False) -> None:
+        disabled = self._phaseout_disabled_arbiters()
+        self.league.set_disabled_baselines(disabled)
+        if force_log or disabled != self._last_disabled_arbiters:
+            progress = float(np.clip(self.global_step / max(1, self.cfg.runtime.total_steps), 0.0, 1.0))
+            disabled_text = ",".join(sorted(disabled)) if disabled else "none"
+            active = [arb for arb in self.league_configured_arbiters if arb not in disabled]
+            active_text = ",".join(active) if active else "none"
+            print(
+                f"[league-phaseout] progress={progress:.3f} disabled={disabled_text} active={active_text}"
+            )
+            self._last_disabled_arbiters = set(disabled)
 
     def _infer_learner_score(
         self,
@@ -1585,6 +1641,7 @@ class SelfPlayTrainer:
             "reward_schedule": {
                 "dense_start": self.cfg.runtime.reward_dense_scale_start,
                 "dense_end": self.cfg.runtime.reward_dense_scale_end,
+                "dense_min": self.cfg.runtime.reward_dense_min_scale,
                 "dense_decay_interval": self.cfg.runtime.reward_dense_decay_interval,
                 "dense_decay_factor": self.cfg.runtime.reward_dense_decay_factor,
                 "terminal_start": self.cfg.runtime.reward_terminal_scale_start,
@@ -1608,6 +1665,9 @@ class SelfPlayTrainer:
                 "min_promote_winrate": self.cfg.runtime.league_min_promote_winrate,
                 "archetype_winrate_floor": self.cfg.runtime.league_archetype_winrate_floor,
                 "arbiters": self.cfg.runtime.league_arbiters,
+                "arbiter_phaseout_start_progress": self.cfg.runtime.league_arbiter_phaseout_start_progress,
+                "arbiter_phaseout_end_progress": self.cfg.runtime.league_arbiter_phaseout_end_progress,
+                "arbiter_phaseout_order": self.cfg.runtime.league_arbiter_phaseout_order,
                 "min_games_per_agent": self.cfg.runtime.league_min_games_per_agent,
                 "elo_random_factor": self.cfg.runtime.league_elo_random_factor,
                 "use_checkpoint_opponents": self.cfg.runtime.league_use_checkpoint_opponents,
@@ -1917,8 +1977,9 @@ class SelfPlayTrainer:
             runtime.reward_terminal_scale_end - runtime.reward_terminal_scale_start
         ) * progress
         dense_cutoff_progress = float(np.clip(runtime.reward_dense_cutoff_progress, 0.0, 1.0))
+        dense_min_scale = max(0.0, float(runtime.reward_dense_min_scale))
         if progress >= dense_cutoff_progress:
-            dense_scale = 0.0
+            dense_scale = dense_min_scale
         return float(dense_scale), float(terminal_scale)
 
     def _unit_curriculum_scale(self, progress: float) -> float:
@@ -1951,15 +2012,10 @@ class SelfPlayTrainer:
 
         dense_cutoff_progress = float(np.clip(runtime.reward_dense_cutoff_progress, 0.0, 1.0))
         in_terminal_phase = progress >= dense_cutoff_progress
-        if in_terminal_phase:
-            dense_reward = (
-                enemy_base_milestone
-                if runtime.reward_keep_enemy_base_milestone_after_dense_cutoff
-                else 0.0
-            )
-        else:
-            dense_reward = unit_curriculum_reward + dense_non_milestone + enemy_base_milestone
-            dense_reward *= dense_scale
+        dense_reward = unit_curriculum_reward + dense_non_milestone
+        if not in_terminal_phase or runtime.reward_keep_enemy_base_milestone_after_dense_cutoff:
+            dense_reward += enemy_base_milestone
+        dense_reward *= dense_scale
 
         return dense_reward + components.terminal_outcome * terminal_scale
 

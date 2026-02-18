@@ -12,6 +12,7 @@ import { TurretSystem } from './systems/TurretSystem';
 import { VfxSystem } from './systems/VfxSystem';
 import { CombatUtils } from './systems/CombatUtils';
 import { EconomySystem } from './systems/EconomySystem';
+import { ensureManaSpendStats, recordManaSpent } from './systems/resourceAccounting';
 
 import { UNIT_DEFS, type UnitDef, getUnitsForAge } from './config/units';
 import {
@@ -104,6 +105,9 @@ export interface SideTelemetry {
   ageUpTimes: number[];
   unitBuildCounts: Record<string, number>;
   manaUpgradeCount: number;
+  totalManaSpent: number;
+  manaSpentUnits: number;
+  manaSpentAbilities: number;
   turretSlotUpgradeCount: number;
   turretEngineBuys: Record<string, number>;
   turretEngineSells: Record<string, number>;
@@ -287,7 +291,12 @@ export interface GameState {
   playerQueue: BuildQueueItem[];
   enemyQueue: BuildQueueItem[];
   projectiles: Projectile[];
-  stats: { damageDealt: { player: number; enemy: number } };
+  stats: {
+    damageDealt: { player: number; enemy: number };
+    manaSpent: { player: number; enemy: number };
+    manaSpentUnits: { player: number; enemy: number };
+    manaSpentAbilities: { player: number; enemy: number };
+  };
   vfx: Array<{
     id: number;
     type: 'ability_cast' | 'ability_impact' | 'kill_reward' | 'flamethrower';
@@ -346,7 +355,14 @@ export class GameEngine {
   }
 
   public getTelemetrySnapshot(): MatchTelemetry {
-    return createSnapshot(this.telemetry) as MatchTelemetry;
+    const snapshot = createSnapshot(this.telemetry) as MatchTelemetry;
+    snapshot.bySide.PLAYER.totalManaSpent = this.state.stats.manaSpent.player;
+    snapshot.bySide.ENEMY.totalManaSpent = this.state.stats.manaSpent.enemy;
+    snapshot.bySide.PLAYER.manaSpentUnits = this.state.stats.manaSpentUnits.player;
+    snapshot.bySide.ENEMY.manaSpentUnits = this.state.stats.manaSpentUnits.enemy;
+    snapshot.bySide.PLAYER.manaSpentAbilities = this.state.stats.manaSpentAbilities.player;
+    snapshot.bySide.ENEMY.manaSpentAbilities = this.state.stats.manaSpentAbilities.enemy;
+    return snapshot;
   }
 
   public getSideControlSnapshot(): Record<Owner, SideControlConfig> {
@@ -437,6 +453,9 @@ export class GameEngine {
           ageUpTimes: [],
           unitBuildCounts: {},
           manaUpgradeCount: 0,
+          totalManaSpent: 0,
+          manaSpentUnits: 0,
+          manaSpentAbilities: 0,
           turretSlotUpgradeCount: 0,
           turretEngineBuys: {},
           turretEngineSells: {},
@@ -449,6 +468,9 @@ export class GameEngine {
           ageUpTimes: [],
           unitBuildCounts: {},
           manaUpgradeCount: 0,
+          totalManaSpent: 0,
+          manaSpentUnits: 0,
+          manaSpentAbilities: 0,
           turretSlotUpgradeCount: 0,
           turretEngineBuys: {},
           turretEngineSells: {},
@@ -472,6 +494,9 @@ export class GameEngine {
         ageUpTimes: Array.isArray(raw.ageUpTimes) ? raw.ageUpTimes.map((v: any) => Number(v) || 0) : [],
         unitBuildCounts: typeof raw.unitBuildCounts === 'object' && raw.unitBuildCounts ? raw.unitBuildCounts : {},
         manaUpgradeCount: Number(raw.manaUpgradeCount) || 0,
+        totalManaSpent: Number(raw.totalManaSpent) || 0,
+        manaSpentUnits: Number(raw.manaSpentUnits) || 0,
+        manaSpentAbilities: Number(raw.manaSpentAbilities) || 0,
         turretSlotUpgradeCount: Number(raw.turretSlotUpgradeCount) || 0,
         turretEngineBuys: typeof raw.turretEngineBuys === 'object' && raw.turretEngineBuys ? raw.turretEngineBuys : {},
         turretEngineSells: typeof raw.turretEngineSells === 'object' && raw.turretEngineSells ? raw.turretEngineSells : {},
@@ -762,7 +787,12 @@ export class GameEngine {
       playerQueue: [],
       enemyQueue: [],
       projectiles: [],
-      stats: { damageDealt: { player: 0, enemy: 0 } },
+      stats: {
+        damageDealt: { player: 0, enemy: 0 },
+        manaSpent: { player: 0, enemy: 0 },
+        manaSpentUnits: { player: 0, enemy: 0 },
+        manaSpentAbilities: { player: 0, enemy: 0 },
+      },
       vfx: [],
     };
   }
@@ -1359,6 +1389,8 @@ export class GameEngine {
       enemyGoldIncome: ownEcon.goldIncomePerSec,
       playerManaIncome: opponentEcon.manaIncomePerSec,
       enemyManaIncome: ownEcon.manaIncomePerSec,
+      playerTotalManaSpent: this.state.stats.manaSpent.player,
+      enemyTotalManaSpent: this.state.stats.manaSpent.enemy,
       playerAge: opponentProg.age,
       enemyAge: ownProg.age,
       playerAgeCost: opponentProg.ageProgress.costGold,
@@ -1757,6 +1789,7 @@ export class GameEngine {
     if (econ.mana < finalManaCost) return false;
     econ.gold -= finalCost;
     econ.mana -= finalManaCost;
+    recordManaSpent(this.state, owner, finalManaCost, 'ability');
 
     queue.push({
       kind: 'turret_engine',
@@ -1977,6 +2010,7 @@ export class GameEngine {
     if ((unitDef.manaCost ?? 0) > 0) {
       if (econ.mana < (unitDef.manaCost ?? 0)) return false;
       econ.mana -= (unitDef.manaCost ?? 0);
+      recordManaSpent(this.state, owner, unitDef.manaCost ?? 0, 'unit');
     }
     econ.gold -= finalCost;
     
@@ -2006,6 +2040,7 @@ export class GameEngine {
     prog.age += 1;
     econ.gold -= costGold;
     econ.mana -= costMana;
+    recordManaSpent(this.state, owner, costMana, 'ability');
     
     // Update income using centralized config
     let newIncome = getGoldIncome(prog.age);
@@ -2077,6 +2112,7 @@ export class GameEngine {
     if (base.health >= base.maxHealth) return false; // Already at full health
     
     econ.mana -= manaCost;
+    recordManaSpent(this.state, owner, manaCost, 'ability');
     base.health += healAmount;
     if (base.health > base.maxHealth) base.health = base.maxHealth;
     
@@ -2175,7 +2211,7 @@ export class GameEngine {
         ...this.state,
         entities: entitiesArray,
       },
-      telemetry: this.telemetry,
+      telemetry: this.getTelemetrySnapshot(),
       runtime: {
         aiAccumulatorsMs: this.aiAccumulatorsMs,
         aiAccumulatorMs: this.aiAccumulatorsMs.ENEMY,
@@ -2224,6 +2260,19 @@ export class GameEngine {
       }
 
       this.state = loadedState as unknown as GameState;
+      if (!this.state.stats || typeof this.state.stats !== 'object') {
+        this.state.stats = {
+          damageDealt: { player: 0, enemy: 0 },
+          manaSpent: { player: 0, enemy: 0 },
+          manaSpentUnits: { player: 0, enemy: 0 },
+          manaSpentAbilities: { player: 0, enemy: 0 },
+        };
+      }
+      this.state.stats.damageDealt = {
+        player: Number(this.state.stats.damageDealt?.player) || 0,
+        enemy: Number(this.state.stats.damageDealt?.enemy) || 0,
+      };
+      ensureManaSpendStats(this.state);
       this.state.playerBase = this.ensureBaseTurretState(this.state.playerBase as BaseState);
       this.state.enemyBase = this.ensureBaseTurretState(this.state.enemyBase as BaseState);
       this.state.playerQueue = (this.state.playerQueue ?? []).map((item: any) => {

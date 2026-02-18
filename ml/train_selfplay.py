@@ -26,6 +26,9 @@ from selfplay.defaults import (
     DEFAULT_KEEP_AWAKE,
     DEFAULT_KEEP_AWAKE_INTERVAL_SEC,
     DEFAULT_LEAGUE_ARBITERS,
+    DEFAULT_LEAGUE_ARBITER_PHASEOUT_END_PROGRESS,
+    DEFAULT_LEAGUE_ARBITER_PHASEOUT_ORDER,
+    DEFAULT_LEAGUE_ARBITER_PHASEOUT_START_PROGRESS,
     DEFAULT_LEAGUE_ARCHETYPE_WINRATE_FLOOR,
     DEFAULT_LEAGUE_ELO_RANDOM_FACTOR,
     DEFAULT_LEAGUE_KEEP_DIVERSE,
@@ -47,6 +50,7 @@ from selfplay.defaults import (
     DEFAULT_REWARD_DENSE_DECAY_FACTOR,
     DEFAULT_REWARD_DENSE_DECAY_INTERVAL,
     DEFAULT_REWARD_DENSE_SCALE_END,
+    DEFAULT_REWARD_DENSE_MIN_SCALE,
     DEFAULT_REWARD_DENSE_SCALE_START,
     DEFAULT_REWARD_KEEP_ENEMY_BASE_MILESTONE_AFTER_DENSE_CUTOFF,
     DEFAULT_REWARD_TERMINAL_SCALE_END,
@@ -109,6 +113,7 @@ def _apply_reward_profile(cfg, profile: Dict[str, Any]) -> None:
         float_fields = {
             "dense_start": "reward_dense_scale_start",
             "dense_end": "reward_dense_scale_end",
+            "dense_min": "reward_dense_min_scale",
             "dense_decay_interval": "reward_dense_decay_interval",
             "dense_decay_factor": "reward_dense_decay_factor",
             "terminal_start": "reward_terminal_scale_start",
@@ -332,6 +337,12 @@ def parse_args() -> argparse.Namespace:
         help="Final scale for dense intermediate rewards",
     )
     parser.add_argument(
+        "--reward-dense-min-scale",
+        type=float,
+        default=DEFAULT_REWARD_DENSE_MIN_SCALE,
+        help="Minimum dense reward scale floor kept throughout training",
+    )
+    parser.add_argument(
         "--reward-dense-decay-interval",
         type=float,
         default=DEFAULT_REWARD_DENSE_DECAY_INTERVAL,
@@ -467,6 +478,24 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=DEFAULT_LEAGUE_ARBITERS,
         help="Comma-separated fixed baseline league opponents (subset of EASY,MEDIUM,HARD,SMART,CHEATER).",
+    )
+    parser.add_argument(
+        "--league-arbiter-phaseout-start-progress",
+        type=float,
+        default=DEFAULT_LEAGUE_ARBITER_PHASEOUT_START_PROGRESS,
+        help="Training progress where baseline arbiter phaseout begins (0..1).",
+    )
+    parser.add_argument(
+        "--league-arbiter-phaseout-end-progress",
+        type=float,
+        default=DEFAULT_LEAGUE_ARBITER_PHASEOUT_END_PROGRESS,
+        help="Training progress where baseline arbiter phaseout completes (0..1).",
+    )
+    parser.add_argument(
+        "--league-arbiter-phaseout-order",
+        type=str,
+        default=DEFAULT_LEAGUE_ARBITER_PHASEOUT_ORDER,
+        help="Comma-separated arbiter removal order during phaseout.",
     )
     parser.add_argument(
         "--league-min-games-per-agent",
@@ -706,6 +735,7 @@ def main() -> None:
     cfg.runtime.mixed_precision = bool(args.mixed_precision)
     cfg.runtime.reward_dense_scale_start = float(args.reward_dense_start)
     cfg.runtime.reward_dense_scale_end = float(args.reward_dense_end)
+    cfg.runtime.reward_dense_min_scale = float(args.reward_dense_min_scale)
     cfg.runtime.reward_dense_decay_interval = float(args.reward_dense_decay_interval)
     cfg.runtime.reward_dense_decay_factor = float(args.reward_dense_decay_factor)
     cfg.runtime.reward_terminal_scale_start = float(args.reward_terminal_start)
@@ -727,6 +757,9 @@ def main() -> None:
     cfg.runtime.league_min_promote_winrate = float(args.league_min_promote_winrate)
     cfg.runtime.league_archetype_winrate_floor = float(args.league_archetype_winrate_floor)
     cfg.runtime.league_arbiters = str(args.league_arbiters or "").strip()
+    cfg.runtime.league_arbiter_phaseout_start_progress = float(args.league_arbiter_phaseout_start_progress)
+    cfg.runtime.league_arbiter_phaseout_end_progress = float(args.league_arbiter_phaseout_end_progress)
+    cfg.runtime.league_arbiter_phaseout_order = str(args.league_arbiter_phaseout_order or "").strip()
     cfg.runtime.league_min_games_per_agent = max(1, int(args.league_min_games_per_agent))
     cfg.runtime.league_elo_random_factor = max(0.0, float(args.league_elo_random_factor))
     cfg.runtime.league_use_checkpoint_opponents = bool(args.league_use_checkpoint_opponents)
@@ -750,6 +783,8 @@ def main() -> None:
     _apply_reward_profile(cfg, reward_profile)
     if cfg.runtime.reward_dense_scale_start < 0 or cfg.runtime.reward_dense_scale_end < 0:
         raise SystemExit("reward-dense-start and reward-dense-end must be >= 0")
+    if cfg.runtime.reward_dense_min_scale < 0:
+        raise SystemExit("reward-dense-min-scale must be >= 0")
     if cfg.runtime.reward_terminal_scale_start < 0 or cfg.runtime.reward_terminal_scale_end < 0:
         raise SystemExit("reward-terminal-start and reward-terminal-end must be >= 0")
     if cfg.runtime.reward_dense_decay_interval < 0:
@@ -768,6 +803,30 @@ def main() -> None:
         raise SystemExit("league-archetype-winrate-floor must be in [0, 1]")
     if cfg.runtime.league_archetype_winrate_floor > cfg.runtime.league_min_promote_winrate:
         raise SystemExit("league-archetype-winrate-floor must be <= league-min-promote-winrate")
+    if (
+        cfg.runtime.league_arbiter_phaseout_start_progress < 0
+        or cfg.runtime.league_arbiter_phaseout_start_progress > 1
+    ):
+        raise SystemExit("league-arbiter-phaseout-start-progress must be in [0, 1]")
+    if (
+        cfg.runtime.league_arbiter_phaseout_end_progress < 0
+        or cfg.runtime.league_arbiter_phaseout_end_progress > 1
+    ):
+        raise SystemExit("league-arbiter-phaseout-end-progress must be in [0, 1]")
+    if cfg.runtime.league_arbiter_phaseout_end_progress < cfg.runtime.league_arbiter_phaseout_start_progress:
+        raise SystemExit(
+            "league-arbiter-phaseout-end-progress must be >= league-arbiter-phaseout-start-progress"
+        )
+    if cfg.runtime.league_arbiter_phaseout_order:
+        allowed_arbiters = {"EASY", "MEDIUM", "HARD", "SMART", "CHEATER"}
+        for token in cfg.runtime.league_arbiter_phaseout_order.split(","):
+            key = token.strip().upper()
+            if not key:
+                continue
+            if key not in allowed_arbiters:
+                raise SystemExit(
+                    f"league-arbiter-phaseout-order contains unsupported arbiter '{key}'"
+                )
     if cfg.runtime.league_spinoff_noise < 0 or cfg.runtime.league_spinoff_noise > 1.0:
         raise SystemExit("league-spinoff-noise must be in [0, 1.0]")
     if cfg.runtime.league_elo_random_factor < 0 or cfg.runtime.league_elo_random_factor > 1.0:

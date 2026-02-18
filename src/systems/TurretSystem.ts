@@ -7,6 +7,7 @@ import {
 } from '../config/turrets';
 import { TURRET_VISUALS, pixelsToUnits } from '../config/renderConfig';
 import { CombatUtils } from './CombatUtils';
+import { recordManaSpent } from './resourceAccounting';
 
 interface OilGroundPatch {
   owner: 'PLAYER' | 'ENEMY';
@@ -76,6 +77,7 @@ export class TurretSystem {
       const manaNeeded = Math.ceil(shieldableDamage / 2);
       const manaUsed = Math.min(manaNeeded, ownerEcon.mana);
       ownerEcon.mana -= manaUsed;
+      recordManaSpent(state, target.owner, manaUsed, 'ability');
       actualDamage = Math.max(1, actualDamage - (manaUsed * 2));
     }
 
@@ -122,7 +124,9 @@ export class TurretSystem {
         if (castManaCost > 0 && econ.mana < castManaCost) continue;
         const consumeCastMana = () => {
           if (castManaCost <= 0) return;
+          const manaUsed = Math.min(castManaCost, econ.mana);
           econ.mana = Math.max(0, econ.mana - castManaCost);
+          recordManaSpent(state, owner, manaUsed, 'ability');
         };
 
         const mount = TurretSystem.getTurretPosition(base.x, age, slotIndex);

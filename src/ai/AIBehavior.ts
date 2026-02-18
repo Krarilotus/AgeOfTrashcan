@@ -43,6 +43,8 @@ export interface GameStateSnapshot {
   enemyManaLevel: number;
   enemyGoldIncome: number;
   enemyManaIncome: number;
+  playerTotalManaSpent: number;
+  enemyTotalManaSpent: number;
   
   // Player base & defenses
   playerBaseHealth: number;

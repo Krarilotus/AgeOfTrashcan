@@ -1,5 +1,6 @@
 import { Entity, GameState } from '../GameEngine';
 import { getProtectionMultiplierAtDistance, getTurretEngineDef } from '../config/turrets';
+import { recordManaSpent } from './resourceAccounting';
 
 export class CombatUtils {
   // Turret protection now comes from mounted turret engines and stacks multiplicatively.
@@ -43,6 +44,7 @@ export class CombatUtils {
       const manaNeeded = shieldableDamage * manaPerDamage;
       manaUsed = Math.min(econ.mana, manaNeeded);
       econ.mana -= manaUsed;
+      recordManaSpent(state, targetOwner, manaUsed, 'ability');
       const absorbedDamage = manaUsed / Math.max(0.0001, manaPerDamage);
       actualDamage = Math.max(0, rawDamage - absorbedDamage);
     }

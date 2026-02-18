@@ -1,6 +1,7 @@
 import { Entity, GameState } from '../GameEngine';
 import { UNIT_DEFS, UnitSkill } from '../config/units';
 import { CombatUtils } from './CombatUtils';
+import { recordManaSpent } from './resourceAccounting';
 
 /**
  * Skill System
@@ -52,6 +53,7 @@ export class SkillSystem {
     // 4. Cost & Reset (if successful)
     if (executed) {
       ownerEcon.mana -= def.skill.manaCost;
+      recordManaSpent(state, entity.owner, def.skill.manaCost, 'ability');
       entity.skillCooldownRemaining = def.skill.cooldownMs / 1000;
     }
 
@@ -119,6 +121,7 @@ export class SkillSystem {
       const manaUsed = Math.min(manaNeeded, targetEcon.mana);
       const damageAbsorbed = manaUsed * 2;
       targetEcon.mana -= manaUsed;
+      recordManaSpent(state, best.owner, manaUsed, 'ability');
       actualDamage = Math.max(1, actualDamage - damageAbsorbed);
     }
 
@@ -337,6 +340,7 @@ export class SkillSystem {
           const manaUsed = Math.min(manaNeeded, targetEcon.mana);
           const damageAbsorbed = manaUsed * 2;
           targetEcon.mana -= manaUsed;
+          recordManaSpent(state, other.owner, manaUsed, 'ability');
           aoeDmg = Math.max(1, aoeDmg - damageAbsorbed);
         }
 
@@ -433,6 +437,7 @@ export class SkillSystem {
           const manaNeeded = Math.ceil(shieldableDamage / 2);
           const manaUsed = Math.min(manaNeeded, targetEcon.mana);
           targetEcon.mana -= manaUsed;
+          recordManaSpent(state, other.owner, manaUsed, 'ability');
           finalDamage = Math.max(1, finalDamage - (manaUsed * 2));
         }
 

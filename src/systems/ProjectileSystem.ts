@@ -1,6 +1,7 @@
 import { Entity, GameState, Projectile } from '../GameEngine';
 import { UNIT_DEFS } from '../config/units';
 import { CombatUtils } from './CombatUtils';
+import { recordManaSpent } from './resourceAccounting';
 
 export class ProjectileSystem {
   public update(state: GameState, deltaSeconds: number): void {
@@ -234,6 +235,7 @@ export class ProjectileSystem {
       const manaNeeded = Math.ceil(shieldableDamage / 2);
       const manaUsed = Math.min(manaNeeded, ownerEcon.mana);
       ownerEcon.mana -= manaUsed;
+      recordManaSpent(state, target.owner, manaUsed, 'ability');
       actualDamage = Math.max(1, actualDamage - (manaUsed * 2));
     }
 
