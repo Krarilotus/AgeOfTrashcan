@@ -1279,6 +1279,23 @@ class SelfPlayTrainer:
         info: Dict[str, float | str],
         reward_components: RewardComponents,
     ) -> float | None:
+        terminal_cause_raw = info.get("terminal_cause")
+        if isinstance(terminal_cause_raw, str):
+            terminal_cause = terminal_cause_raw.strip().lower()
+            if terminal_cause == "player_win":
+                return 1.0
+            if terminal_cause == "enemy_win":
+                return 0.0
+            if terminal_cause == "timeout":
+                own_base = float(info.get("own_base_hp", float("nan")))
+                opp_base = float(info.get("opp_base_hp", float("nan")))
+                if np.isfinite(own_base) and np.isfinite(opp_base):
+                    if own_base > opp_base:
+                        return 1.0
+                    if own_base < opp_base:
+                        return 0.0
+                return 0.5
+
         own_base = float(info.get("own_base_hp", float("nan")))
         opp_base = float(info.get("opp_base_hp", float("nan")))
         if np.isfinite(own_base) and np.isfinite(opp_base):

@@ -23,6 +23,8 @@ class LeagueEntry:
     steps: int
     elo: float = 1000.0
     winrate_vs_smart: float = 0.0
+    games_played: int = 0
+    score_sum: float = 0.0
     profile: StrategyProfile = field(default_factory=StrategyProfile)
     novelty: float = 0.0
     promoted: bool = False
@@ -75,12 +77,20 @@ class LeaguePool:
         existing = self._find_checkpoint_entry(checkpoint_path)
         if existing is not None:
             existing.steps = max(int(existing.steps), int(steps))
-            existing.winrate_vs_smart = normalized_winrate
-            existing.elo = self._clamp(seeded_elo, 700.0, 1900.0)
             existing.profile = profile
             existing.source = "checkpoint"
             existing.use_checkpoint = True
             existing.fixed = False
+            if int(existing.games_played) <= 0:
+                existing.winrate_vs_smart = normalized_winrate
+                existing.elo = self._clamp(seeded_elo, 700.0, 1900.0)
+            else:
+                blend = 0.15
+                existing.winrate_vs_smart = self._clamp(
+                    (1.0 - blend) * float(existing.winrate_vs_smart) + blend * normalized_winrate,
+                    0.0,
+                    1.0,
+                )
             existing.novelty = self._compute_novelty(existing)
             self._prune_diverse()
             return existing
@@ -112,9 +122,12 @@ class LeaguePool:
         k_factor = 24.0 if entry.fixed else 18.0
         entry.elo = self._clamp(float(entry.elo) + k_factor * (opponent_score - expected_opp), 700.0, 1900.0)
 
+        entry.games_played = max(0, int(entry.games_played)) + 1
+        entry.score_sum = max(0.0, float(entry.score_sum)) + opponent_score
+        empirical_winrate = self._clamp(entry.score_sum / max(1, entry.games_played), 0.0, 1.0)
         ema_alpha = 0.08
         entry.winrate_vs_smart = self._clamp(
-            (1.0 - ema_alpha) * float(entry.winrate_vs_smart) + ema_alpha * opponent_score,
+            (1.0 - ema_alpha) * float(entry.winrate_vs_smart) + ema_alpha * empirical_winrate,
             0.0,
             1.0,
         )
@@ -276,6 +289,8 @@ class LeaguePool:
             "steps": int(entry.steps),
             "elo": float(entry.elo),
             "winrate_vs_smart": float(entry.winrate_vs_smart),
+            "games_played": int(entry.games_played),
+            "score_sum": float(entry.score_sum),
             "novelty": float(entry.novelty),
             "promoted": bool(entry.promoted),
             "source": str(entry.source),
@@ -319,6 +334,8 @@ class LeaguePool:
             steps = int(raw.get("steps", 0))
             elo = float(raw.get("elo", 1000.0))
             winrate_vs_smart = float(raw.get("winrate_vs_smart", 0.0))
+            games_played = int(raw.get("games_played", 0))
+            score_sum = float(raw.get("score_sum", 0.0))
             novelty = float(raw.get("novelty", 0.0))
         except (TypeError, ValueError):
             return None
@@ -327,6 +344,8 @@ class LeaguePool:
             steps=max(0, steps),
             elo=elo,
             winrate_vs_smart=winrate_vs_smart,
+            games_played=max(0, games_played),
+            score_sum=max(0.0, score_sum),
             profile=profile,
             novelty=novelty,
             promoted=bool(raw.get("promoted", False)),

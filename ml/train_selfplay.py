@@ -141,6 +141,66 @@ def _apply_reward_profile(cfg, profile: Dict[str, Any]) -> None:
         cfg.runtime.bridge_reward_profile = bridge
 
 
+def _resolve_latest_checkpoint_from_run_dir(run_dir: Path) -> Path:
+    latest_alias = run_dir / "latest.pt"
+    if latest_alias.is_file():
+        return latest_alias.resolve()
+
+    manifest_path = run_dir / "run_manifest.json"
+    if manifest_path.is_file():
+        try:
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            checkpoints = manifest.get("checkpoints", [])
+            if isinstance(checkpoints, list):
+                for item in reversed(checkpoints):
+                    if not isinstance(item, dict):
+                        continue
+                    relative_name = item.get("path")
+                    if not isinstance(relative_name, str) or not relative_name.strip():
+                        continue
+                    candidate = (run_dir / relative_name).resolve()
+                    if candidate.is_file():
+                        return candidate
+        except Exception:
+            pass
+
+    fallback_candidates = [
+        path
+        for path in run_dir.glob("*.pt")
+        if path.is_file() and path.name not in {"latest.pt", "best.pt"}
+    ]
+    if fallback_candidates:
+        fallback_candidates.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
+        return fallback_candidates[0].resolve()
+    raise FileNotFoundError(
+        f"No checkpoint files found in run directory: {run_dir}"
+    )
+
+
+def _resolve_resume_checkpoint_path(raw_path: str) -> Path:
+    requested = Path(raw_path).expanduser()
+    if not requested.is_absolute():
+        requested = (Path.cwd() / requested).resolve()
+    else:
+        requested = requested.resolve()
+
+    if requested.is_file():
+        return requested
+    if requested.is_dir():
+        return _resolve_latest_checkpoint_from_run_dir(requested)
+
+    if requested.name in {"latest.pt", "best.pt"}:
+        run_dir = requested.parent
+        if requested.name == "latest.pt":
+            return _resolve_latest_checkpoint_from_run_dir(run_dir)
+        best_alias = run_dir / "best.pt"
+        if best_alias.is_file():
+            return best_alias.resolve()
+
+    raise FileNotFoundError(f"Checkpoint not found: {raw_path}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Age of Trashcan SMART_ML self-play policy")
     model_preset_choices = ["base", *MODEL_PRESET_OVERRIDES.keys()]
@@ -732,7 +792,10 @@ def main() -> None:
 
     resume_path = args.resume_from.strip()
     if resume_path:
-        resume_resolved = Path(resume_path).resolve()
+        resume_resolved = _resolve_resume_checkpoint_path(resume_path)
+        if str(resume_resolved) != str(Path(resume_path)):
+            print(f"[resume-resolve] requested={resume_path} resolved={resume_resolved}")
+        resume_path = str(resume_resolved)
         run_dir = resume_resolved.parent
         run_name = run_dir.name
     else:
