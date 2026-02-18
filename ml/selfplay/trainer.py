@@ -8,6 +8,8 @@ import math
 import os
 from pathlib import Path
 import shutil
+import sys
+import textwrap
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -77,6 +79,8 @@ class SelfPlayTrainer:
         else:
             self.league_arbiter_phaseout_order = list(self.league_configured_arbiters)
         self._last_disabled_arbiters: set[str] = set()
+        self.telemetry_color_enabled = self._resolve_telemetry_color_enabled()
+        self.telemetry_width = self._resolve_telemetry_width()
 
         self.autoscale_enabled = bool(runtime.smart_env_autoscale)
         self.autoscale_min_envs = max(1, int(runtime.smart_env_min_envs))
@@ -181,10 +185,19 @@ class SelfPlayTrainer:
                     eta_seconds = remaining_steps / max(1e-6, steps_per_sec)
                     progress_pct = curr_progress * 100.0
                     print(
-                        f"[step={self.global_step} progress={progress_pct:.1f}%] policy={metrics['policy_loss']:.4f} "
-                        f"value={metrics['value_loss']:.4f} entropy={metrics['entropy']:.4f} "
-                        f"kl={metrics['kl']:.5f} reward_scale(dense={dense_scale:.3f},terminal={terminal_scale:.3f}) "
-                        f"sps={steps_per_sec:.1f} eta={self._format_eta(eta_seconds)} envs={active_envs}"
+                        self._format_step_log(
+                            step=self.global_step,
+                            progress_pct=progress_pct,
+                            envs=active_envs,
+                            policy=metrics["policy_loss"],
+                            value=metrics["value_loss"],
+                            entropy=metrics["entropy"],
+                            kl=metrics["kl"],
+                            dense_scale=dense_scale,
+                            terminal_scale=terminal_scale,
+                            steps_per_sec=steps_per_sec,
+                            eta_seconds=eta_seconds,
+                        )
                     )
                     if self.last_rollout_telemetry_line:
                         print(self.last_rollout_telemetry_line)
@@ -1334,9 +1347,7 @@ class SelfPlayTrainer:
             disabled_text = ",".join(sorted(disabled)) if disabled else "none"
             active = [arb for arb in self.league_configured_arbiters if arb not in disabled]
             active_text = ",".join(active) if active else "none"
-            print(
-                f"[league-phaseout] progress={progress:.3f} disabled={disabled_text} active={active_text}"
-            )
+            print(self._format_phaseout_log(progress, disabled_text, active_text))
             self._last_disabled_arbiters = set(disabled)
 
     def _infer_learner_score(
@@ -1380,15 +1391,125 @@ class SelfPlayTrainer:
             return 0.5
         return float(self.live_match_win_sum / max(1, self.live_match_count))
 
+    def _resolve_telemetry_color_enabled(self) -> bool:
+        forced = os.getenv("TELEMETRY_COLOR")
+        if forced is not None:
+            return str(forced).strip().lower() in {"1", "true", "yes", "on"}
+        if os.getenv("NO_COLOR") is not None:
+            return False
+        try:
+            return bool(sys.stdout.isatty())
+        except Exception:
+            return False
+
+    def _resolve_telemetry_width(self) -> int:
+        forced = os.getenv("TELEMETRY_WIDTH")
+        if forced:
+            try:
+                return max(80, min(260, int(forced)))
+            except ValueError:
+                pass
+        detected = shutil.get_terminal_size(fallback=(150, 24)).columns
+        return max(100, min(220, int(detected)))
+
+    def _colorize(self, text: str, color: str | None = None, bold: bool = False) -> str:
+        if not self.telemetry_color_enabled:
+            return text
+        palette = {
+            "red": "31",
+            "green": "32",
+            "yellow": "33",
+            "blue": "34",
+            "magenta": "35",
+            "cyan": "36",
+            "gray": "90",
+        }
+        codes: List[str] = []
+        if bold:
+            codes.append("1")
+        if color and color in palette:
+            codes.append(palette[color])
+        if not codes:
+            return text
+        return f"\x1b[{';'.join(codes)}m{text}\x1b[0m"
+
+    def _tag(self, name: str, color: str = "cyan") -> str:
+        return self._colorize(f"[{name}]", color=color, bold=True)
+
+    def _wrap_section(self, section: str, body: str, section_color: str | None = "gray") -> str:
+        section_label = f"  {section:<14}"
+        wrapper = textwrap.TextWrapper(
+            width=self.telemetry_width,
+            initial_indent=section_label + " ",
+            subsequent_indent=" " * (len(section_label) + 1),
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        lines = wrapper.wrap(body if body else "n/a")
+        if not lines:
+            lines = [section_label + " n/a"]
+        if section_color:
+            lines[0] = lines[0].replace(
+                section_label,
+                self._colorize(section_label, color=section_color, bold=True),
+                1,
+            )
+        return "\n".join(lines)
+
+    def _format_phaseout_log(self, progress: float, disabled_text: str, active_text: str) -> str:
+        lines = [
+            f"{self._tag('league-phaseout', 'magenta')} progress={progress:.3f}",
+            self._wrap_section("disabled", disabled_text, section_color="yellow"),
+            self._wrap_section("active", active_text, section_color="green"),
+        ]
+        return "\n".join(lines)
+
+    def _format_step_log(
+        self,
+        *,
+        step: int,
+        progress_pct: float,
+        envs: int,
+        policy: float,
+        value: float,
+        entropy: float,
+        kl: float,
+        dense_scale: float,
+        terminal_scale: float,
+        steps_per_sec: float,
+        eta_seconds: float,
+    ) -> str:
+        lines = [
+            f"{self._tag('step', 'cyan')} step={step} progress={progress_pct:.1f}% envs={envs}",
+            self._wrap_section(
+                "losses",
+                f"policy={policy:.4f}  value={value:.4f}  entropy={entropy:.4f}  kl={kl:.5f}",
+                section_color="yellow",
+            ),
+            self._wrap_section(
+                "throughput",
+                f"sps={steps_per_sec:.1f}  eta={self._format_eta(eta_seconds)}",
+                section_color="green",
+            ),
+            self._wrap_section(
+                "reward_scale",
+                f"dense={dense_scale:.3f}  terminal={terminal_scale:.3f}",
+                section_color="magenta",
+            ),
+        ]
+        return "\n".join(lines)
+
     def _format_rollout_telemetry_line(
         self,
         completed_games: List[Dict[str, object]],
         latest_count: int,
     ) -> str:
         if not completed_games:
-            return (
-                f"[batch-telemetry games=0 completed=0 latest={int(latest_count)}] "
-                "waiting_for_completed_games"
+            return "\n".join(
+                [
+                    f"{self._tag('batch-telemetry', 'blue')} games=0 completed=0 latest={int(latest_count)}",
+                    self._wrap_section("status", "waiting_for_completed_games", section_color="yellow"),
+                ]
             )
 
         game_samples: List[Dict[str, object]] = completed_games
@@ -1439,19 +1560,25 @@ class SelfPlayTrainer:
         league_top_ml_text = self._format_league_top_telemetry(top_n=4, learned_only=True)
         league_top_ckpt_text = self._format_league_top_telemetry(top_n=4, checkpoints_only=True)
 
-        return (
-            f"[batch-telemetry games={sample_count} completed={completed_count} latest={latest_count}] "
-            f"highest_age_avg={avg_highest_age:.2f} "
-            f"avg_game_duration={avg_game_duration_sec:.1f}s({avg_game_duration_sec / 60.0:.2f}m) "
-            f"gold_spent_avg={avg_gold_spent:.1f} "
-            f"mana_spent_avg={avg_mana_spent:.1f} "
-            f"top_units={top_units_text} "
-            f"highest_turret_count_avg={avg_highest_turrets:.2f} "
-            f"strongest_tower_engines={strongest_engines_text} "
-            f"league_top={league_top_text} "
-            f"league_top_ml={league_top_ml_text} "
-            f"league_top_ckpt={league_top_ckpt_text}"
-        )
+        lines = [
+            f"{self._tag('batch-telemetry', 'blue')} games={sample_count} completed={completed_count} latest={latest_count}",
+            self._wrap_section(
+                "core",
+                f"highest_age_avg={avg_highest_age:.2f}  avg_game_duration={avg_game_duration_sec:.1f}s({avg_game_duration_sec / 60.0:.2f}m)",
+                section_color="cyan",
+            ),
+            self._wrap_section(
+                "economy",
+                f"gold_spent_avg={avg_gold_spent:.1f}  mana_spent_avg={avg_mana_spent:.1f}  highest_turret_count_avg={avg_highest_turrets:.2f}",
+                section_color="green",
+            ),
+            self._wrap_section("top_units", top_units_text, section_color="yellow"),
+            self._wrap_section("engines", strongest_engines_text, section_color="yellow"),
+            self._wrap_section("league_top", league_top_text, section_color="magenta"),
+            self._wrap_section("league_top_ml", league_top_ml_text, section_color="magenta"),
+            self._wrap_section("league_top_ckpt", league_top_ckpt_text, section_color="magenta"),
+        ]
+        return "\n".join(lines)
 
     def _format_league_top_telemetry(
         self,
