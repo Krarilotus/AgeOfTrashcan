@@ -129,6 +129,9 @@ class SelfPlayTrainer:
         Path(runtime.save_dir).mkdir(parents=True, exist_ok=True)
         self._load_or_init_manifest()
         self._refresh_league_baseline_phaseout(force_log=True)
+        initial_progress = self._training_progress()
+        for env in self.envs:
+            env.set_training_progress(initial_progress)
         self.obs: List[Observation] = [
             env.reset(runtime.seed + env_idx) for env_idx, env in enumerate(self.envs)
         ]
@@ -321,6 +324,7 @@ class SelfPlayTrainer:
                 for idx in range(current, target):
                     env = self.env_factory()
                     seed = int(self.cfg.runtime.seed + self.global_step + (idx + 1) * 977)
+                    env.set_training_progress(self._training_progress())
                     obs = env.reset(seed)
                     added_envs.append(env)
                     added_obs.append(obs)
@@ -820,6 +824,7 @@ class SelfPlayTrainer:
         observations: List[Observation] = []
         for _ in range(min(eval_workers, total_matches)):
             env = self.eval_env_factory()
+            env.set_training_progress(self._training_progress())
             try:
                 env.set_opponent_profile(dict(benchmark_profile))
             except Exception:
@@ -880,6 +885,7 @@ class SelfPlayTrainer:
                         if next_match_idx < total_matches:
                             replacement_match_idx = next_match_idx
                             next_match_idx += 1
+                            envs[idx].set_training_progress(self._training_progress())
                             replacement_obs = envs[idx].reset(seed_base + replacement_match_idx)
                             observations[idx] = replacement_obs
                         else:
@@ -1113,6 +1119,7 @@ class SelfPlayTrainer:
                         self.league.record_training_match(env_opponents[env_idx], learner_score)
                     self._assign_env_opponent(env_idx, env_opponents, current_checkpoint)
                     env_latest_info[env_idx] = None
+                    self.envs[env_idx].set_training_progress(self._training_progress())
                     next_obs = self.envs[env_idx].reset(
                         self.cfg.runtime.seed + self.global_step + t * num_envs + env_idx + 1
                     )
@@ -1285,6 +1292,7 @@ class SelfPlayTrainer:
         opponent = self.league.sample_opponent(current_checkpoint)
         env_opponents[env_idx] = opponent
         env = self.envs[env_idx]
+        env.set_training_progress(self._training_progress())
         if opponent is None:
             env.set_opponent_profile(None)
             return
@@ -1338,6 +1346,9 @@ class SelfPlayTrainer:
             if progress + 1e-9 >= threshold:
                 disabled.add(arbiter)
         return disabled
+
+    def _training_progress(self) -> float:
+        return float(np.clip(self.global_step / max(1, self.cfg.runtime.total_steps), 0.0, 1.0))
 
     def _refresh_league_baseline_phaseout(self, force_log: bool = False) -> None:
         disabled = self._phaseout_disabled_arbiters()

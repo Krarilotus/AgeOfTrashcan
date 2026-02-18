@@ -16,6 +16,20 @@ export function countLegal(mask: number[]): number {
   return mask.reduce((total, item) => total + (item > 0 ? 1 : 0), 0);
 }
 
+function readStrictCurrentAgeUnitsFlag(): boolean {
+  try {
+    const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+    const raw = env?.ML_STRICT_CURRENT_AGE_UNITS;
+    if (typeof raw !== 'string') return false;
+    const key = raw.trim().toLowerCase();
+    return key === '1' || key === 'true' || key === 'yes' || key === 'on';
+  } catch {
+    return false;
+  }
+}
+
+const STRICT_CURRENT_AGE_UNITS = readStrictCurrentAgeUnitsFlag();
+
 function discountedEnemyCost(
   difficulty: GameStateSnapshot['difficulty'],
   baseCost: number,
@@ -50,7 +64,12 @@ export function buildLegalActionMask(state: GameStateSnapshot): MLLegalActionMas
     if (!unit) return 0;
     if (!canQueueMore) return 0;
     if (!canRecruitByCap) return 0;
-    if ((unit.age ?? 1) > state.enemyAge) return 0;
+    const unitAge = unit.age ?? 1;
+    if (STRICT_CURRENT_AGE_UNITS) {
+      if (unitAge !== state.enemyAge) return 0;
+    } else if (unitAge > state.enemyAge) {
+      return 0;
+    }
     const goldCost = discountedEnemyCost(state.difficulty, unit.cost, 'unit');
     const manaCost = unit.manaCost ?? 0;
     if (state.enemyGold < goldCost) return 0;

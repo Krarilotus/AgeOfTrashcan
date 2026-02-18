@@ -46,6 +46,9 @@ class SelfPlayEnv(ABC):
     def set_opponent_profile(self, profile: Dict[str, float | str] | None) -> None:
         del profile
 
+    def set_training_progress(self, progress: float) -> None:
+        del progress
+
     def export_runtime_state(self) -> Dict[str, object] | None:
         return None
 
@@ -889,6 +892,12 @@ class GameBridgeEnv(SelfPlayEnv):
         if profile is not None:
             payload["profile"] = profile
         self._request(payload, timeout_s=10.0)
+
+    def set_training_progress(self, progress: float) -> None:
+        self._request(
+            {"cmd": "set_training_progress", "progress": float(progress)},
+            timeout_s=10.0,
+        )
 
     def export_runtime_state(self) -> Dict[str, object] | None:
         response = self._request({"cmd": "get_env_state"}, timeout_s=20.0)

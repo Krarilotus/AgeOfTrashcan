@@ -44,6 +44,7 @@ just train-quick10
 just train-mid
 just train-overnight
 just serve-inference
+just serve-inference-cuda
 just clean-checkpoints
 just sync-checkpoints
 ```
@@ -60,7 +61,8 @@ ENV_BACKEND=game just train-quick10
 ENV_BACKEND=game SMART_ENV_AUTOSCALE=1 just train-mid
 ENV_BACKEND=game SMART_ENV_AUTOSCALE=1 just train
 ENV_BACKEND=game SMART_ENV_AUTOSCALE=1 MODEL_PRESET=large just train
-DEVICE=cuda just serve-inference
+just serve-inference
+just serve-inference-cuda
 HOST=0.0.0.0 PORT=8765 DEVICE=cpu just serve-inference-public
 CHECKPOINT=checkpoints/my_experiment/latest.pt ADDITIONAL_STEPS=2000000 just train-resume
 CHECKPOINT=checkpoints/my_experiment/latest.pt TOTAL_STEPS=12000000 just train-resume-to
@@ -83,7 +85,9 @@ Important usage note for Git Bash:
 - Non-resume training runs are clean by default: if `RUN_NAME` already exists, that run directory is deleted first.
 - `just train-quick10` is a tiny-network, short-step sanity probe for behavior checks before overnight runs.
 - `just train-mid` is a mid-large preset (`d_model=288`, `layers=9`, `heads=9`, `ffn=1152`) for shorter, stronger runs than `base`.
-- `just serve-inference` binds local-only (`127.0.0.1`) by default; `just serve-inference-public` binds `0.0.0.0` for LAN/server use.
+- `just serve-inference` binds local-only (`127.0.0.1`) and defaults to `DEVICE=cpu`.
+- `just serve-inference-cuda` binds local-only (`127.0.0.1`) and defaults to `DEVICE=cuda`.
+- `just serve-inference-public` binds `0.0.0.0` for LAN/server use and defaults to `DEVICE=cpu`.
 - Reward shaping defaults are loaded from `ml/reward_profile.json`; detailed explanation is in `ml/REWARD_SHAPING.md`.
   - To disable profile loading and use only CLI/`just` reward args, pass `--reward-profile ""`.
 
@@ -115,11 +119,18 @@ UI registry (`assets/ml/checkpoints/index.json`) now includes:
 
 `SMART_ML` can run live checkpoint inference through the HTTP inference server.
 
+Run server (local CPU, default):
+
+```bash
+cd ml
+just serve-inference
+```
+
 Run server (local GPU):
 
 ```bash
 cd ml
-DEVICE=cuda just serve-inference
+just serve-inference-cuda
 ```
 
 If your training checkpoints are on a different root (for example `S:/AgeOfTrashcan/checkpoints`), point both registry sync and inference to that root:
@@ -127,7 +138,8 @@ If your training checkpoints are on a different root (for example `S:/AgeOfTrash
 ```bash
 cd ml
 CHECKPOINTS_DIR='S:/AgeOfTrashcan/checkpoints' just sync-checkpoints
-CHECKPOINTS_DIR='S:/AgeOfTrashcan/checkpoints' DEVICE=cuda just serve-inference
+CHECKPOINTS_DIR='S:/AgeOfTrashcan/checkpoints' just serve-inference
+CHECKPOINTS_DIR='S:/AgeOfTrashcan/checkpoints' just serve-inference-cuda
 ```
 
 Run server (Debian/CPU):

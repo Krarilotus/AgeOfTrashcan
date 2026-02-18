@@ -29,11 +29,19 @@ install-torch-cuda: _guard-git-bash
 
 serve-inference: _guard-git-bash
   if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
-  {{python_cmd}} -m selfplay.inference_server --host "${HOST:-127.0.0.1}" --port "${PORT:-8765}" --device "${DEVICE:-auto}" --checkpoints-dir "${CHECKPOINTS_DIR:-checkpoints}" --max-loaded "${MAX_LOADED:-3}" ${ALLOW_ABSOLUTE:+--allow-absolute-checkpoints}
+  {{python_cmd}} -m selfplay.inference_server --host "${HOST:-127.0.0.1}" --port "${PORT:-8765}" --device "${DEVICE:-cpu}" --checkpoints-dir "${CHECKPOINTS_DIR:-checkpoints}" --max-loaded "${MAX_LOADED:-3}" ${ALLOW_ABSOLUTE:+--allow-absolute-checkpoints}
+
+serve-inference-cuda: _guard-git-bash
+  if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
+  {{python_cmd}} -m selfplay.inference_server --host "${HOST:-127.0.0.1}" --port "${PORT:-8765}" --device "${DEVICE:-cuda}" --checkpoints-dir "${CHECKPOINTS_DIR:-checkpoints}" --max-loaded "${MAX_LOADED:-3}" ${ALLOW_ABSOLUTE:+--allow-absolute-checkpoints}
 
 serve-inference-public: _guard-git-bash
   if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi
-  {{python_cmd}} -m selfplay.inference_server --host "${HOST:-0.0.0.0}" --port "${PORT:-8765}" --device "${DEVICE:-auto}" --checkpoints-dir "${CHECKPOINTS_DIR:-checkpoints}" --max-loaded "${MAX_LOADED:-3}" ${ALLOW_ABSOLUTE:+--allow-absolute-checkpoints}
+  {{python_cmd}} -m selfplay.inference_server --host "${HOST:-0.0.0.0}" --port "${PORT:-8765}" --device "${DEVICE:-cpu}" --checkpoints-dir "${CHECKPOINTS_DIR:-checkpoints}" --max-loaded "${MAX_LOADED:-3}" ${ALLOW_ABSOLUTE:+--allow-absolute-checkpoints}
+
+play: _guard-git-bash
+  cd ..
+  npm run dev
 
 sync-checkpoints: _guard-git-bash
   if [ -z "{{python_cmd}}" ]; then echo "Python not found in PATH (tried: python, python3, py)."; exit 127; fi

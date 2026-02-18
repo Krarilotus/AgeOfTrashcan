@@ -13,7 +13,14 @@ import {
 import { MLHistoryBuffer } from '../../src/ai/ml/historyBuffer';
 import { buildLegalActionMask } from '../../src/ai/ml/legalActionMask';
 import { encodeObservation } from '../../src/ai/ml/observationEncoder';
-import { BASE_CONFIG, INCOME_CONFIG, type GameDifficulty } from '../../src/config/gameBalance';
+import {
+  BASE_CONFIG,
+  INCOME_CONFIG,
+  PROGRESSION_CONFIG,
+  getGoldIncome,
+  getManaGeneration,
+  type GameDifficulty,
+} from '../../src/config/gameBalance';
 import { getTurretEngineDef } from '../../src/config/turrets';
 
 type Owner = 'PLAYER' | 'ENEMY';
@@ -97,6 +104,7 @@ type BridgeCommand =
         defense?: number;
       };
     }
+  | { cmd: 'set_training_progress'; progress?: number }
   | { cmd: 'get_env_state' }
   | { cmd: 'set_env_state'; state?: Record<string, unknown> }
   | { cmd: 'close' }
@@ -199,6 +207,41 @@ const DEFAULT_REWARD_PROFILE: RewardProfileResolved = {
   terminalWin: 40.0,
   terminalLoss: -40.0,
   timeoutLoss: -40.0,
+};
+
+const AGE_START_MIX_END_PROGRESS = 0.5;
+const AGE_START_PHASEOUT_END_PROGRESS = 0.8;
+
+interface CurriculumStartPreset {
+  age: number;
+  gold: number;
+  mana: number;
+  manaLevel: number;
+  turretSlotsUnlocked: number;
+  mountedTurrets: string[];
+}
+
+const AGE_START_PRESETS: Record<number, CurriculumStartPreset> = {
+  1: { age: 1, gold: BASE_CONFIG.startingGold, mana: BASE_CONFIG.startingMana, manaLevel: 0, turretSlotsUnlocked: 1, mountedTurrets: [] },
+  2: { age: 2, gold: 400, mana: 0, manaLevel: 1, turretSlotsUnlocked: 1, mountedTurrets: ['chicken_eggomat'] },
+  3: { age: 3, gold: 600, mana: 0, manaLevel: 2, turretSlotsUnlocked: 1, mountedTurrets: ['sunspike_ballista'] },
+  4: { age: 4, gold: 800, mana: 100, manaLevel: 3, turretSlotsUnlocked: 2, mountedTurrets: ['thunder_javelin'] },
+  5: {
+    age: 5,
+    gold: 1000,
+    mana: 300,
+    manaLevel: 5,
+    turretSlotsUnlocked: 2,
+    mountedTurrets: ['boiling_pot', 'suppressor_nest'],
+  },
+  6: {
+    age: 6,
+    gold: 2000,
+    mana: 500,
+    manaLevel: 8,
+    turretSlotsUnlocked: 3,
+    mountedTurrets: ['shock_mortar', 'lightning_rod'],
+  },
 };
 
 function finiteOr(value: unknown, fallback: number): number {
@@ -324,6 +367,7 @@ class BridgeRuntime {
   private discoveredUnitTypes = new Set<string>();
   private discoveredTurretTypes = new Set<string>();
   private discoveryBudgetRemaining = 0;
+  private trainingProgress = 0;
 
   init(command: Extract<BridgeCommand, { cmd: 'init' }>): Record<string, unknown> {
     this.staticDim = Math.max(1, command.model.static_dim ?? this.staticDim);
@@ -410,6 +454,13 @@ class BridgeRuntime {
     };
   }
 
+  setTrainingProgress(command: Extract<BridgeCommand, { cmd: 'set_training_progress' }>): Record<string, unknown> {
+    const raw = command.progress;
+    const parsed = typeof raw === 'number' && Number.isFinite(raw) ? raw : this.trainingProgress;
+    this.trainingProgress = clamp(parsed, 0, 1);
+    return { ok: true, training_progress: this.trainingProgress };
+  }
+
   reset(command: Extract<BridgeCommand, { cmd: 'reset' }>): Record<string, unknown> {
     this.ownBaseMilestonesAwarded.clear();
     this.opponentBaseMilestonesAwarded.clear();
@@ -448,6 +499,8 @@ class BridgeRuntime {
     this.engine.setAIDecisionEnabled('ENEMY', false);
     this.engine.setAIDecisionEnabled('PLAYER', !this.opponentUseMockRandom);
     this.engine.startHeadless();
+    const startAge = this.sampleStartAge(command.seed);
+    this.applyCurriculumStartPreset(startAge);
     this.mockRandomWaitStepsRemaining = 0;
     this.history.reset();
     const snapshot = this.engine.getAISnapshot('ENEMY');
@@ -637,6 +690,7 @@ class BridgeRuntime {
           discoveredUnitTypes: Array.from(this.discoveredUnitTypes),
           discoveredTurretTypes: Array.from(this.discoveredTurretTypes),
           discoveryBudgetRemaining: this.discoveryBudgetRemaining,
+          trainingProgress: this.trainingProgress,
         },
       },
     };
@@ -704,6 +758,7 @@ class BridgeRuntime {
         0,
         Number(runtime.discoveryBudgetRemaining ?? this.discoveryBudgetRemaining)
       );
+      this.trainingProgress = clamp(Number(runtime.trainingProgress ?? this.trainingProgress), 0, 1);
       this.rewardProfile = mergeRewardProfile(runtime.rewardProfile ?? this.rewardProfile);
 
       this.ownBaseMilestonesAwarded.clear();
@@ -1052,6 +1107,112 @@ class BridgeRuntime {
     return reward;
   }
 
+  private sampleStartAge(seed: number): number {
+    const progress = clamp(this.trainingProgress, 0, 1);
+    if (progress >= AGE_START_PHASEOUT_END_PROGRESS) return 1;
+    const rng = this.seededRandom(seed ^ 0x517cc1b7);
+    if (progress <= AGE_START_MIX_END_PROGRESS) {
+      return 1 + Math.floor(rng() * 6);
+    }
+    const mix = clamp(
+      (progress - AGE_START_MIX_END_PROGRESS) /
+        Math.max(1e-6, AGE_START_PHASEOUT_END_PROGRESS - AGE_START_MIX_END_PROGRESS),
+      0,
+      1
+    );
+    const age1Prob = (1 / 6) + mix * (5 / 6);
+    const otherProb = (1 - age1Prob) / 5;
+    const probs = [age1Prob, otherProb, otherProb, otherProb, otherProb, otherProb];
+    let roll = rng();
+    for (let idx = 0; idx < probs.length; idx++) {
+      roll -= probs[idx] ?? 0;
+      if (roll <= 0) return idx + 1;
+    }
+    return 1;
+  }
+
+  private applyCurriculumStartPreset(startAge: number): void {
+    if (!this.engine) return;
+    const preset = AGE_START_PRESETS[startAge] ?? AGE_START_PRESETS[1];
+    if (!preset || preset.age <= 1) return;
+    const savePayload = this.engine.exportSerializableState() as Record<string, unknown>;
+    const rawState = savePayload.state;
+    if (!rawState || typeof rawState !== 'object') return;
+    const state = rawState as Record<string, any>;
+
+    this.applyPresetToSide(state, 'player', preset);
+    this.applyPresetToSide(state, 'enemy', preset);
+
+    const maxAge = Math.max(
+      Number(state.progression?.player?.age) || 1,
+      Number(state.progression?.enemy?.age) || 1
+    );
+    const expansionFactor = 1 + maxAge * 0.2;
+    if (state.battlefield && typeof state.battlefield === 'object') {
+      state.battlefield.playerHalfWidth = 30 * expansionFactor;
+      state.battlefield.enemyHalfWidth = 30 * expansionFactor;
+      state.battlefield.width = state.battlefield.playerHalfWidth + state.battlefield.enemyHalfWidth;
+    }
+
+    const imported = this.engine.importSerializableState(savePayload);
+    if (!imported) {
+      console.warn(
+        `[bridge] failed to apply curriculum start preset age=${preset.age}; keeping default age-1 reset`
+      );
+      return;
+    }
+    this.engine.setAIDecisionEnabled('ENEMY', false);
+    this.engine.setAIDecisionEnabled('PLAYER', !this.opponentUseMockRandom);
+  }
+
+  private applyPresetToSide(
+    state: Record<string, any>,
+    sideKey: 'player' | 'enemy',
+    preset: CurriculumStartPreset
+  ): void {
+    const progression = state.progression?.[sideKey];
+    const economy = state.economy?.[sideKey];
+    const baseKey = sideKey === 'player' ? 'playerBase' : 'enemyBase';
+    const base = state[baseKey];
+    if (!progression || !economy || !base) return;
+
+    const targetAge = clamp(Math.floor(preset.age), 1, PROGRESSION_CONFIG.maxAge);
+    const targetManaLevel = Math.max(0, Math.floor(preset.manaLevel));
+
+    progression.age = targetAge;
+    progression.manaGenerationLevel = targetManaLevel;
+
+    economy.gold = Math.max(0, preset.gold);
+    economy.mana = Math.max(0, preset.mana);
+    const baseGoldIncome = Number(economy.goldIncomePerSec) || INCOME_CONFIG.baseGoldPerSecond;
+    const ageIncomeRatio = getGoldIncome(targetAge) / Math.max(1e-6, getGoldIncome(1));
+    economy.goldIncomePerSec = baseGoldIncome * ageIncomeRatio;
+    economy.manaIncomePerSec = getManaGeneration(targetManaLevel);
+
+    const unlockedSlots = clamp(Math.floor(preset.turretSlotsUnlocked), 1, 4);
+    base.turretSlotsUnlocked = unlockedSlots;
+    const slots = Array.isArray(base.turretSlots) ? base.turretSlots : [];
+    while (slots.length < 4) {
+      slots.push({ slotIndex: slots.length, turretId: null, cooldownRemaining: 0 });
+    }
+    for (let idx = 0; idx < 4; idx++) {
+      const slot = slots[idx] ?? { slotIndex: idx, turretId: null, cooldownRemaining: 0 };
+      slot.slotIndex = idx;
+      slot.cooldownRemaining = 0;
+      slot.turretId = null;
+      slots[idx] = slot;
+    }
+    for (let idx = 0; idx < Math.min(unlockedSlots, preset.mountedTurrets.length); idx++) {
+      slots[idx].turretId = preset.mountedTurrets[idx] ?? null;
+    }
+    base.turretSlots = slots;
+
+    const baseHealth = Math.max(1, Number(base.maxHealth) || Number(base.health) || BASE_CONFIG.baseHealth);
+    const ageHealthMultiplier = Math.pow(PROGRESSION_CONFIG.ageBaseHealthMultiplier, targetAge - 1);
+    base.maxHealth = baseHealth * ageHealthMultiplier;
+    base.health = base.maxHealth;
+  }
+
   private pickOpponentDifficulty(seed: number): GameDifficulty {
     if (this.opponentUseMockRandom) {
       return this.opponentDifficulty;
@@ -1155,6 +1316,7 @@ function handle(command: BridgeCommand): Record<string, unknown> {
   if (command.cmd === 'ping') return { ok: true, pong: true };
   if (command.cmd === 'init') return runtime.init(command);
   if (command.cmd === 'set_opponent_profile') return runtime.setOpponentProfile(command);
+  if (command.cmd === 'set_training_progress') return runtime.setTrainingProgress(command);
   if (command.cmd === 'reset') return runtime.reset(command);
   if (command.cmd === 'step') return runtime.step(command);
   if (command.cmd === 'get_env_state') return runtime.getEnvState();

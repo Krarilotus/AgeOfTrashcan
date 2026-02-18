@@ -1,5 +1,6 @@
 import type { GameStateSnapshot } from '../AIBehavior';
 import { MAX_TURRET_SLOTS } from '../../config/turrets';
+import { UNIT_DEFS } from '../../config/units';
 import { ML_ACTION_TYPES, ML_TURRET_IDS, ML_UNIT_IDS, getActionTypeIndex, getTurretIndex, getUnitIndex, normalizeDiscreteIndex } from './actionCatalog';
 import type { MLHistoryToken } from './historyBuffer';
 import { countLegal, type MLLegalActionMask } from './legalActionMask';
@@ -41,6 +42,31 @@ function meanFromTotal(total: number, count: number): number {
   return total / count;
 }
 
+function encodeAbilityType(type: string | undefined): number {
+  if (type === 'direct') return 0.2;
+  if (type === 'aoe') return 0.4;
+  if (type === 'flamethrower') return 0.6;
+  if (type === 'heal') return 0.8;
+  return 0;
+}
+
+function estimateMandatoryStateTokenCount(state: GameStateSnapshot): number {
+  const ownTurretSlots = Math.max(0, Math.min(MAX_TURRET_SLOTS, state.enemyTurretSlotsUnlocked));
+  const opponentTurretSlots = Math.max(0, Math.min(MAX_TURRET_SLOTS, state.playerTurretSlotsUnlocked));
+  const presentUnits = Math.max(0, state.enemyUnits.length) + Math.max(0, state.playerUnits.length);
+  const availableUnits = ML_UNIT_IDS.reduce((total, unitId) => {
+    const unit = UNIT_DEFS[unitId];
+    if (!unit) return total;
+    return (unit.age ?? 1) <= state.enemyAge ? total + 1 : total;
+  }, 0);
+
+  // 3 catalog tokens per unlocked unit:
+  // - recruit stats + affordability
+  // - skill payload
+  // - special ability payload
+  return ownTurretSlots + opponentTurretSlots + presentUnits + availableUnits * 3;
+}
+
 function encodeHistoryToken(token: MLHistoryToken): number[] {
   const actorNorm =
     token.actor === 'PLAYER' ? 1 / 3 : token.actor === 'ENEMY' ? 2 / 3 : 1;
@@ -71,6 +97,12 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
   const width = Math.max(1, state.battlefieldWidth);
   const opponentBaseX = Number.isFinite(state.playerBaseX) ? state.playerBaseX : 0;
   const ownBaseX = Number.isFinite(state.enemyBaseX) ? state.enemyBaseX : width;
+  const unitDiagById = new Map((state.unitCatalogDiagnostics ?? []).map((item) => [item.unitId, item]));
+  const availableUnitIds = ML_UNIT_IDS.filter((unitId) => {
+    const def = UNIT_DEFS[unitId];
+    if (!def) return false;
+    return (def.age ?? 1) <= state.enemyAge;
+  });
   const pushToken = (token: number[]): boolean => {
     if (tokens.length >= maxTokens) return false;
     const clamped = new Array<number>(token.length);
@@ -175,6 +207,64 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
     ]);
   });
 
+  // Explicit per-unit-option catalog tokens so policy receives full buy-option stats/abilities,
+  // not only aggregated availability counters.
+  availableUnitIds.forEach((unitId) => {
+    const def = UNIT_DEFS[unitId];
+    if (!def) return;
+    const diag = unitDiagById.get(unitId);
+    const manaCost = def.manaCost ?? 0;
+    const skill = def.skill;
+
+    // Unit recruit token: raw recruit stats + affordability blockers.
+    pushToken([
+      0.88,
+      normalizeDiscreteIndex(getUnitIndex(unitId), ML_UNIT_IDS.length),
+      diag?.legalNow ? 1 : 0,
+      normalize(diag?.goldCost ?? def.cost, 1500),
+      normalize(diag?.manaCost ?? manaCost, 800),
+      normalize(diag?.goldShortfall ?? Math.max(0, (diag?.goldCost ?? def.cost) - state.enemyGold), 1500),
+      normalize(diag?.manaShortfall ?? Math.max(0, (diag?.manaCost ?? manaCost) - state.enemyMana), 800),
+      normalize(def.health, 2500),
+      normalize(def.damage, 400),
+      normalize(def.range ?? 1, 60),
+      normalize(def.speed, 30),
+      encodeAbilityType(skill?.type),
+    ]);
+
+    // Skill payload token.
+    pushToken([
+      0.89,
+      normalizeDiscreteIndex(getUnitIndex(unitId), ML_UNIT_IDS.length),
+      encodeAbilityType(skill?.type),
+      normalize(skill?.manaCost ?? 0, 250),
+      normalize(skill?.cooldownMs ?? 0, 30000),
+      normalize(skill?.power ?? 0, 1000),
+      normalize(skill?.damage ?? 0, 1000),
+      normalize(skill?.radius ?? 0, 50),
+      normalize(skill?.range ?? 0, 80),
+      normalize(diag?.scorePower ?? 0, 4000),
+      skill ? 1 : 0,
+      def.manaShield ? 1 : 0,
+    ]);
+
+    // Special ability payload token (burst, teleporter, mana leech).
+    pushToken([
+      0.90,
+      normalizeDiscreteIndex(getUnitIndex(unitId), ML_UNIT_IDS.length),
+      normalize(def.burstFire?.shots ?? 0, 64),
+      normalize(def.burstFire?.burstCooldown ?? 0, 10000),
+      normalize(def.teleporter?.damageReduction ?? 0, 1),
+      normalize(def.teleporter?.healPerSecond ?? 0, 100),
+      normalize(def.teleporter?.manaPerAttack ?? 0, 100),
+      normalize(def.teleporter?.attackCooldown ?? 0, 10000),
+      def.teleporter?.canAttackBase ? 1 : 0,
+      normalize(def.manaLeech ?? 0, 1),
+      normalize(def.trainingMs ?? 0, 12000),
+      normalize(def.visualScale ?? 1, 4),
+    ]);
+  });
+
   const projectiles = state.projectiles ?? [];
   const ownProjectiles: typeof projectiles = [];
   const opponentProjectiles: typeof projectiles = [];
@@ -200,35 +290,43 @@ function encodeCurrentStateTokens(state: GameStateSnapshot, maxTokens: number): 
   const perGroupBudget = Math.max(0, Math.floor(remainingBudget / 4));
   const leftoverBudget = Math.max(0, remainingBudget - perGroupBudget * 4);
 
-  pushTokenLimited(ownProjectiles, perGroupBudget + leftoverBudget, (projectile) => [
-    0.36,
-    projectile.hasDroneGuidance ? 0.75 : projectile.isFalling ? 0.5 : 0.25,
-    normalize(projectile.damage, 600),
-    normalize(projectile.splashRadius, 15),
-    normalize(projectile.x, width),
-    normalize(projectile.y, 20),
-    normalize(projectile.vx, 80),
-    normalize(projectile.lifeMs, 6000),
-    normalize(projectile.vy, 80),
-    normalize(projectile.targetY ?? 0, 20),
-    normalize(projectile.remainingPierces ?? 0, 5),
-    0,
-  ]);
+  pushTokenLimited(ownProjectiles, perGroupBudget + leftoverBudget, (projectile) => {
+    const targetY = (projectile as { targetY?: number }).targetY ?? 0;
+    const remainingPierces = (projectile as { remainingPierces?: number }).remainingPierces ?? 0;
+    return [
+      0.36,
+      projectile.hasDroneGuidance ? 0.75 : projectile.isFalling ? 0.5 : 0.25,
+      normalize(projectile.damage, 600),
+      normalize(projectile.splashRadius, 15),
+      normalize(projectile.x, width),
+      normalize(projectile.y, 20),
+      normalize(projectile.vx, 80),
+      normalize(projectile.lifeMs, 6000),
+      normalize(projectile.vy, 80),
+      normalize(targetY, 20),
+      normalize(remainingPierces, 5),
+      0,
+    ];
+  });
 
-  pushTokenLimited(opponentProjectiles, perGroupBudget, (projectile) => [
-    0.48,
-    projectile.hasDroneGuidance ? 0.75 : projectile.isFalling ? 0.5 : 0.25,
-    normalize(projectile.damage, 600),
-    normalize(projectile.splashRadius, 15),
-    normalize(projectile.x, width),
-    normalize(projectile.y, 20),
-    normalize(projectile.vx, 80),
-    normalize(projectile.lifeMs, 6000),
-    normalize(projectile.vy, 80),
-    normalize(projectile.targetY ?? 0, 20),
-    normalize(projectile.remainingPierces ?? 0, 5),
-    0,
-  ]);
+  pushTokenLimited(opponentProjectiles, perGroupBudget, (projectile) => {
+    const targetY = (projectile as { targetY?: number }).targetY ?? 0;
+    const remainingPierces = (projectile as { remainingPierces?: number }).remainingPierces ?? 0;
+    return [
+      0.48,
+      projectile.hasDroneGuidance ? 0.75 : projectile.isFalling ? 0.5 : 0.25,
+      normalize(projectile.damage, 600),
+      normalize(projectile.splashRadius, 15),
+      normalize(projectile.x, width),
+      normalize(projectile.y, 20),
+      normalize(projectile.vx, 80),
+      normalize(projectile.lifeMs, 6000),
+      normalize(projectile.vy, 80),
+      normalize(targetY, 20),
+      normalize(remainingPierces, 5),
+      0,
+    ];
+  });
 
   pushTokenLimited(ownEffects, perGroupBudget, (effect) => [
     0.60,
@@ -602,15 +700,19 @@ export function encodeObservation(
   config: ObservationEncoderConfig = {}
 ): EncodedMLObservation {
   const sequenceLength = config.sequenceLength ?? 240;
-  // Preserve a guaranteed history window so the policy always sees temporal context.
-  const minHistoryTokens = Math.max(
+  // Preserve history when possible, but prioritize full tactical/raw state coverage.
+  const preferredMinHistoryTokens = Math.max(
     0,
     Math.min(
       sequenceLength,
       config.minHistoryTokens ?? Math.min(24, Math.floor(sequenceLength * 0.2))
     )
   );
-  const stateTokenBudget = Math.max(0, sequenceLength - minHistoryTokens);
+  const mandatoryStateTokens = estimateMandatoryStateTokenCount(state);
+  const stateTokenBudget = Math.max(
+    0,
+    Math.min(sequenceLength, Math.max(sequenceLength - preferredMinHistoryTokens, mandatoryStateTokens))
+  );
   const stateTokens = encodeCurrentStateTokens(state, stateTokenBudget);
   const historyBudget = Math.max(0, sequenceLength - stateTokens.length);
   const encodedTokens = historyTokens.slice(-historyBudget).map(encodeHistoryToken);
