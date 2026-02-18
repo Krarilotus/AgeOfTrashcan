@@ -30,6 +30,7 @@ import {
   QUEUE_CONFIG,
   UNIT_CAP_CONFIG,
 } from './config/gameBalance';
+import { RENDER_CONFIG } from './config/renderConfig';
 import {
   MAX_TURRET_SLOTS,
   TURRET_ENGINES,
@@ -777,9 +778,7 @@ export class GameEngine {
     // Initialize RenderSystem
     this.renderSystem = new RenderSystem(ctx, canvas, this.unitSprites);
 
-    // Set fixed canvas size - battlefield expansion handled via coordinate mapping
-    canvas.width = 1200;
-    canvas.height = 450;
+    this.syncCanvasSizeToBattlefield();
     console.log("Canvas size set to", canvas.width, "x", canvas.height);
 
     // Load SVG sprites (await so they are ready before gameplay)
@@ -1523,7 +1522,28 @@ export class GameEngine {
 
   private render(): void {
     if (this.renderSystem) {
+      this.syncCanvasSizeToBattlefield();
       this.renderSystem.render(this.state);
+    }
+  }
+
+  private syncCanvasSizeToBattlefield(): void {
+    if (!this.canvas) return;
+
+    const baselineWidthUnits = RENDER_CONFIG.BATTLEFIELD.BASE_WIDTH_UNITS;
+    const baselineCanvasWidthPx = RENDER_CONFIG.BATTLEFIELD.BASE_CANVAS_WIDTH_PX;
+    const baselineCanvasHeightPx = RENDER_CONFIG.BATTLEFIELD.BASE_CANVAS_HEIGHT_PX;
+    const battlefieldWidthUnits = Math.max(1, this.state.battlefield.width);
+    const targetWidth = Math.max(
+      baselineCanvasWidthPx,
+      Math.round((battlefieldWidthUnits / baselineWidthUnits) * baselineCanvasWidthPx)
+    );
+
+    if (this.canvas.width !== targetWidth) {
+      this.canvas.width = targetWidth;
+    }
+    if (this.canvas.height !== baselineCanvasHeightPx) {
+      this.canvas.height = baselineCanvasHeightPx;
     }
   }
 

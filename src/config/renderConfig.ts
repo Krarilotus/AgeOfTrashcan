@@ -13,6 +13,17 @@ export const RENDER_CONFIG = {
   // Default canvas dimensions (can be responsive, but these are base aspect ratios)
   DEFAULT_WIDTH: 800,
   DEFAULT_HEIGHT: 600,
+
+  // Horizontal battlefield viewport/canvas sizing.
+  BATTLEFIELD: {
+    // Baseline battlefield width used by the current gameplay rules (30 + 30 units).
+    BASE_WIDTH_UNITS: 60,
+    // Initial in-game canvas size for this baseline width.
+    BASE_CANVAS_WIDTH_PX: 1200,
+    BASE_CANVAS_HEIGHT_PX: 450,
+    // Render a bit beyond each base so edge-anchored bases are fully visible.
+    EDGE_PADDING_UNITS: 3,
+  },
   
   // Lane positions (relative to canvas height or absolute)
   LANE_Y_OFFSET: 0, // Vertical offset for lanes

@@ -1,5 +1,5 @@
 import { GameState, Entity, Projectile } from '../GameEngine';
-import { MANA_POOL_VISUALS, TURRET_VISUALS, pixelsToUnits, unitsToPixels } from '../config/renderConfig';
+import { MANA_POOL_VISUALS, RENDER_CONFIG, TURRET_VISUALS, unitsToPixels } from '../config/renderConfig';
 import { UNIT_DEFS } from '../config/units';
 import {
   MAX_TURRET_SLOTS,
@@ -72,6 +72,19 @@ export class RenderSystem {
     }
   }
 
+  private worldToScreenX(worldX: number, battlefieldWidth: number): number {
+    const edgePaddingUnits = RENDER_CONFIG.BATTLEFIELD.EDGE_PADDING_UNITS;
+    const worldMinX = -edgePaddingUnits;
+    const worldSpan = battlefieldWidth + edgePaddingUnits * 2;
+    return ((worldX - worldMinX) / worldSpan) * this.canvas.width;
+  }
+
+  private worldUnitsToScreenX(worldUnits: number, battlefieldWidth: number): number {
+    const edgePaddingUnits = RENDER_CONFIG.BATTLEFIELD.EDGE_PADDING_UNITS;
+    const worldSpan = battlefieldWidth + edgePaddingUnits * 2;
+    return (worldUnits / worldSpan) * this.canvas.width;
+  }
+
   public render(state: GameState): void {
     if (!this.ctx || !this.canvas) return;
 
@@ -142,7 +155,7 @@ export class RenderSystem {
     battlefieldWidth: number,
     vfx: GameState['vfx']
   ): void {
-    const x = (base.x / battlefieldWidth) * this.canvas.width;
+    const x = this.worldToScreenX(base.x, battlefieldWidth);
     const y = this.canvas.height / 2;
     
     const turretSlotsUnlocked = Math.max(1, Math.min(MAX_TURRET_SLOTS, base.turretSlotsUnlocked ?? 1));
@@ -321,7 +334,7 @@ export class RenderSystem {
         this.ctx.fill();
       }
 
-      const rangePixels = (engineDef.range / battlefieldWidth) * this.canvas.width;
+      const rangePixels = this.worldUnitsToScreenX(engineDef.range, battlefieldWidth);
       this.ctx.strokeStyle = isPlayer ? 'rgba(96, 165, 250, 0.18)' : 'rgba(248, 113, 113, 0.18)';
       this.ctx.lineWidth = 1.5;
       this.ctx.setLineDash([4, 4]);
@@ -385,7 +398,7 @@ export class RenderSystem {
   }
 
   private drawUnit(entity: Entity, battlefieldWidth: number): void {
-    const x = (entity.transform.x / battlefieldWidth) * this.canvas.width;
+    const x = this.worldToScreenX(entity.transform.x, battlefieldWidth);
     const y = this.canvas.height / 2 + (entity.transform.laneY * 15);
 
     const sprite = this.unitSprites.get(entity.unitId);
@@ -418,7 +431,7 @@ export class RenderSystem {
     for (const p of projectiles) {
       if (p.delayMs && p.delayMs > 0) continue; // Skip if delayed
 
-      const x = (p.x / battlefieldWidth) * this.canvas.width;
+      const x = this.worldToScreenX(p.x, battlefieldWidth);
       const baselineY = this.canvas.height / 2;
       const y = baselineY - unitsToPixels(p.y); // Use helper
 
@@ -562,7 +575,7 @@ export class RenderSystem {
 
   private drawVFX(state: GameState, battlefieldWidth: number): void {
     for (const vfx of state.vfx) {
-      const x = (vfx.x / battlefieldWidth) * this.canvas.width;
+      const x = this.worldToScreenX(vfx.x, battlefieldWidth);
       const y = this.canvas.height / 2 + (vfx.y * 15);
       const alpha = Math.max(
         0,
@@ -608,7 +621,7 @@ export class RenderSystem {
                 this.ctx.beginPath();
                 
                 for (const targetPos of vfx.data.targetPositions) {
-                    const tx = (targetPos.x / battlefieldWidth) * this.canvas.width;
+                    const tx = this.worldToScreenX(targetPos.x, battlefieldWidth);
                     const ty = this.canvas.height / 2 + (targetPos.y * 15);
                     
                     // Draw jagged line for lightning
@@ -662,7 +675,7 @@ export class RenderSystem {
             const tailProgress = Math.max(0, travelProgress - trailLength);
 
             for (const targetPos of vfx.data.targetPositions) {
-                const tx = (targetPos.x / battlefieldWidth) * this.canvas.width;
+                const tx = this.worldToScreenX(targetPos.x, battlefieldWidth);
                 const ty = this.canvas.height / 2 + (targetPos.y * 15);
 
                 const headX = startX + (tx - startX) * travelProgress;
@@ -699,9 +712,9 @@ export class RenderSystem {
             const startUnitsY = vfx.data?.startY ?? vfx.y;
             const endUnitsX = vfx.data?.endX ?? vfx.x;
             const endUnitsY = vfx.data?.endY ?? vfx.y;
-            const startX = (startUnitsX / battlefieldWidth) * this.canvas.width;
+            const startX = this.worldToScreenX(startUnitsX, battlefieldWidth);
             const startY = this.canvas.height / 2 + (startUnitsY * 15);
-            const endX = (endUnitsX / battlefieldWidth) * this.canvas.width;
+            const endX = this.worldToScreenX(endUnitsX, battlefieldWidth);
             const endY = this.canvas.height / 2 + (endUnitsY * 15);
             const laneThickness = Math.max(1.3, vfx.data?.laneThickness ?? 2.2);
             const waveAmplitudePx = Math.max(3, vfx.data?.waveAmplitude ?? 7);
@@ -757,9 +770,9 @@ export class RenderSystem {
             const startUnitsY = vfx.data?.startY ?? vfx.y;
             const endUnitsX = vfx.data?.endX ?? (vfx.x + 8);
             const endUnitsY = vfx.data?.endY ?? vfx.y;
-            const startX = (startUnitsX / battlefieldWidth) * this.canvas.width;
+            const startX = this.worldToScreenX(startUnitsX, battlefieldWidth);
             const startY = this.canvas.height / 2 + (startUnitsY * 15);
-            const endX = (endUnitsX / battlefieldWidth) * this.canvas.width;
+            const endX = this.worldToScreenX(endUnitsX, battlefieldWidth);
             const endY = this.canvas.height / 2 + (endUnitsY * 15);
             const beamWidth = Math.max(1, vfx.data?.beamWidth ?? 1.8);
             const coreThickness = beamWidth * (2.2 + intensity * 4.5);
@@ -807,8 +820,8 @@ export class RenderSystem {
             const direction = vfx.data?.direction === -1 ? -1 : 1;
             const halfSpanUnits = (forwardReachUnits + backReachUnits) * 0.5;
             const forwardBiasUnits = ((forwardReachUnits - backReachUnits) * 0.5) * direction;
-            const oilRadiusPx = (halfSpanUnits / battlefieldWidth) * this.canvas.width;
-            const oilCenterX = x + (forwardBiasUnits / battlefieldWidth) * this.canvas.width;
+            const oilRadiusPx = this.worldUnitsToScreenX(halfSpanUnits, battlefieldWidth);
+            const oilCenterX = x + this.worldUnitsToScreenX(forwardBiasUnits, battlefieldWidth);
             const durationMs = Math.max(300, vfx.data?.durationMs ?? 900);
             const phase = 1 - Math.max(0, vfx.lifeMs) / durationMs;
             const splashCount = 10;
@@ -956,7 +969,7 @@ export class RenderSystem {
 
         if (vfx.data?.radius) {
             // ... (AOE rendering existing code) ...
-            const impactRadius = (vfx.data.radius / battlefieldWidth) * this.canvas.width;
+            const impactRadius = this.worldUnitsToScreenX(vfx.data.radius, battlefieldWidth);
             this.ctx.fillStyle = vfx.age <= 2 ? `rgba(255, 140, 0, ${alpha * 0.3})` : vfx.age <= 4 ? `rgba(139, 92, 246, ${alpha * 0.4})` : `rgba(0, 255, 255, ${alpha * 0.5})`;
             this.ctx.beginPath();
             this.ctx.arc(x, y, impactRadius, 0, Math.PI * 2);
@@ -1006,7 +1019,7 @@ export class RenderSystem {
       } else if (vfx.type === 'flamethrower') {
         const direction = vfx.data?.direction || 1;
         const range = vfx.data?.range || 4;
-        const screenRange = (range / battlefieldWidth) * this.canvas.width;
+        const screenRange = this.worldUnitsToScreenX(range, battlefieldWidth);
         const isDarkCultist = vfx.data?.unitId === 'dark_cultist';
         const isTurretSource = vfx.data?.sourceType === 'turret';
         const targetLaneY = isTurretSource

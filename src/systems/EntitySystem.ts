@@ -7,6 +7,13 @@ import { CombatUtils } from './CombatUtils';
 const FIXED_TIMESTEP = 1000 / 60;
 
 export class EntitySystem {
+  private static getCollisionDiameter(entity: Entity, def?: UnitDef): number {
+    const scale = def?.visualScale ?? 1.0;
+    const widthMult = def?.width ?? 1.0;
+    const isRanged = (entity.attack.range ?? 1) > 1.5;
+    const baseLegacyWidth = isRanged ? 1.2 : 2.4;
+    return baseLegacyWidth * scale * widthMult;
+  }
   
   public update(state: GameState, deltaSeconds: number, projectileSystem: any): void {
     const toRemove = new Set<number>();
@@ -28,17 +35,8 @@ export class EntitySystem {
       let blocked = false;
       let target: Entity | null = null;
       
-      // LOGICAL WIDTH / COLLISION SIZE
-      // Use configured width multiplier, applied to the calculated base width
-      // This defines how much space a unit occupies in the line
-      const scale = unitDef.visualScale ?? 1.0;
-      
       const isRanged = (entity.attack.range ?? 1) > 1.5;
-      const baseLegacyWidth = isRanged ? 1.2 : 2.4;
-      // 'width' in config is now treated as a multiplier (default 1.0)
-      const widthMult = unitDef.width ?? 1.0;
-
-      const minSpacing = baseLegacyWidth * scale * widthMult;
+      const ownCollisionHalfWidth = EntitySystem.getCollisionDiameter(entity, unitDef) * 0.5;
 
       for (const [otherId, other] of state.entities) {
         if (id === otherId) continue;
@@ -46,6 +44,8 @@ export class EntitySystem {
         // GHOST LOGIC: If either unit has width roughly 0, they do not collide
         const otherDef = UNIT_DEFS[other.unitId];
         if ((unitDef?.width ?? 1) < 0.1 || (otherDef?.width ?? 1) < 0.1) continue;
+        const otherCollisionHalfWidth = EntitySystem.getCollisionDiameter(other, otherDef) * 0.5;
+        const centeredCollisionDistance = ownCollisionHalfWidth + otherCollisionHalfWidth;
 
         const dx = other.transform.x - entity.transform.x;
         const distance = Math.abs(dx);
@@ -55,10 +55,9 @@ export class EntitySystem {
 
         // Collision with allies
         if (entity.owner === other.owner) {
-          // Prevention of stacking: Ranged units keep distance, melee can close in.
-          // Restore minSpacing (1.2 for Ranged, 2.4 for Melee) to prevent visual clipping
-          // Keep deadlock protection (dist > 0.2) for overlapping spawns
-          if (isInFront && distance < minSpacing && distance > 0.2) {
+          // Centered body collisions: each unit contributes half of its footprint.
+          // This prevents one-sided clipping from asymmetric width/scale combinations.
+          if (isInFront && distance < centeredCollisionDistance && distance > 0.2) {
             blocked = true;
           }
         } else {

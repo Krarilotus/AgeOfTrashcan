@@ -574,22 +574,56 @@ class SelfPlayTrainer:
         if matches <= 0:
             return 0.0
 
-        total_matches = int(matches)
-        benchmarks = self._resolve_eval_benchmarks()
-        if not benchmarks:
-            benchmarks = [("MOCK_RANDOM", {"difficulty": "MOCK_RANDOM"})]
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            total_matches = int(matches)
+            learner_label = self._current_eval_learner_label()
+            benchmarks = self._resolve_eval_benchmarks()
+            if not benchmarks:
+                benchmarks = [("MOCK_RANDOM", {"difficulty": "MOCK_RANDOM"})]
 
+            aggregate_wins, aggregate_losses, aggregate_draws, primary_winrate = self._evaluate_learner_suite(
+                learner_label=learner_label,
+                benchmarks=benchmarks,
+                total_matches=total_matches,
+                seed_base=int(self.cfg.runtime.seed) + 500_000,
+                source_label="current_training_policy",
+            )
+
+            aggregate_total = max(1, aggregate_wins + aggregate_losses + aggregate_draws)
+            print(
+                f"[eval-summary] wins={aggregate_wins} losses={aggregate_losses} draws={aggregate_draws} "
+                f"winrate={aggregate_wins / aggregate_total:.3f} primary_winrate={primary_winrate:.3f}"
+            )
+            self._evaluate_league_panel(
+                seed_base=int(self.cfg.runtime.seed) + 9_000_000,
+                total_matches=total_matches,
+                default_benchmarks=benchmarks,
+            )
+            return primary_winrate
+        finally:
+            if was_training:
+                self.model.train()
+
+    def _evaluate_learner_suite(
+        self,
+        learner_label: str,
+        benchmarks: List[Tuple[str, Dict[str, float | str]]],
+        total_matches: int,
+        seed_base: int,
+        source_label: str,
+    ) -> Tuple[int, int, int, float]:
         base_matches = total_matches // len(benchmarks)
         remainder = total_matches % len(benchmarks)
-        seed_base = int(self.cfg.runtime.seed) + 500_000
         aggregate_wins = 0
         aggregate_losses = 0
         aggregate_draws = 0
         primary_winrate = 0.0
-
         print(
             f"[eval-plan] total_matches={total_matches} benchmarks={len(benchmarks)} "
-            f"labels={','.join(label for label, _ in benchmarks)}"
+            f"labels={','.join(label for label, _ in benchmarks)} "
+            f"learner_source={source_label} learner={learner_label}"
         )
         for bench_idx, (label, profile) in enumerate(benchmarks):
             bench_matches = base_matches + (1 if bench_idx < remainder else 0)
@@ -601,6 +635,7 @@ class SelfPlayTrainer:
                 benchmark_profile=profile,
                 matches=bench_matches,
                 seed_base=bench_seed,
+                learner_label=learner_label,
             )
             if bench_idx == 0:
                 primary_winrate = float(result["winrate"])
@@ -608,12 +643,12 @@ class SelfPlayTrainer:
             aggregate_losses += int(result["losses"])
             aggregate_draws += int(result["draws"])
             print(
-                f"[eval-benchmark] matchup=learner_vs_{label} "
+                f"[eval-benchmark] matchup={learner_label}_vs_{label} "
                 f"matches={bench_matches} wins={int(result['wins'])} losses={int(result['losses'])} "
                 f"draws={int(result['draws'])} winrate={float(result['winrate']):.3f}"
             )
             print(
-                f"[eval-benchmark-stats] matchup=learner_vs_{label} "
+                f"[eval-benchmark-stats] matchup={learner_label}_vs_{label} "
                 f"highest_age_avg={float(result['avg_highest_age']):.2f} "
                 f"avg_game_duration={float(result['avg_game_duration_sec']):.1f}s"
                 f"({float(result['avg_game_duration_sec']) / 60.0:.2f}m) "
@@ -622,23 +657,96 @@ class SelfPlayTrainer:
                 f"highest_turret_count_avg={float(result['avg_highest_turrets']):.2f}"
             )
             print(
-                f"[eval-benchmark-units] matchup=learner_vs_{label} "
+                f"[eval-benchmark-units] matchup={learner_label}_vs_{label} "
                 f"top_units={str(result['top_units_text'])} "
                 f"strongest_tower_engines={str(result['strongest_engines_text'])}"
             )
+        return aggregate_wins, aggregate_losses, aggregate_draws, primary_winrate
 
-        aggregate_total = max(1, aggregate_wins + aggregate_losses + aggregate_draws)
-        print(
-            f"[eval-summary] wins={aggregate_wins} losses={aggregate_losses} draws={aggregate_draws} "
-            f"winrate={aggregate_wins / aggregate_total:.3f} primary_winrate={primary_winrate:.3f}"
+    def _evaluate_league_panel(
+        self,
+        seed_base: int,
+        total_matches: int,
+        default_benchmarks: List[Tuple[str, Dict[str, float | str]]],
+    ) -> None:
+        raw_panel_benchmarks = os.getenv("EVAL_LEAGUE_BENCHMARKS", "").strip()
+        panel_benchmarks = (
+            self._parse_eval_benchmarks(raw_panel_benchmarks)
+            if raw_panel_benchmarks
+            else list(default_benchmarks)
         )
-        return primary_winrate
+        if not panel_benchmarks:
+            print("[eval-league] skipped: no valid benchmarks")
+            return
+        matches_per_benchmark = max(1, int(os.getenv("EVAL_LEAGUE_MATCHES_PER_BENCHMARK", "1")))
+        per_learner_matches = matches_per_benchmark * len(panel_benchmarks)
+        budget_cap = max(0, int(total_matches))
+        if budget_cap <= 0:
+            print("[eval-league] skipped: match budget is zero")
+            return
+
+        max_learners = budget_cap // per_learner_matches
+        if max_learners <= 0:
+            print(
+                "[eval-league] skipped: insufficient budget "
+                f"(budget={budget_cap}, required_per_learner={per_learner_matches})"
+            )
+            return
+        candidates = [
+            item
+            for item in self.league.top(max_learners)
+            if isinstance(item.checkpoint_path, str) and item.checkpoint_path.strip()
+        ]
+        if not candidates:
+            print("[eval-league] skipped: no learned checkpoint candidates")
+            return
+        selected = candidates
+
+        baseline_state = {key: value.detach().cpu().clone() for key, value in self.model.state_dict().items()}
+        print(
+            f"[eval-league-plan] learners={len(selected)} derived_top_k={max_learners} "
+            f"matches_per_benchmark={matches_per_benchmark} per_learner_matches={per_learner_matches} "
+            f"budget={budget_cap} "
+            f"benchmarks={','.join(label for label, _ in panel_benchmarks)}"
+        )
+        try:
+            for learner_idx, learner in enumerate(selected):
+                checkpoint_path = Path(str(learner.checkpoint_path))
+                if not checkpoint_path.exists():
+                    print(f"[eval-league] skipped learner={learner.profile.codename}: checkpoint missing")
+                    continue
+                try:
+                    state = torch.load(checkpoint_path, map_location=self.device)
+                    model_state = state.get("model")
+                    if not isinstance(model_state, dict):
+                        print(f"[eval-league] skipped learner={learner.profile.codename}: invalid model state")
+                        continue
+                    self.model.load_state_dict(model_state, strict=False)
+                except Exception as exc:
+                    print(f"[eval-league] skipped learner={learner.profile.codename}: load failed ({exc})")
+                    continue
+
+                learner_label = self._league_entry_eval_label(learner, checkpoint_path)
+                wins, losses, draws, _ = self._evaluate_learner_suite(
+                    learner_label=learner_label,
+                    benchmarks=panel_benchmarks,
+                    total_matches=per_learner_matches,
+                    seed_base=seed_base + learner_idx * 2_000_000,
+                    source_label="league_top_checkpoint",
+                )
+                total = max(1, wins + losses + draws)
+                print(
+                    f"[eval-league-summary] learner={learner_label} "
+                    f"wins={wins} losses={losses} draws={draws} winrate={wins / total:.3f}"
+                )
+        finally:
+            self.model.load_state_dict(baseline_state, strict=False)
 
     def _resolve_eval_benchmarks(self) -> List[Tuple[str, Dict[str, float | str]]]:
-        raw = os.getenv(
-            "EVAL_BENCHMARKS",
-            "MOCK_RANDOM,MEDIUM,HARD,SMART,CHEATER",
-        )
+        raw = os.getenv("EVAL_BENCHMARKS", "MOCK_RANDOM,MEDIUM,HARD,SMART,CHEATER")
+        return self._parse_eval_benchmarks(raw)
+
+    def _parse_eval_benchmarks(self, raw: str) -> List[Tuple[str, Dict[str, float | str]]]:
         allowed = {"EASY", "MEDIUM", "HARD", "SMART", "SMART_ML", "CHEATER", "MOCK_RANDOM"}
         seen: set[str] = set()
         benchmarks: List[Tuple[str, Dict[str, float | str]]] = []
@@ -651,12 +759,19 @@ class SelfPlayTrainer:
                 benchmarks.append((label, {"difficulty": label}))
         return benchmarks
 
+    def _league_entry_eval_label(self, entry: LeagueEntry, checkpoint_path: Path) -> str:
+        codename = str(entry.profile.codename or "unknown")
+        step = int(entry.steps)
+        stem = checkpoint_path.stem
+        return f"{codename}@{step}<{stem}>"
+
     def _run_eval_benchmark(
         self,
         benchmark_label: str,
         benchmark_profile: Dict[str, float | str],
         matches: int,
         seed_base: int,
+        learner_label: str,
     ) -> Dict[str, object]:
         eval_workers = self._resolve_eval_workers(matches)
         total_matches = int(matches)
@@ -684,7 +799,7 @@ class SelfPlayTrainer:
             observations.append(obs)
 
         print(
-            f"[eval-start] matchup=learner_vs_{benchmark_label} "
+            f"[eval-start] matchup={learner_label}_vs_{benchmark_label} "
             f"matches={total_matches} workers={len(envs)}"
         )
         try:
@@ -723,7 +838,7 @@ class SelfPlayTrainer:
                             remaining = max(0, total_matches - completed)
                             eta = remaining / max(1e-6, mps)
                             print(
-                                f"[eval-progress] matchup=learner_vs_{benchmark_label} "
+                                f"[eval-progress] matchup={learner_label}_vs_{benchmark_label} "
                                 f"done={completed}/{total_matches} "
                                 f"({(completed / total_matches) * 100:.1f}%) mps={mps:.2f} "
                                 f"eta={self._format_eta(eta)}"
@@ -818,6 +933,12 @@ class SelfPlayTrainer:
             "top_units_text": top_units_text,
             "strongest_engines_text": strongest_engines_text,
         }
+
+    def _current_eval_learner_label(self) -> str:
+        profile = self.last_rollout_profile
+        archetype = str(getattr(profile, "archetype", "unknown") or "unknown")
+        codename = str(getattr(profile, "codename", "unknown") or "unknown")
+        return f"{self.run_name}@{int(self.global_step)}[{archetype}/{codename}]"
 
     def _infer_eval_outcome(
         self,
@@ -1268,7 +1389,7 @@ class SelfPlayTrainer:
             return "n/a"
         selected = roster[: max(1, top_n)]
         codename_counts: Dict[str, int] = {}
-        for item in selected:
+        for item in roster:
             codename = str(item.profile.codename or "unknown")
             codename_counts[codename] = codename_counts.get(codename, 0) + 1
         entries = []
@@ -1276,10 +1397,9 @@ class SelfPlayTrainer:
             codename = str(item.profile.codename or "unknown")
             display_name = codename
             if codename_counts.get(codename, 0) > 1:
-                if int(getattr(item, "steps", 0)) > 0:
-                    display_name = f"{codename}@{int(item.steps)}"
-                elif isinstance(getattr(item, "checkpoint_path", None), str) and item.checkpoint_path:
-                    display_name = f"{codename}@{Path(item.checkpoint_path).stem}"
+                short_tag = self._checkpoint_short_tag(item)
+                if short_tag:
+                    display_name = f"{codename}@{short_tag}"
             entries.append(
                 f"{display_name}(wr={float(item.winrate_vs_smart):.2f},elo={float(item.elo):.0f})"
             )
@@ -1290,7 +1410,7 @@ class SelfPlayTrainer:
             return "n/a"
         selected = roster[: max(1, top_n)]
         codename_counts: Dict[str, int] = {}
-        for item in selected:
+        for item in roster:
             codename = str(getattr(getattr(item, "profile", object()), "codename", "unknown") or "unknown")
             codename_counts[codename] = codename_counts.get(codename, 0) + 1
 
@@ -1299,12 +1419,29 @@ class SelfPlayTrainer:
             codename = str(getattr(getattr(item, "profile", object()), "codename", "unknown") or "unknown")
             display_name = codename
             if codename_counts.get(codename, 0) > 1:
-                steps = int(getattr(item, "steps", 0) or 0)
-                if steps > 0:
-                    display_name = f"{codename}@{steps}"
+                short_tag = self._checkpoint_short_tag(item)
+                if short_tag:
+                    display_name = f"{codename}@{short_tag}"
             winrate = float(getattr(item, "winrate_vs_smart", 0.0) or 0.0)
             entries.append(f"{display_name}:{winrate:.2f}")
         return ", ".join(entries) if entries else "n/a"
+
+    def _checkpoint_short_tag(self, item: object) -> str:
+        steps = int(getattr(item, "steps", 0) or 0)
+        if steps > 0:
+            return str(steps)
+        checkpoint_path = getattr(item, "checkpoint_path", None)
+        if isinstance(checkpoint_path, str) and checkpoint_path:
+            stem = Path(checkpoint_path).stem
+            for token in reversed(stem.split("_")):
+                numeric = token.lstrip("0")
+                if numeric.isdigit() and numeric:
+                    return numeric
+            return stem
+        difficulty = getattr(item, "difficulty", None)
+        if isinstance(difficulty, str) and difficulty:
+            return difficulty.lower()
+        return ""
 
     def _build_strategy_profile(
         self,

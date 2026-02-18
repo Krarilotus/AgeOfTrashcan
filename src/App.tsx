@@ -510,8 +510,6 @@ export default function App() {
               <canvas
                 ref={canvasRef}
                 className="block"
-                width={1200}
-                height={450}
                 style={{ imageRendering: 'crisp-edges' }}
               />
             </div>
